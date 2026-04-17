@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/types" },
+    { "path": "./packages/telemetry" },
+    { "path": "./packages/reflex" },
+    { "path": "./packages/coordinator" },
+    { "path": "./packages/reasoning" },
+    { "path": "./packages/orchestrator" },
+    { "path": "./packages/app" }
+  ]
+}

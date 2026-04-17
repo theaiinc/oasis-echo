@@ -1,0 +1,26 @@
+{
+  "name": "@oasis-echo/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "oasis-echo": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "dev": "node --import tsx src/index.ts",
+    "demo": "node --import tsx src/demo.ts",
+    "server": "node --import tsx src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@oasis-echo/coordinator": "workspace:*",
+    "@oasis-echo/orchestrator": "workspace:*",
+    "@oasis-echo/reasoning": "workspace:*",
+    "@oasis-echo/reflex": "workspace:*",
+    "@oasis-echo/telemetry": "workspace:*",
+    "@oasis-echo/types": "workspace:*"
+  }
+}

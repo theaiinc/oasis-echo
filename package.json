@@ -1,0 +1,30 @@
+{
+  "name": "oasis-echo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tiered hybrid voice AI assistant — reflex / coordinator / reasoning",
+  "packageManager": "pnpm@10.0.0",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --dry",
+    "test": "pnpm -s build && vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint 'packages/*/src/**/*.ts' 'packages/*/test/**/*.ts'",
+    "dev": "pnpm --filter @oasis-echo/app run dev",
+    "demo": "pnpm --filter @oasis-echo/app run demo",
+    "server": "pnpm --filter @oasis-echo/app run server",
+    "clean": "tsc -b --clean && pnpm -r exec rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
+  }
+}

@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>oasis-echo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #161b22;
+        --muted: #7d8590;
+        --fg: #e6edf3;
+        --accent: #58a6ff;
+        --reflex: #3fb950;
+        --local: #d29922;
+        --escalated: #f778ba;
+        --border: #30363d;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        grid-template-rows: auto 1fr auto;
+        gap: 1px;
+        height: 100vh;
+        background: var(--border);
+      }
+      header {
+        grid-column: 1 / -1;
+        padding: 12px 20px;
+        background: var(--panel);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      header h1 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: 0.05em;
+      }
+      header .session {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .col {
+        background: var(--bg);
+        overflow-y: auto;
+        padding: 16px 20px;
+      }
+      .col h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        margin: 0 0 12px 0;
+        font-weight: 600;
+      }
+      footer {
+        grid-column: 1 / -1;
+        background: var(--panel);
+        padding: 12px 20px;
+        display: flex;
+        gap: 10px;
+      }
+      input[type="text"] {
+        flex: 1;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+        font-family: inherit;
+        font-size: 14px;
+      }
+      input[type="text"]:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 18px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--border);
+      }
+      button:hover {
+        opacity: 0.9;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .turn {
+        margin-bottom: 18px;
+        padding-bottom: 14px;
+        border-bottom: 1px dashed var(--border);
+      }
+      .turn:last-child { border-bottom: none; }
+      .turn .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+      .turn .transcript {
+        color: var(--fg);
+        padding-left: 8px;
+        border-left: 2px solid var(--accent);
+      }
+      .turn .transcript.partial { color: var(--muted); font-style: italic; }
+      .turn .agent {
+        color: var(--fg);
+        padding-left: 8px;
+        border-left: 2px solid var(--reflex);
+        margin-top: 8px;
+        white-space: pre-wrap;
+      }
+      .turn .agent.local { border-left-color: var(--local); }
+      .turn .agent.escalated { border-left-color: var(--escalated); }
+      .turn .meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+      .turn .meta .tier {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 10px;
+        margin-right: 6px;
+      }
+      .tier.reflex { background: rgba(63, 185, 80, 0.15); color: var(--reflex); }
+      .tier.local { background: rgba(210, 153, 34, 0.15); color: var(--local); }
+      .tier.escalated { background: rgba(247, 120, 186, 0.15); color: var(--escalated); }
+      .turn.interrupted .agent::after {
+        content: " [interrupted]";
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .event {
+        font-size: 12px;
+        color: var(--muted);
+        font-family: "SF Mono", Menlo, monospace;
+        margin-bottom: 2px;
+        padding: 2px 0;
+      }
+      .event .t { color: var(--accent); }
+      .event .p { color: var(--fg); }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        row-gap: 2px;
+        column-gap: 12px;
+        font-size: 12px;
+      }
+      .metrics .k { color: var(--muted); }
+      .metrics .v { color: var(--fg); font-variant-numeric: tabular-nums; }
+
+      .state {
+        font-size: 12px;
+        color: var(--fg);
+      }
+      .state .phase {
+        display: inline-block;
+        background: rgba(88, 166, 255, 0.15);
+        color: var(--accent);
+        padding: 2px 8px;
+        border-radius: 3px;
+        text-transform: lowercase;
+      }
+      .state .kv { color: var(--muted); margin-top: 4px; }
+
+      .status-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+        margin-right: 6px;
+      }
+      .status-dot.live { background: var(--reflex); }
+
+      button.mic {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      button.mic.on {
+        background: var(--reflex);
+        color: #0e1116;
+        border-color: var(--reflex);
+      }
+      button.mic.speaking {
+        background: var(--escalated);
+        color: #0e1116;
+        border-color: var(--escalated);
+      }
+      .mic-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0.4;
+      }
+      button.mic.on .mic-dot {
+        opacity: 1;
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+      .voice-hint {
+        font-size: 11px;
+        color: var(--muted);
+        margin-left: auto;
+        margin-right: 12px;
+      }
+      .voice-hint.warn { color: var(--local); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1><span class="status-dot" id="status"></span>oasis-echo</h1>
+        <span class="session" id="session-label">connecting…</span>
+      </header>
+
+      <section class="col" id="conversation">
+        <h2>Conversation</h2>
+        <div id="turns"></div>
+      </section>
+
+      <section class="col" id="side">
+        <h2>Session state</h2>
+        <div class="state" id="state"></div>
+
+        <h2 style="margin-top: 20px;">Metrics</h2>
+        <div class="metrics" id="metrics"></div>
+
+        <h2 style="margin-top: 20px;">Event stream</h2>
+        <div id="events"></div>
+      </section>
+
+      <footer>
+        <input type="text" id="input" placeholder="Type a message and press Enter, or click the mic to talk…" autofocus />
+        <span class="voice-hint" id="voice-hint"></span>
+        <button id="mic" class="mic" title="Start/stop voice chat"><span class="mic-dot"></span><span id="mic-label">Voice</span></button>
+        <button id="send">Send</button>
+        <button id="bargein" class="secondary">Barge-in</button>
+      </footer>
+    </main>
+
+    <script>
+      const turnsEl = document.getElementById('turns');
+      const eventsEl = document.getElementById('events');
+      const stateEl = document.getElementById('state');
+      const metricsEl = document.getElementById('metrics');
+      const statusDot = document.getElementById('status');
+      const sessionLabel = document.getElementById('session-label');
+      const input = document.getElementById('input');
+      const sendBtn = document.getElementById('send');
+      const bargeBtn = document.getElementById('bargein');
+
+      const turnsById = new Map();
+      let currentTurnEl = null;
+
+      function ensureTurn(turnId) {
+        if (turnsById.has(turnId)) return turnsById.get(turnId);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'turn';
+        wrapper.dataset.turnId = turnId;
+        wrapper.innerHTML = `
+          <div class="label">Transcript · <span class="tid">${turnId}</span></div>
+          <div class="transcript partial"></div>
+          <div class="agent" style="display:none"></div>
+          <div class="meta" style="display:none"></div>
+        `;
+        turnsEl.appendChild(wrapper);
+        wrapper.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        const entry = {
+          el: wrapper,
+          transcriptEl: wrapper.querySelector('.transcript'),
+          agentEl: wrapper.querySelector('.agent'),
+          metaEl: wrapper.querySelector('.meta'),
+          agentText: '',
+        };
+        turnsById.set(turnId, entry);
+        return entry;
+      }
+
+      function addEvent(type, payload) {
+        const line = document.createElement('div');
+        line.className = 'event';
+        const summary = summarize(type, payload);
+        line.innerHTML = `<span class="t">${type}</span> <span class="p">${escape(summary)}</span>`;
+        eventsEl.appendChild(line);
+        while (eventsEl.children.length > 80) eventsEl.removeChild(eventsEl.firstChild);
+        eventsEl.scrollTop = eventsEl.scrollHeight;
+      }
+
+      function summarize(type, p) {
+        if (type === 'stt.partial') return `"${p.text}"`;
+        if (type === 'stt.final') return `"${p.text}"`;
+        if (type === 'route.decision') return `${p.decision.kind} · ${p.decision.intent}${p.decision.filler ? ' · "' + p.decision.filler + '"' : ''}`;
+        if (type === 'tts.chunk') return `${p.final ? 'final' : 'chunk'} "${p.text.slice(0, 40)}${p.text.length > 40 ? '…' : ''}"`;
+        if (type === 'turn.complete') return `${p.turn.tier} · ${p.turn.intent}`;
+        if (type === 'turn.summary') return `${p.tier} · ${p.intent} · ${p.latencyMs}ms${p.interrupted ? ' · interrupted' : ''}`;
+        if (type === 'bargein') return `interrupted ${p.interruptedTurnId}`;
+        if (type === 'user.input') return `"${p.text}"`;
+        return '';
+      }
+
+      function escape(s) {
+        return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+      }
+
+      async function refreshState() {
+        const [s, m] = await Promise.all([
+          fetch('/state').then((r) => r.json()),
+          fetch('/metrics').then((r) => r.json()),
+        ]);
+        stateEl.innerHTML = `
+          <span class="phase">${s.phase}</span>
+          <div class="kv">turns: ${s.turns} · allowed: ${s.allowedIntents.join(', ')}</div>
+          ${s.summary ? `<div class="kv">summary: ${escape(s.summary.slice(0, 200))}${s.summary.length > 200 ? '…' : ''}</div>` : ''}
+        `;
+        const rows = [];
+        for (const c of m.counters) {
+          rows.push(`<div class="k">${c.name}${labelStr(c.labels)}</div><div class="v">${c.value}</div>`);
+        }
+        for (const h of m.histograms) {
+          rows.push(`<div class="k">${h.name}${labelStr(h.labels)}</div><div class="v">p50 ${h.p50} · p95 ${h.p95}</div>`);
+        }
+        metricsEl.innerHTML = rows.join('');
+      }
+
+      function labelStr(labels) {
+        const keys = Object.keys(labels);
+        if (keys.length === 0) return '';
+        return '{' + keys.map((k) => k + '=' + labels[k]).join(',') + '}';
+      }
+
+      // If the page was loaded from disk or a preview sandbox, EventSource
+      // has no server to reach. Surface that explicitly rather than
+      // spinning on "connecting…" forever.
+      if (location.protocol === 'file:' || (!location.hostname.includes('localhost') && location.hostname !== '127.0.0.1' && location.hostname !== '')) {
+        if (location.protocol === 'file:') {
+          sessionLabel.innerHTML = 'opened as file:// — run <code>pnpm server</code> and open http://localhost:3000';
+        }
+      }
+
+      const evt = new EventSource('/events');
+      let reconnectAttempts = 0;
+      evt.addEventListener('open', () => {
+        reconnectAttempts = 0;
+        statusDot.classList.add('live');
+        sessionLabel.textContent = 'live';
+      });
+      evt.addEventListener('error', () => {
+        statusDot.classList.remove('live');
+        reconnectAttempts += 1;
+        // readyState: 0=CONNECTING, 1=OPEN, 2=CLOSED
+        if (evt.readyState === EventSource.CLOSED) {
+          sessionLabel.innerHTML = 'disconnected — run <code>pnpm server</code> in a terminal and refresh';
+        } else if (reconnectAttempts === 1) {
+          sessionLabel.textContent = 'connecting…';
+        } else {
+          sessionLabel.textContent = `reconnecting (attempt ${reconnectAttempts})…`;
+        }
+      });
+
+      const on = (t, fn) => evt.addEventListener(t, (ev) => fn(JSON.parse(ev.data)));
+
+      on('user.input', (p) => {
+        addEvent('user.input', p);
+        const t = ensureTurn(p.turnId);
+        t.transcriptEl.textContent = p.text;
+      });
+
+      on('stt.partial', (p) => {
+        addEvent('stt.partial', p);
+        const t = ensureTurn(p.turnId);
+        t.transcriptEl.textContent = p.text;
+        t.transcriptEl.classList.add('partial');
+      });
+
+      on('stt.final', (p) => {
+        addEvent('stt.final', p);
+        const t = ensureTurn(p.turnId);
+        t.transcriptEl.textContent = p.text;
+        t.transcriptEl.classList.remove('partial');
+      });
+
+      on('route.decision', (p) => {
+        addEvent('route.decision', p);
+        // Align the turn element with the pipeline's internal turn id
+        // so subsequent tts.chunk events land in the right place.
+        const userTurn = [...turnsById.values()].at(-1);
+        if (userTurn) {
+          userTurn.el.dataset.pipelineTurnId = p.turnId;
+          turnsById.set(p.turnId, userTurn);
+          userTurn.agentEl.style.display = 'block';
+          userTurn.agentEl.className = 'agent ' + p.decision.kind;
+          if (p.decision.reply) {
+            userTurn.agentText = p.decision.reply;
+            userTurn.agentEl.textContent = p.decision.reply;
+          } else if (p.decision.filler) {
+            userTurn.agentText = p.decision.filler;
+            userTurn.agentEl.textContent = p.decision.filler;
+          }
+        }
+      });
+
+      on('tts.chunk', (p) => {
+        addEvent('tts.chunk', p);
+        const t = ensureTurn(p.turnId);
+        t.agentEl.style.display = 'block';
+        if (!t.agentEl.textContent.endsWith(p.text)) {
+          t.agentText = (t.agentText ? t.agentText + ' ' : '') + p.text;
+          t.agentEl.textContent = t.agentText;
+        }
+      });
+
+      on('turn.complete', (p) => {
+        addEvent('turn.complete', p);
+      });
+
+      on('turn.summary', (p) => {
+        addEvent('turn.summary', p);
+        const t = turnsById.get(p.turnId);
+        if (t) {
+          if (p.interrupted) t.el.classList.add('interrupted');
+          t.metaEl.style.display = 'block';
+          t.metaEl.innerHTML = `<span class="tier ${p.tier}">${p.tier}</span> <span>${p.intent}</span> · <span>${p.latencyMs}ms</span>${p.interrupted ? ' · interrupted' : ''}`;
+        }
+        refreshState();
+      });
+
+      on('bargein', (p) => {
+        addEvent('bargein', p);
+      });
+
+      async function send() {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = '';
+        await fetch('/turn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+      }
+
+      sendBtn.addEventListener('click', send);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') send();
+      });
+      bargeBtn.addEventListener('click', async () => {
+        stopSpeaking();
+        await fetch('/bargein', { method: 'POST' });
+      });
+
+      // ───────────────────────────────────────────────────────────
+      // Voice chat: browser-native Web Speech API
+      //   • SpeechRecognition  — mic → text, with interim results
+      //   • speechSynthesis    — text → audio through the system TTS
+      //   • Auto-barge-in      — when mic detects user speech while the
+      //                          agent is speaking, cancel the agent.
+      // ───────────────────────────────────────────────────────────
+
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const synth = window.speechSynthesis;
+      const micBtn = document.getElementById('mic');
+      const micLabel = document.getElementById('mic-label');
+      const voiceHint = document.getElementById('voice-hint');
+
+      let recognition = null;
+      let voiceOn = false;
+      let agentSpeaking = false;
+      const ttsQueue = [];
+      let currentUtterance = null;
+
+      if (!SR) {
+        micBtn.disabled = true;
+        voiceHint.textContent = 'Voice requires Chrome or Safari';
+        voiceHint.classList.add('warn');
+      } else {
+        micBtn.addEventListener('click', () => {
+          voiceOn ? stopVoice() : startVoice();
+        });
+      }
+
+      function startVoice() {
+        if (voiceOn) return;
+        recognition = new SR();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = navigator.language || 'en-US';
+
+        recognition.onresult = (ev) => {
+          let interim = '';
+          let finalText = '';
+          for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            const r = ev.results[i];
+            if (r.isFinal) finalText += r[0].transcript;
+            else interim += r[0].transcript;
+          }
+
+          // Auto-barge-in: any fresh mic speech during agent audio cuts it off.
+          if (agentSpeaking && (interim.trim() || finalText.trim())) {
+            stopSpeaking();
+            fetch('/bargein', { method: 'POST' }).catch(() => {});
+          }
+
+          if (interim.trim()) {
+            input.value = interim.trim();
+            voiceHint.textContent = 'listening…';
+          }
+          if (finalText.trim()) {
+            input.value = finalText.trim();
+            voiceHint.textContent = 'sent';
+            send();
+          }
+        };
+
+        recognition.onerror = (ev) => {
+          voiceHint.textContent = 'mic error: ' + ev.error;
+          voiceHint.classList.add('warn');
+        };
+
+        recognition.onend = () => {
+          if (voiceOn) {
+            // Browsers auto-stop after silence; restart to stay hot.
+            try { recognition.start(); } catch (_) {}
+          }
+        };
+
+        try {
+          recognition.start();
+        } catch (err) {
+          voiceHint.textContent = 'could not start mic: ' + err;
+          voiceHint.classList.add('warn');
+          return;
+        }
+        voiceOn = true;
+        micBtn.classList.add('on');
+        micLabel.textContent = 'Listening';
+        voiceHint.classList.remove('warn');
+        voiceHint.textContent = 'say hello…';
+      }
+
+      function stopVoice() {
+        voiceOn = false;
+        if (recognition) {
+          try { recognition.stop(); } catch (_) {}
+          recognition = null;
+        }
+        micBtn.classList.remove('on', 'speaking');
+        micLabel.textContent = 'Voice';
+        voiceHint.textContent = '';
+        stopSpeaking();
+      }
+
+      function speak(text) {
+        if (!synth) return;
+        if (!text || !text.trim()) return;
+        if (!voiceOn) return;
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = 1.05;
+        u.pitch = 1.0;
+        u.onstart = () => {
+          agentSpeaking = true;
+          micBtn.classList.add('speaking');
+        };
+        u.onend = () => {
+          currentUtterance = null;
+          if (ttsQueue.length === 0) {
+            agentSpeaking = false;
+            micBtn.classList.remove('speaking');
+          }
+        };
+        ttsQueue.push(u);
+        currentUtterance = u;
+        synth.speak(u);
+      }
+
+      function stopSpeaking() {
+        if (synth) {
+          try { synth.cancel(); } catch (_) {}
+        }
+        ttsQueue.length = 0;
+        currentUtterance = null;
+        agentSpeaking = false;
+        micBtn.classList.remove('speaking');
+      }
+
+      // Intercept streaming agent output: speak each sentence as it lands.
+      const originalTts = evt;
+      evt.addEventListener('tts.chunk', (raw) => {
+        if (!voiceOn) return;
+        const p = JSON.parse(raw.data);
+        speak(p.text);
+      });
+      evt.addEventListener('bargein', () => {
+        stopSpeaking();
+      });
+
+      refreshState();
+      setInterval(refreshState, 5000);
+    </script>
+  </body>
+</html>

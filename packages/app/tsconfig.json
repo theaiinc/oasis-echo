@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../types" },
+    { "path": "../telemetry" },
+    { "path": "../reflex" },
+    { "path": "../coordinator" },
+    { "path": "../reasoning" },
+    { "path": "../orchestrator" }
+  ]
+}
