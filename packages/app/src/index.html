@@ -125,25 +125,11 @@
         color: var(--fg);
         border: 1px solid var(--border);
       }
-      button:hover {
-        opacity: 0.9;
-      }
-      button:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
+      button:hover { opacity: 0.9; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-      #turns {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding-bottom: 20px;
-      }
-      .turn {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-      }
+      #turns { display: flex; flex-direction: column; gap: 14px; padding-bottom: 20px; }
+      .turn { display: flex; flex-direction: column; gap: 6px; }
       .msg {
         max-width: 78%;
         padding: 10px 14px;
@@ -174,19 +160,10 @@
       .msg.agent.reflex { border-left-color: var(--reflex); }
       .msg.agent.local { border-left-color: var(--local); }
       .msg.agent.escalated { border-left-color: var(--escalated); }
-      .msg.agent.pending {
-        color: var(--muted);
-        font-style: italic;
-      }
-      .typing {
-        display: inline-flex;
-        gap: 4px;
-        align-items: center;
-      }
+      .msg.agent.pending { color: var(--muted); font-style: italic; }
+      .typing { display: inline-flex; gap: 4px; align-items: center; }
       .typing .dot {
-        width: 5px;
-        height: 5px;
-        border-radius: 50%;
+        width: 5px; height: 5px; border-radius: 50%;
         background: var(--muted);
         animation: typing 1.2s infinite ease-in-out;
       }
@@ -248,10 +225,7 @@
       .metrics .k { color: var(--muted); }
       .metrics .v { color: var(--fg); font-variant-numeric: tabular-nums; }
 
-      .state {
-        font-size: 12px;
-        color: var(--fg);
-      }
+      .state { font-size: 12px; color: var(--fg); }
       .state .phase {
         display: inline-block;
         background: rgba(88, 166, 255, 0.15);
@@ -264,9 +238,7 @@
 
       .status-dot {
         display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
+        width: 8px; height: 8px; border-radius: 50%;
         background: var(--muted);
         margin-right: 6px;
       }
@@ -292,9 +264,7 @@
       }
       .mic-dot {
         display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
+        width: 8px; height: 8px; border-radius: 50%;
         background: currentColor;
         opacity: 0.4;
       }
@@ -350,13 +320,31 @@
         <input type="text" id="input" placeholder="Type a message and press Enter, or click the mic to talk…" autofocus />
         <span class="voice-hint" id="voice-hint"></span>
         <button id="mic" class="mic" title="Start/stop voice chat"><span class="mic-dot"></span><span id="mic-label">Voice</span></button>
-        <button id="filler-toggle" class="secondary" title="Toggle audible thinking fillers">Filler: on</button>
         <button id="send">Send</button>
         <button id="bargein" class="secondary">Barge-in</button>
       </footer>
     </main>
 
-    <script>
+    <script type="importmap">
+      {
+        "imports": {
+          "@oasis-echo/sdk": "/sdk/index.js",
+          "@oasis-echo/sdk/browser": "/sdk/browser/index.js",
+          "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import { OasisClient, TurnDebouncer } from '@oasis-echo/sdk';
+      import {
+        AudioPlayer,
+        BargeInMonitor,
+        EmotionDetector,
+        MicCapture,
+      } from '@oasis-echo/sdk/browser';
+
+      /* ─────────────────────── UI refs + helpers ─────────────────────── */
       const turnsEl = document.getElementById('turns');
       const eventsEl = document.getElementById('events');
       const stateEl = document.getElementById('state');
@@ -366,9 +354,12 @@
       const input = document.getElementById('input');
       const sendBtn = document.getElementById('send');
       const bargeBtn = document.getElementById('bargein');
+      const micBtn = document.getElementById('mic');
+      const micLabel = document.getElementById('mic-label');
+      const voiceHint = document.getElementById('voice-hint');
+      const emptyEl = document.getElementById('empty');
 
       const turnsById = new Map();
-      const emptyEl = document.getElementById('empty');
 
       function ensureTurn(turnId) {
         if (turnsById.has(turnId)) return turnsById.get(turnId);
@@ -407,30 +398,37 @@
         });
       }
 
-      function addEvent(type, payload) {
-        const line = document.createElement('div');
-        line.className = 'event';
-        const summary = summarize(type, payload);
-        line.innerHTML = `<span class="t">${type}</span> <span class="p">${escape(summary)}</span>`;
-        eventsEl.appendChild(line);
-        while (eventsEl.children.length > 80) eventsEl.removeChild(eventsEl.firstChild);
-        eventsEl.scrollTop = eventsEl.scrollHeight;
+      function escape(s) {
+        return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
       }
 
       function summarize(type, p) {
         if (type === 'stt.partial') return `"${p.text}"`;
         if (type === 'stt.final') return `"${p.text}"`;
-        if (type === 'route.decision') return `${p.decision.kind} · ${p.decision.intent}${p.decision.filler ? ' · "' + p.decision.filler + '"' : ''}`;
-        if (type === 'tts.chunk') return `${p.final ? 'final' : 'chunk'} "${p.text.slice(0, 40)}${p.text.length > 40 ? '…' : ''}"`;
+        if (type === 'stt.postprocess') return `"${p.original}" → "${p.final}" [${p.stages.join(', ')}] ${p.latencyMs}ms`;
+        if (type === 'route.decision') return `${p.decision.kind} · ${p.decision.intent}`;
+        if (type === 'tts.chunk') return `${p.final ? 'final' : 'chunk'} "${(p.text || '').slice(0, 40)}"`;
         if (type === 'turn.complete') return `${p.turn.tier} · ${p.turn.intent}`;
         if (type === 'turn.summary') return `${p.tier} · ${p.intent} · ${p.latencyMs}ms${p.interrupted ? ' · interrupted' : ''}`;
-        if (type === 'bargein') return `interrupted ${p.interruptedTurnId}`;
-        if (type === 'user.input') return `"${p.text}"`;
+        if (type === 'bargein') return p.interruptedTurnId ? `interrupted ${p.interruptedTurnId}` : 'interrupted';
+        if (type === 'emotion.directives') return `${p.source}=${p.detected}→${p.effective} ${p.strategy} rate=${p.directives.playbackRate.toFixed(2)}`;
+        if (type === 'user.input') return `"${p.text}"${p.emotion ? ` · ${p.emotion.label}` : ''}`;
         return '';
       }
 
-      function escape(s) {
-        return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+      function addEvent(type, payload) {
+        const line = document.createElement('div');
+        line.className = 'event';
+        line.innerHTML = `<span class="t">${type}</span> <span class="p">${escape(summarize(type, payload))}</span>`;
+        eventsEl.appendChild(line);
+        while (eventsEl.children.length > 80) eventsEl.removeChild(eventsEl.firstChild);
+        eventsEl.scrollTop = eventsEl.scrollHeight;
+      }
+
+      function labelStr(labels) {
+        const keys = Object.keys(labels);
+        if (keys.length === 0) return '';
+        return '{' + keys.map((k) => k + '=' + labels[k]).join(',') + '}';
       }
 
       async function loadBackend() {
@@ -446,6 +444,10 @@
             badge.className = 'backend anthropic';
             badge.textContent = `ollama · ${cfg.model}`;
             banner.style.display = 'none';
+          } else if (cfg.backend === 'openai') {
+            badge.className = 'backend anthropic';
+            badge.textContent = `openai · ${cfg.model}`;
+            banner.style.display = 'none';
           } else {
             badge.className = 'backend mock';
             badge.textContent = 'mock';
@@ -455,98 +457,76 @@
       }
 
       async function refreshState() {
-        const [s, m] = await Promise.all([
-          fetch('/state').then((r) => r.json()),
-          fetch('/metrics').then((r) => r.json()),
-        ]);
-        stateEl.innerHTML = `
-          <span class="phase">${s.phase}</span>
-          <div class="kv">turns: ${s.turns} · allowed: ${s.allowedIntents.join(', ')}</div>
-          ${s.summary ? `<div class="kv">summary: ${escape(s.summary.slice(0, 200))}${s.summary.length > 200 ? '…' : ''}</div>` : ''}
-        `;
-        const rows = [];
-        for (const c of m.counters) {
-          rows.push(`<div class="k">${c.name}${labelStr(c.labels)}</div><div class="v">${c.value}</div>`);
-        }
-        for (const h of m.histograms) {
-          rows.push(`<div class="k">${h.name}${labelStr(h.labels)}</div><div class="v">p50 ${h.p50} · p95 ${h.p95}</div>`);
-        }
-        metricsEl.innerHTML = rows.join('');
+        try {
+          const [s, m] = await Promise.all([
+            fetch('/state').then((r) => r.json()),
+            fetch('/metrics').then((r) => r.json()),
+          ]);
+          stateEl.innerHTML = `
+            <span class="phase">${s.phase}</span>
+            <div class="kv">turns: ${s.turns} · allowed: ${s.allowedIntents.join(', ')}</div>
+            ${s.summary ? `<div class="kv">summary: ${escape(s.summary.slice(0, 200))}${s.summary.length > 200 ? '…' : ''}</div>` : ''}
+          `;
+          const rows = [];
+          for (const c of m.counters) {
+            rows.push(`<div class="k">${c.name}${labelStr(c.labels)}</div><div class="v">${c.value}</div>`);
+          }
+          for (const h of m.histograms) {
+            rows.push(`<div class="k">${h.name}${labelStr(h.labels)}</div><div class="v">p50 ${h.p50} · p95 ${h.p95}</div>`);
+          }
+          metricsEl.innerHTML = rows.join('');
+        } catch (_) {}
       }
 
-      function labelStr(labels) {
-        const keys = Object.keys(labels);
-        if (keys.length === 0) return '';
-        return '{' + keys.map((k) => k + '=' + labels[k]).join(',') + '}';
-      }
+      loadBackend();
+      refreshState();
+      setInterval(refreshState, 2000);
 
-      // If the page was loaded from disk or a preview sandbox, EventSource
-      // has no server to reach. Surface that explicitly rather than
-      // spinning on "connecting…" forever.
-      if (location.protocol === 'file:' || (!location.hostname.includes('localhost') && location.hostname !== '127.0.0.1' && location.hostname !== '')) {
-        if (location.protocol === 'file:') {
-          sessionLabel.innerHTML = 'opened as file:// — run <code>npm run server</code> and open http://localhost:3000';
-        }
-      }
+      /* ─────────────────── SDK client + SSE event wiring ─────────────────── */
+      const client = new OasisClient({ baseUrl: '' });
 
-      const evt = new EventSource('/events');
-      let reconnectAttempts = 0;
-      evt.addEventListener('open', () => {
-        reconnectAttempts = 0;
-        statusDot.classList.add('live');
-        sessionLabel.textContent = 'live';
-      });
-      evt.addEventListener('error', () => {
-        statusDot.classList.remove('live');
-        reconnectAttempts += 1;
-        // readyState: 0=CONNECTING, 1=OPEN, 2=CLOSED
-        if (evt.readyState === EventSource.CLOSED) {
-          sessionLabel.innerHTML = 'disconnected — run <code>npm run server</code> in a terminal and refresh';
-        } else if (reconnectAttempts === 1) {
-          sessionLabel.textContent = 'connecting…';
-        } else {
-          sessionLabel.textContent = `reconnecting (attempt ${reconnectAttempts})…`;
-        }
-      });
+      // Track abandoned turns so late-arriving tts.chunk events get dropped
+      // rather than overlapping the NEXT turn's audio.
+      const abandonedTurns = new Set();
+      let currentTurnIdPlaying = null;
+      let agentSpeaking = false;
+      let replyStartedForTurn = new Set();
 
-      const on = (t, fn) => evt.addEventListener(t, (ev) => fn(JSON.parse(ev.data)));
-
-      on('user.input', (p) => {
+      client.on('user.input', (p) => {
         addEvent('user.input', p);
         const t = ensureTurn(p.turnId);
         t.transcriptEl.textContent = p.text;
         scheduleScroll(t);
       });
 
-      on('stt.partial', (p) => {
+      client.on('stt.partial', (p) => {
         addEvent('stt.partial', p);
         const t = ensureTurn(p.turnId);
-        t.transcriptEl.textContent = p.text;
         t.transcriptEl.classList.add('partial');
+        t.transcriptEl.textContent = p.text;
         scheduleScroll(t);
       });
 
-      on('stt.final', (p) => {
+      client.on('stt.final', (p) => {
         addEvent('stt.final', p);
         const t = ensureTurn(p.turnId);
-        t.transcriptEl.textContent = p.text;
         t.transcriptEl.classList.remove('partial');
+        t.transcriptEl.textContent = p.text;
         scheduleScroll(t);
       });
 
-      on('route.decision', (p) => {
+      client.on('stt.postprocess', (p) => addEvent('stt.postprocess', p));
+
+      client.on('route.decision', (p) => {
         addEvent('route.decision', p);
         const t = ensureTurn(p.turnId);
-        t.agentEl.style.display = 'block';
-        // For reflex/local decisions with a canned reply, render it.
-        // For escalations, keep the typing-dots placeholder — the model
-        // tokens will replace it as they stream in.
-        const kindClass = 'msg agent ' + p.decision.kind;
-        if (p.decision.kind !== 'escalate' && p.decision.reply) {
-          t.agentEl.className = kindClass;
-          t.agentEl.classList.remove('pending');
+        const kindClass = 'msg agent ' + (p.decision.kind === 'local' ? 'local' : 'escalated');
+        t.agentEl.className = kindClass + ' pending';
+        if (p.decision.kind === 'local' && p.decision.reply) {
           t.agentText = p.decision.reply;
           t.agentEl.textContent = p.decision.reply;
+          t.agentEl.style.display = 'block';
+          t.agentEl.classList.remove('pending');
           t.hasModelText = true;
         } else {
           t.agentEl.className = kindClass + ' pending';
@@ -554,48 +534,81 @@
         scheduleScroll(t);
       });
 
-      on('tts.chunk', (p) => {
+      client.on('tts.chunk', (p) => {
         addEvent('tts.chunk', p);
-        // Skip the pre-LLM "hmm…" filler in text mode — it's audio
-        // feedback for voice mode only.
-        if (p.filler) return;
-        const t = ensureTurn(p.turnId);
-        t.agentEl.style.display = 'block';
-        t.agentEl.classList.remove('pending');
-        if (!t.hasModelText) {
-          t.agentText = p.text;
-          t.agentEl.textContent = p.text;
-          t.hasModelText = true;
-        } else if (!t.agentEl.textContent.endsWith(p.text)) {
-          t.agentText = (t.agentText ? t.agentText + ' ' : '') + p.text;
-          t.agentEl.textContent = t.agentText;
+        // Text bubble updates for all chunks except the pre-LLM filler.
+        if (!p.filler) {
+          const t = ensureTurn(p.turnId);
+          t.agentEl.style.display = 'block';
+          t.agentEl.classList.remove('pending');
+          if (!t.hasModelText) {
+            t.agentText = p.text;
+            t.agentEl.textContent = p.text;
+            t.hasModelText = true;
+          } else if (!t.agentEl.textContent.endsWith(p.text)) {
+            t.agentText = (t.agentText ? t.agentText + ' ' : '') + p.text;
+            t.agentEl.textContent = t.agentText;
+          }
+          scheduleScroll(t);
         }
-        scheduleScroll(t);
+
+        // Audio playback. In voice mode audioPlayer owns all audio for
+        // the turn — skipping chunks without PCM rather than falling
+        // through to synth, otherwise synth starts speaking a chunk
+        // while audioPlayer is still playing the PREVIOUS chunk and
+        // we get two voices overlapping. Text mode (no voice) still
+        // uses synth as before.
+        if (abandonedTurns.has(p.turnId)) return;
+        if (audioPlayer) {
+          if (!p.audio) return;
+          currentTurnIdPlaying = p.turnId;
+          if (!agentSpeaking) {
+            agentSpeaking = true;
+            if (micPausedForTts === false && voiceOn) {
+              micPausedForTts = true;
+              pauseListen();
+              micBtn.classList.add('speaking');
+              voiceHint.textContent = 'agent speaking — mic paused';
+            }
+          }
+          audioPlayer.playPcm(p.audio, p.sampleRate, { turnId: p.turnId, filler: p.filler === true });
+        } else if (synth && p.text) {
+          speak(p.text, { filler: p.filler === true });
+        }
       });
 
-      on('turn.complete', (p) => {
+      client.on('turn.complete', (p) => {
         addEvent('turn.complete', p);
-        // Reflex turns skip route.decision entirely; make sure their
-        // agent bubble still picks up the right tier styling.
         const t = turnsById.get(p.turn.id);
-        if (t && !t.agentEl.className.match(/reflex|local|escalated/)) {
-          t.agentEl.className = 'msg agent ' + p.turn.tier;
+        if (t) {
+          if (!t.agentEl.className.match(/reflex|local|escalated/)) {
+            t.agentEl.className = 'msg agent ' + p.turn.tier;
+          }
           if (p.turn.agentText && !t.agentText) {
             t.agentText = p.turn.agentText;
             t.agentEl.textContent = p.turn.agentText;
             t.agentEl.style.display = 'block';
             t.agentEl.classList.remove('pending');
           }
+          // Turn is finished — always leave the pending class behind.
+          // Reflex-tier intents (confirm, acknowledge) legitimately
+          // return an empty reply, and the typing dots staying lit
+          // after completion made the agent look stuck.
+          t.agentEl.classList.remove('pending');
+          if (!t.agentText) {
+            // No reply text at all — hide the bubble entirely so the
+            // user doesn't see an empty placeholder. The meta line
+            // below still surfaces the tier/intent if needed.
+            t.agentEl.style.display = 'none';
+          }
         }
-        // Prune per-turn bookkeeping now that the turn is finished so
-        // these sets don't grow unbounded over a long session.
         replyStartedForTurn.delete(p.turn.id);
         abandonedTurns.delete(p.turn.id);
-        directivesByTurn.delete(p.turn.id);
+        audioPlayer?.forgetDirectives(p.turn.id);
         if (currentTurnIdPlaying === p.turn.id) currentTurnIdPlaying = null;
       });
 
-      on('turn.summary', (p) => {
+      client.on('turn.summary', (p) => {
         addEvent('turn.summary', p);
         const t = turnsById.get(p.turnId);
         if (t) {
@@ -606,71 +619,43 @@
         refreshState();
       });
 
-      on('bargein', (p) => {
+      client.on('bargein', (p) => {
         addEvent('bargein', p);
+        if (p.interruptedTurnId) abandonedTurns.add(p.interruptedTurnId);
+        stopSpeaking();
       });
 
-      // Per-turn TTS directives produced by the server's
-      // EmotionAdaptiveTts. We keyed the map by turnId so chunked tts
-      // audio for the same turn shares one emotion envelope.
-      const directivesByTurn = new Map();
-      on('emotion.directives', (p) => {
-        if (!p || !p.turnId || !p.directives) return;
-        directivesByTurn.set(p.turnId, p.directives);
-        // Surface the detection+strategy in the event stream panel so
-        // users can debug the adaptation live.
-        addEvent('emotion.directives', {
-          turnId: p.turnId,
-          detected: p.detected,
-          effective: p.effective,
-          strategy: p.strategy,
-          styleTags: p.styleTags,
-          rationale: p.rationale,
-          playbackRate: p.directives.playbackRate,
-          gain: p.directives.gain,
-          interChunkSilenceMs: p.directives.interChunkSilenceMs,
-          pitchSemitones: p.directives.pitchSemitones,
-        });
+      client.on('emotion.directives', (p) => {
+        addEvent('emotion.directives', p);
+        audioPlayer?.setDirectives(p.turnId, p.directives);
       });
 
-      async function send(emotion) {
-        const text = input.value.trim();
-        if (!text) return;
-        // Flush any pending voice buffer + timer so we don't double-post
-        // once the debounced voice commit fires.
-        turnBuffer = '';
-        if (turnEndTimer) {
-          clearTimeout(turnEndTimer);
-          turnEndTimer = null;
-          turnEndDeadline = 0;
+      client.on('error', (p) => {
+        statusDot.classList.remove('live');
+        if (p.source === 'sse') {
+          sessionLabel.textContent = 'reconnecting…';
         }
+      });
+
+      // SSE lifecycle indicator. OasisClient auto-reconnects via EventSource.
+      client.connect();
+      statusDot.classList.add('live');
+      sessionLabel.textContent = 'live';
+
+      /* ───────────────── Text-input submission ───────────────── */
+      async function sendText(text, emotion) {
+        const t = (text ?? input.value ?? '').trim();
+        if (!t) return;
         input.value = '';
-        const payload = { text };
-        if (emotion && typeof emotion.label === 'string') {
-          payload.emotion = {
-            label: emotion.label,
-            confidence: typeof emotion.confidence === 'number' ? emotion.confidence : 1,
-          };
-        }
-        await fetch('/turn', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
+        turnDebouncer?.cancel(); // flush any stale voice buffer
+        await client.sendTurn(emotion ? { text: t, emotion } : { text: t });
       }
 
-      sendBtn.addEventListener('click', send);
+      sendBtn.addEventListener('click', () => sendText());
       input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') send();
+        if (e.key === 'Enter') sendText();
       });
-      bargeBtn.addEventListener('click', async () => {
-        triggerBargeIn();
-      });
-
-      // Escape anywhere = manual barge-in while the agent is speaking.
-      // Works even when the mic monitor's threshold isn't triggered
-      // (e.g. you want to cut the agent off before it says anything loud
-      // enough to react to).
+      bargeBtn.addEventListener('click', () => triggerBargeIn());
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && agentSpeaking) {
           e.preventDefault();
@@ -678,498 +663,83 @@
         }
       });
 
-      // ───────────────────────────────────────────────────────────
-      // Voice chat: browser-native Web Speech API
-      //   • SpeechRecognition  — mic → text, with interim results
-      //   • speechSynthesis    — text → audio through the system TTS
-      //   • Auto-barge-in      — when mic detects user speech while the
-      //                          agent is speaking, cancel the agent.
-      // ───────────────────────────────────────────────────────────
-
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      /* ─────────────── speechSynthesis fallback (used when Kokoro is OFF) ─────────────── */
       const synth = window.speechSynthesis;
-
-      // Short "I'm still listening" backchannels played while the user
-      // keeps talking past a few seconds. Fires during brief interim-
-      // result gaps (natural pauses mid-utterance). Server pre-
-      // synthesizes through Kokoro at startup and caches the PCM,
-      // so the client can fetch + play at full Web-Audio volume.
-      // Fallback to speechSynthesis if the cache isn't ready yet.
-      let backchannelStartedAt = 0;
-      let lastBackchannelAt = 0;
-      let lastInterimAt = 0;
-      async function maybeBackchannel(text) {
-        if (!voiceOn || agentSpeaking) return;
-        if (!text || text.trim().length < 3) return;
-        const now = performance.now();
-        // User has been speaking continuously for at least 5s?
-        if (backchannelStartedAt === 0 || now - backchannelStartedAt < 5000) return;
-        // Last backchannel was within 6s? Don't spam.
-        if (now - lastBackchannelAt < 6000) return;
-        // We're in a brief pause (no new interim in 220-550ms)?
-        const gap = now - lastInterimAt;
-        if (gap < 220 || gap > 550) return;
-        lastBackchannelAt = now;
-        try {
-          const res = await fetch('/backchannel');
-          if (res.ok) {
-            const data = await res.json();
-            if (data.ready && data.audio) {
-              // Play via Web Audio so we get full output volume — the
-              // whole point of pre-synthesizing instead of falling
-              // through to the quieter speechSynthesis path.
-              playPcm(data.audio, data.sampleRate, { filler: false, gain: 0.9 });
-              return;
-            }
+      let preferredVoice = null;
+      function pickVoice() {
+        const voices = synth?.getVoices?.() ?? [];
+        if (!voices.length) return;
+        preferredVoice =
+          voices.find((v) => /en-US/i.test(v.lang) && /Samantha|Fiona|Daniel|Karen|Alex/i.test(v.name)) ||
+          voices.find((v) => /en/i.test(v.lang)) ||
+          voices[0];
+      }
+      if (synth) {
+        synth.onvoiceschanged = pickVoice;
+        pickVoice();
+      }
+      function speak(text, opts) {
+        if (!synth || !text) return;
+        const u = new SpeechSynthesisUtterance(text);
+        if (preferredVoice) u.voice = preferredVoice;
+        u.rate = 1.05;
+        u.pitch = 1.0;
+        u.volume = opts?.filler ? 0.75 : 1.0;
+        u.onstart = () => {
+          agentSpeaking = true;
+          micBtn.classList.add('speaking');
+          if (voiceOn && !micPausedForTts) {
+            micPausedForTts = true;
+            pauseListen();
           }
-        } catch (_) { /* fall through to speechSynthesis fallback */ }
-        // Cache not primed yet — quieter browser TTS fallback.
-        if (synth) {
-          const fallback = ['uh huh', 'yeah', 'right', 'I see', 'okay'];
-          const phrase = fallback[Math.floor(Math.random() * fallback.length)];
-          const u = new SpeechSynthesisUtterance(phrase);
-          if (preferredVoice) u.voice = preferredVoice;
-          u.rate = 1.05;
-          u.pitch = 1.1;
-          u.volume = 1.0;
-          try { synth.speak(u); } catch (_) {}
+        };
+        u.onend = () => {
+          if (!synth.speaking) {
+            agentSpeaking = false;
+            micBtn.classList.remove('speaking');
+            setTimeout(() => {
+              if (!synth.speaking) {
+                micPausedForTts = false;
+                if (voiceOn) {
+                  voiceHint.textContent = 'listening…';
+                  requestListen();
+                }
+              }
+            }, 350);
+          }
+        };
+        synth.speak(u);
+      }
+      function stopSpeaking() {
+        try { synth?.cancel(); } catch (_) {}
+        try { audioPlayer?.stopAll(); } catch (_) {}
+        agentSpeaking = false;
+        micBtn.classList.remove('speaking');
+        if (voiceOn) {
+          micPausedForTts = false;
+          voiceHint.textContent = 'listening…';
+          requestListen();
         }
       }
-      const micBtn = document.getElementById('mic');
-      const micLabel = document.getElementById('mic-label');
-      const voiceHint = document.getElementById('voice-hint');
-      const fillerToggle = document.getElementById('filler-toggle');
 
-      let fillerAudio = (localStorage.getItem('oasis.filler') ?? 'on') === 'on';
-      function refreshFillerBtn() {
-        fillerToggle.textContent = 'Filler: ' + (fillerAudio ? 'on' : 'off');
-      }
-      refreshFillerBtn();
-      fillerToggle.addEventListener('click', () => {
-        fillerAudio = !fillerAudio;
-        localStorage.setItem('oasis.filler', fillerAudio ? 'on' : 'off');
-        refreshFillerBtn();
-      });
+      /* ─────────────── Voice stack (SDK-driven) ─────────────── */
+      // Kill-switch for emotion detection.
+      const EMOTION_ENABLED = !/[?&]noemotion=1/.test(location.search);
 
-      let recognition = null;
       let voiceOn = false;
-      let agentSpeaking = false;
-      let micPausedForTts = false;
       let shouldListen = false;
-      const ttsQueue = [];
-      let currentUtterance = null;
-      // Turn-end debounce state. Browser SpeechRecognition fires
-      // isFinal eagerly on every short pause, which was causing a
-      // single spoken sentence to fragment into 3-4 turns — and the
-      // second fragment would land mid-generation, triggering an
-      // unwanted barge-in against the agent's reply to the FIRST
-      // fragment. We buffer the accumulated final text and only
-      // commit after a sustained silence window. Interim results
-      // cancel any pending commit (user is still speaking).
-      let turnBuffer = '';
-      let turnEndTimer = null;
-      let turnEndDeadline = 0;
-      const TURN_END_SILENCE_MS = 1200;
-      // If the trailing token looks like a mid-thought conjunction or
-      // fragment, double the silence window — a user who just said
-      // "…but what if" almost certainly isn't done talking.
-      const INCOMPLETE_TAIL =
-        /(?:^|\s)(?:but|and|or|if|because|cause|cuz|so|when|while|as|though|although|yet|plus|like|with|for|to|of|at|what if|even if|only if|in case|what about|how about|the|a|an|my|your|his|her|their|our)\s*$/i;
-
-      // Pre-fetched emotion classification. We kick off inference the
-      // MOMENT we see a final STT fragment, so by the time the debounce
-      // timer fires and commitTurn() runs, the classifier result is
-      // usually already waiting — eliminating the old "speech ends,
-      // UI hangs 500-1200ms while classifying" feel.
+      let micPausedForTts = false;
+      let recognition = null;
+      let audioCtx = null;
+      let micStream = null;
+      let audioPlayer = null;
+      let micCapture = null;
+      let emotionDetector = null;
+      let bargeInMonitor = null;
+      let turnDebouncer = null;
       let pendingEmotionResult = null;
 
-      function scheduleTurnCommit() {
-        const tail = turnBuffer.trim();
-        if (!tail) return;
-        const delay = INCOMPLETE_TAIL.test(tail)
-          ? TURN_END_SILENCE_MS * 2
-          : TURN_END_SILENCE_MS;
-        if (turnEndTimer) clearTimeout(turnEndTimer);
-        turnEndDeadline = performance.now() + delay;
-        turnEndTimer = setTimeout(commitTurn, delay);
-        // Overlap classification with the debounce window. The user is
-        // done speaking for now; if they resume, cancelTurnCommit will
-        // discard this and a fresh detection will fire on the next
-        // final fragment.
-        if (EMOTION_ENABLED) {
-          pendingEmotionResult = detectEmotionFromMic(5).catch(() => null);
-        }
-      }
-
-      function cancelTurnCommit() {
-        if (turnEndTimer) {
-          clearTimeout(turnEndTimer);
-          turnEndTimer = null;
-          turnEndDeadline = 0;
-        }
-        // The user resumed speaking, so any pending emotion result
-        // was computed on a partial utterance — discard it; a fresh
-        // pre-fetch will run once the next final fragment lands.
-        pendingEmotionResult = null;
-      }
-
-      async function commitTurn() {
-        const text = turnBuffer.trim();
-        turnBuffer = '';
-        turnEndTimer = null;
-        turnEndDeadline = 0;
-        if (!text) return;
-        input.value = text;
-        // Reset backchannel state so the next utterance starts fresh.
-        backchannelStartedAt = 0;
-        lastBackchannelAt = 0;
-        lastInterimAt = 0;
-        // Wait VERY briefly for the pre-fetched classifier result.
-        // In the common case it's already resolved (kicked off when
-        // the debounce scheduled). If inference is still in flight
-        // (cold first turn, model still loading), we cap the wait at
-        // EMOTION_COMMIT_WAIT_MS and ship the turn without emotion —
-        // server falls through to neutral mirror. No hang.
-        let emotion = null;
-        if (EMOTION_ENABLED && pendingEmotionResult) {
-          try {
-            const detected = await Promise.race([
-              pendingEmotionResult,
-              new Promise((r) => setTimeout(() => r(null), EMOTION_COMMIT_WAIT_MS)),
-            ]);
-            if (detected) {
-              emotion = { label: detected.label, confidence: detected.confidence };
-              voiceHint.textContent =
-                'sent · ' + detected.label.toLowerCase() +
-                ' ' + Math.round(detected.confidence * 100) + '%';
-            }
-          } catch (_) {}
-        }
-        pendingEmotionResult = null;
-        send(emotion);
-      }
-
-      // ─────────────────────────────────────────────────────────────
-      // Speech Emotion Recognition (SER) — classifies the user's voice
-      // into 8 emotion classes (ANG/CAL/DIS/FEA/HAP/NEU/SAD/SUR) at
-      // turn-commit time. Uses transformers.js and the
-      // `onnx-community/Speech-Emotion-Classification-ONNX` model
-      // (~91MB q8 ONNX). Lazy-loaded on first commit so the page
-      // doesn't pay the cost until the user actually speaks.
-      //
-      // Result is attached to POST /turn, where the server's
-      // EmotionAdaptiveTts resolves a strategy (mirror / soften /
-      // counterbalance with empathetic-mirroring override) and
-      // broadcasts TTS directives (playbackRate, gain, inter-chunk
-      // silence) that we apply in playPcm below.
-      //
-      // Kill switch: `?noemotion=1` disables all of this for quick
-      // A/B comparison when something goes sideways.
-      // ─────────────────────────────────────────────────────────────
-      const EMOTION_ENABLED = !/[?&]noemotion=1/.test(location.search);
-      // How long commitTurn() is willing to WAIT for a classifier
-      // result once the user stops talking. The actual inference runs
-      // OPPORTUNISTICALLY while the user is still in the debounce
-      // window, so by the time commit fires the result is usually
-      // already waiting — this cap only matters when inference is
-      // still in flight. Cold inference on the first turn can exceed
-      // this; that's fine, we just ship without an emotion.
-      const EMOTION_COMMIT_WAIT_MS = 300;
-      // How long we'll let a SINGLE inference run (used both by the
-      // pre-fetch in the debounce window and the commit-time wait).
-      // Longer than COMMIT_WAIT because the pre-fetch isn't on the
-      // critical path.
-      const EMOTION_INFERENCE_TIMEOUT_MS = 2000;
-      // Client-side confidence floor. SER models over-fit to acted /
-      // call-center speech, so casual conversational voice frequently
-      // reads as `sad` at 0.9+. Require a high top-1 AND a margin over
-      // #2 before we forward a label — keeps us from always-softening
-      // everything regardless of how the user actually sounded.
-      const EMOTION_MIN_CONFIDENCE = 0.7;
-      const EMOTION_MIN_MARGIN = 0.15;
-
-      let emotionPipeline = null;
-      let emotionLoadPromise = null;
-      let emotionLoadFailed = false;
-
-      async function ensureEmotionPipeline() {
-        if (emotionPipeline) return emotionPipeline;
-        if (emotionLoadFailed) return null;
-        if (!emotionLoadPromise) {
-          emotionLoadPromise = (async () => {
-            try {
-              const lib = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0');
-              const p = await lib.pipeline(
-                'audio-classification',
-                'onnx-community/Speech-Emotion-Classification-ONNX',
-                { dtype: 'q8' },
-              );
-              return p;
-            } catch (err) {
-              console.warn('[emotion] pipeline load failed', err);
-              emotionLoadFailed = true;
-              return null;
-            }
-          })();
-        }
-        emotionPipeline = await emotionLoadPromise;
-        return emotionPipeline;
-      }
-
-      // Rolling PCM ring buffer fed by the same getUserMedia stream the
-      // volume monitor uses. Holds the last PCM_RING_SECONDS of mic
-      // audio so we can classify emotion over the user's utterance.
-      let pcmRing = null;
-      let pcmRingWrite = 0;
-      let pcmSourceRate = 0;
-      const PCM_RING_SECONDS = 8;
-
-      function writePcmFrame(input) {
-        if (!pcmRing) return;
-        const n = input.length;
-        for (let i = 0; i < n; i++) {
-          pcmRing[pcmRingWrite] = input[i];
-          pcmRingWrite = (pcmRingWrite + 1) % pcmRing.length;
-        }
-      }
-
-      function snapshotLastPcm(seconds) {
-        if (!pcmRing || !pcmSourceRate) return null;
-        const want = Math.min(pcmRing.length, Math.floor(seconds * pcmSourceRate));
-        if (want < pcmSourceRate) return null; // demand ≥ 1s of audio
-        const out = new Float32Array(want);
-        let read = (pcmRingWrite - want + pcmRing.length) % pcmRing.length;
-        for (let i = 0; i < want; i++) {
-          out[i] = pcmRing[read];
-          read = (read + 1) % pcmRing.length;
-        }
-        return out;
-      }
-
-      // Simple linear-interpolation resample to 16kHz mono (SER model's
-      // native input rate). Good enough for phonetic-level features —
-      // low-pass anti-alias filter skipped for simplicity.
-      function resampleTo16k(pcm, sourceRate) {
-        if (sourceRate === 16000) return pcm;
-        const ratio = sourceRate / 16000;
-        const outLen = Math.floor(pcm.length / ratio);
-        const out = new Float32Array(outLen);
-        for (let i = 0; i < outLen; i++) {
-          const s = i * ratio;
-          const a = Math.floor(s);
-          const b = Math.min(pcm.length - 1, a + 1);
-          const frac = s - a;
-          out[i] = pcm[a] * (1 - frac) + pcm[b] * frac;
-        }
-        return out;
-      }
-
-      // Labels we trust enough to forward. The SER model is trained on
-      // acted emotional speech (RAVDESS-family), where SAD/NEUTRAL/CALM
-      // share acoustic markers — low energy, slow rate, low pitch — with
-      // ORDINARY conversational English. So casual speech consistently
-      // reads as sad 0.95+, and forwarding that would force a soften
-      // strategy on every utterance. We therefore treat sad / neutral /
-      // calm as "no informative signal" regardless of confidence and
-      // only forward the high-arousal labels (happy/surprise/angry/
-      // fear/disgust), where the acoustic distinction is real.
-      const EMOTION_INFORMATIVE = new Set([
-        'HAP', 'happy', 'happiness',
-        'SUR', 'surprise', 'surprised',
-        'ANG', 'angry',
-        'FEA', 'fear', 'fearful',
-        'DIS', 'disgust',
-      ]);
-
-      async function detectEmotionFromMic(durationSec) {
-        if (!EMOTION_ENABLED) return null;
-        const raw = snapshotLastPcm(durationSec);
-        if (!raw) return null;
-        const resampled = resampleTo16k(raw, pcmSourceRate);
-        // If the pipeline isn't loaded yet, kick off the load but don't
-        // block a foreground run — the per-call inference timeout will
-        // bail us out. startVoice() pre-warms the pipeline up front so
-        // by the time the user speaks their first turn it's usually
-        // already loaded.
-        const pipelinePromise = ensureEmotionPipeline();
-        const pipeline = await Promise.race([
-          pipelinePromise,
-          new Promise((r) => setTimeout(() => r(null), EMOTION_INFERENCE_TIMEOUT_MS)),
-        ]);
-        if (!pipeline) return null;
-        try {
-          const preds = await Promise.race([
-            pipeline(resampled, { sampling_rate: 16000 }),
-            new Promise((r) => setTimeout(() => r(null), EMOTION_INFERENCE_TIMEOUT_MS)),
-          ]);
-          if (!Array.isArray(preds) || preds.length === 0) return null;
-          // Dev trace: see what the model considered — very useful
-          // when debugging why a given utterance got its label.
-          try { console.debug('[emotion] top-3:', preds.slice(0, 3)); } catch (_) {}
-          // preds: [{label, score}, ...] sorted descending.
-          const top = preds[0];
-          const second = preds[1] ?? { score: 0 };
-          // Filter 1: ignore the low-arousal classes that routinely
-          // over-fire on casual speech.
-          if (!EMOTION_INFORMATIVE.has(top.label)) return null;
-          // Filter 2: top-1 confidence AND margin over runner-up.
-          if (typeof top.score !== 'number' || top.score < EMOTION_MIN_CONFIDENCE) return null;
-          if (top.score - (second.score || 0) < EMOTION_MIN_MARGIN) return null;
-          return {
-            label: top.label,
-            confidence: top.score,
-            top3: preds.slice(0, 3),
-          };
-        } catch (err) {
-          console.warn('[emotion] classify failed', err);
-          return null;
-        }
-      }
-
-      // Separate audio-level monitor that runs even while recognition
-      // is paused during agent speech. Gives us true hands-free barge-in
-      // without the feedback loop of leaving SpeechRecognition hot.
-      let volumeMonitor = null;
-
-      async function startVolumeMonitor() {
-        if (volumeMonitor) return;
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          const source = ctx.createMediaStreamSource(stream);
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 512;
-          source.connect(analyser);
-          // PCM ring buffer for emotion classification. Shares the same
-          // mic stream so we don't ask for a second permission. Uses an
-          // AudioWorklet so capture runs off the main thread — a
-          // ScriptProcessorNode here was stalling the volume monitor's
-          // requestAnimationFrame loop enough to corrupt the adaptive
-          // barge-in baseline, causing false-positive interruptions
-          // that cut the agent voice mid-reply.
-          if (EMOTION_ENABLED) {
-            pcmSourceRate = ctx.sampleRate;
-            pcmRing = new Float32Array(PCM_RING_SECONDS * pcmSourceRate);
-            pcmRingWrite = 0;
-            const workletSrc =
-              "class PcmCapture extends AudioWorkletProcessor {" +
-              "  process(inputs){const c=inputs[0]&&inputs[0][0];" +
-              "    if(c&&c.length)this.port.postMessage(c.slice(0));" +
-              "    return true;}}" +
-              "registerProcessor('pcm-capture',PcmCapture);";
-            try {
-              const blobUrl = URL.createObjectURL(
-                new Blob([workletSrc], { type: 'text/javascript' }),
-              );
-              await ctx.audioWorklet.addModule(blobUrl);
-              URL.revokeObjectURL(blobUrl);
-              const captureNode = new AudioWorkletNode(ctx, 'pcm-capture');
-              captureNode.port.onmessage = (e) => writePcmFrame(e.data);
-              source.connect(captureNode);
-              // Worklet outputs nothing audible — not connected to destination.
-            } catch (err) {
-              console.warn('[emotion] AudioWorklet capture failed:', err);
-              pcmRing = null;
-            }
-          }
-          const buf = new Uint8Array(analyser.frequencyBinCount);
-          let aboveSince = 0;
-          // Adaptive barge-in: instead of a fixed threshold, track the
-          // ambient RMS while the agent is speaking (that's the agent
-          // audio bleeding back through your mic). User voice has to
-          // exceed that baseline by a multiplier, so you don't have
-          // to shout past loud speaker playback.
-          let bgRms = 0;                 // EMA of background (agent leak)
-          const BASELINE_MULT = 1.6;     // user must be 1.6× the baseline
-          const ABSOLUTE_FLOOR = 6;      // minimum delta over silence
-          const HOLD_MS = 100;           // sustained-speech window
-
-          function tick() {
-            if (!voiceOn) {
-              aboveSince = 0;
-              bgRms = 0;
-              requestAnimationFrame(tick);
-              return;
-            }
-            if (!agentSpeaking) {
-              aboveSince = 0;
-              bgRms = 0; // reset so next turn starts fresh
-              requestAnimationFrame(tick);
-              return;
-            }
-            analyser.getByteTimeDomainData(buf);
-            let sumSq = 0;
-            for (let i = 0; i < buf.length; i++) {
-              const d = buf[i] - 128;
-              sumSq += d * d;
-            }
-            const rms = Math.sqrt(sumSq / buf.length);
-            const thresh = Math.max(ABSOLUTE_FLOOR, bgRms * BASELINE_MULT);
-            const now = performance.now();
-            if (rms > thresh) {
-              if (aboveSince === 0) aboveSince = now;
-              else if (now - aboveSince > HOLD_MS) {
-                aboveSince = 0;
-                triggerBargeIn();
-              }
-            } else {
-              aboveSince = 0;
-              // Only feed the baseline when we're BELOW threshold —
-              // otherwise the user's own voice would pull the baseline
-              // up and hide itself.
-              bgRms = bgRms === 0 ? rms : bgRms * 0.88 + rms * 0.12;
-            }
-            requestAnimationFrame(tick);
-          }
-          volumeMonitor = { ctx, stream, analyser };
-          tick();
-        } catch (err) {
-          voiceHint.textContent = 'barge-in monitor off: ' + err.name;
-          voiceHint.classList.add('warn');
-        }
-      }
-
-      function stopVolumeMonitor() {
-        if (!volumeMonitor) return;
-        try { volumeMonitor.stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
-        try { volumeMonitor.ctx.close(); } catch (_) {}
-        volumeMonitor = null;
-      }
-
-      function triggerBargeIn() {
-        // Mark the currently-playing turn as abandoned BEFORE firing
-        // /bargein so any chunks already in flight over SSE get
-        // dropped immediately on arrival. Without this we'd wait for
-        // the server's bargein echo to round-trip, and in that window
-        // the next turn's audio can start overlapping the old one.
-        if (currentTurnIdPlaying) abandonedTurns.add(currentTurnIdPlaying);
-        stopSpeaking();
-        fetch('/bargein', { method: 'POST' }).catch(() => {});
-        voiceHint.textContent = 'interrupted — listening…';
-        // Bring the recognizer back immediately so the user's speech
-        // is captured as their next turn.
-        micPausedForTts = false;
-        if (voiceOn) requestListen();
-      }
-
-      function requestListen() {
-        shouldListen = true;
-        if (!recognition) return;
-        try { recognition.start(); } catch (_) { /* will retry via onend */ }
-      }
-
-      function pauseListen() {
-        shouldListen = false;
-        if (!recognition) return;
-        try { recognition.stop(); } catch (_) {}
-      }
-
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) {
         micBtn.disabled = true;
         voiceHint.textContent = 'Voice requires Chrome or Safari';
@@ -1180,111 +750,165 @@
         });
       }
 
-      function startVoice() {
+      function requestListen() {
+        shouldListen = true;
+        if (!recognition) return;
+        try { recognition.start(); } catch (_) {}
+      }
+      function pauseListen() {
+        shouldListen = false;
+        if (!recognition) return;
+        try { recognition.stop(); } catch (_) {}
+      }
+
+      function triggerBargeIn() {
+        if (currentTurnIdPlaying) abandonedTurns.add(currentTurnIdPlaying);
+        stopSpeaking();
+        client.bargeIn().catch(() => {});
+        voiceHint.textContent = 'interrupted — listening…';
+        micPausedForTts = false;
+        if (voiceOn) requestListen();
+      }
+
+      async function startVoice() {
         if (voiceOn) return;
+        voiceOn = true;
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+        } catch (err) {
+          voiceOn = false;
+          voiceHint.textContent = 'mic error: ' + err.name;
+          voiceHint.classList.add('warn');
+          return;
+        }
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(micStream);
+
+        audioPlayer = new AudioPlayer({
+          audioContext: audioCtx,
+          onEnd: () => {
+            agentSpeaking = false;
+            micBtn.classList.remove('speaking');
+            setTimeout(() => {
+              if (audioPlayer && audioPlayer.activeCount === 0) {
+                micPausedForTts = false;
+                if (voiceOn) {
+                  voiceHint.textContent = 'listening…';
+                  requestListen();
+                }
+              }
+            }, 350);
+          },
+        });
+
+        micCapture = new MicCapture();
+        try {
+          await micCapture.start({ audioContext: audioCtx, source });
+        } catch (err) {
+          console.warn('[voice] MicCapture failed:', err);
+          micCapture = null;
+        }
+
+        if (EMOTION_ENABLED) {
+          emotionDetector = new EmotionDetector();
+          emotionDetector.preload().catch(() => {});
+        }
+
+        bargeInMonitor = new BargeInMonitor({
+          isActive: () => agentSpeaking,
+          onBargeIn: triggerBargeIn,
+        });
+        bargeInMonitor.start(source);
+
+        turnDebouncer = new TurnDebouncer({
+          silenceMs: 1200,
+          onCommit: async (text) => {
+            // Classify the last ~5s of mic audio. Pre-fetched during
+            // scheduling, so the wait here is usually ~0ms.
+            let emotion = null;
+            try {
+              const detected = await (pendingEmotionResult ??
+                Promise.resolve(null));
+              pendingEmotionResult = null;
+              if (detected) {
+                emotion = { label: detected.label, confidence: detected.confidence };
+                voiceHint.textContent =
+                  'sent · ' + detected.label.toLowerCase() +
+                  ' ' + Math.round(detected.confidence * 100) + '%';
+              }
+            } catch (_) {}
+            input.value = text;
+            await sendText(text, emotion);
+          },
+          onStateChange: (s) => {
+            if (s.kind === 'listening') {
+              input.value = s.preview;
+              voiceHint.textContent = 'listening…';
+            } else if (s.kind === 'pausing') {
+              input.value = s.buffer;
+              voiceHint.textContent = 'pausing…';
+            }
+          },
+        });
+
         recognition = new SR();
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.lang = navigator.language || 'en-US';
-        // Ask the browser for multiple hypotheses so we can pick the
-        // highest-confidence one on final rather than always taking
-        // alternative[0] (which is just the first ranked hypothesis,
-        // not necessarily the one the engine is most sure about).
         recognition.maxAlternatives = 4;
-
         recognition.onresult = (ev) => {
-          // Browser AEC via WebRTC loopback wasn't reliable enough to
-          // keep recognition running during agent speech — the agent's
-          // own voice kept bleeding into the transcript. Fall back to
-          // the safe behavior: ignore any onresult while the agent is
-          // speaking or the mic is paused. The trade-off is that the
-          // user loses the first word when they interrupt, but the
-          // transcripts stay clean.
           if (micPausedForTts || agentSpeaking) return;
-
           let interim = '';
           let finalText = '';
-          let finalConfidence = 1;
+          let finalConf = 1;
           for (let i = ev.resultIndex; i < ev.results.length; i++) {
             const r = ev.results[i];
             if (r.isFinal) {
-              // Pick the highest-confidence alternative among the
-              // N hypotheses the engine produced. r[0] is only the
-              // rank-0 result, not necessarily the most confident.
               let best = r[0];
               for (let j = 1; j < r.length; j++) {
                 if ((r[j].confidence || 0) > (best.confidence || 0)) best = r[j];
               }
               finalText += best.transcript;
-              finalConfidence = Math.min(finalConfidence, best.confidence || 0);
+              finalConf = Math.min(finalConf, best.confidence || 0);
             } else {
-              // Interim alternatives rarely carry meaningful
-              // confidence, so just take rank-0.
               interim += r[0].transcript;
             }
           }
-
-          // Track when the current utterance started so we can fire a
-          // short "I'm still listening" backchannel after a few seconds
-          // of continuous speech.
-          const now = performance.now();
-          if (interim.trim() || finalText.trim()) {
-            if (backchannelStartedAt === 0) backchannelStartedAt = now;
-            // Fire BEFORE updating lastInterimAt so we can inspect the
-            // gap since the previous interim.
-            maybeBackchannel(interim || finalText);
-            lastInterimAt = now;
-          }
-
-          if (interim.trim()) {
-            // User is still speaking — cancel any pending commit and
-            // show the live tail (buffer + current interim).
-            cancelTurnCommit();
-            const preview = (turnBuffer + ' ' + interim.trim()).trim();
-            input.value = preview;
-            voiceHint.textContent = 'listening…';
-          }
+          if (interim.trim()) turnDebouncer.onInterim(interim);
           if (finalText.trim()) {
-            turnBuffer = (turnBuffer + ' ' + finalText.trim()).trim();
-            input.value = turnBuffer;
-            const conf = finalConfidence < 1 ? ` (${Math.round(finalConfidence * 100)}%)` : '';
-            voiceHint.textContent = 'pausing…' + conf;
-            if (finalConfidence > 0 && finalConfidence < 0.55) {
-              voiceHint.classList.add('warn');
-            } else {
-              voiceHint.classList.remove('warn');
+            turnDebouncer.onFinal(finalText);
+            if (finalConf > 0 && finalConf < 0.55) voiceHint.classList.add('warn');
+            else voiceHint.classList.remove('warn');
+            // Pre-fetch emotion classification so it's usually ready by
+            // the time the debounce commits.
+            if (EMOTION_ENABLED && emotionDetector && micCapture) {
+              const pcm = micCapture.snapshot(5);
+              if (pcm) {
+                pendingEmotionResult = emotionDetector
+                  .classify(pcm, micCapture.sampleRate, { timeoutMs: 1500 })
+                  .catch(() => null);
+              }
             }
-            scheduleTurnCommit();
           }
         };
-
         recognition.onerror = (ev) => {
           voiceHint.textContent = 'mic error: ' + ev.error;
           voiceHint.classList.add('warn');
         };
-
         recognition.onend = () => {
-          // Restart whenever we want to be listening. This handles both
-          // browser auto-stops (on silence) and the timing race where
-          // our pauseListen() / requestListen() pair calls start() while
-          // the recognizer is still finishing its stop — we retry here
-          // and eventually succeed.
           if (voiceOn && shouldListen) {
             try { recognition.start(); } catch (_) {}
           }
         };
 
-        voiceOn = true;
         requestListen();
-        startVolumeMonitor();
-        // Pre-warm the SER pipeline. Download + initial ONNX load is
-        // the slow part (~5s on fast network); doing it here means by
-        // the time the user finishes their first utterance the
-        // pipeline is already hot, so inference runs in ~100-300ms
-        // instead of "nothing happens for 30 seconds".
-        if (EMOTION_ENABLED) {
-          ensureEmotionPipeline().catch(() => {});
-        }
         micBtn.classList.add('on');
         micLabel.textContent = 'Listening';
         voiceHint.classList.remove('warn');
@@ -1294,414 +918,26 @@
       function stopVoice() {
         voiceOn = false;
         shouldListen = false;
-        cancelTurnCommit();
-        turnBuffer = '';
-        if (recognition) {
-          try { recognition.stop(); } catch (_) {}
-          recognition = null;
-        }
-        stopVolumeMonitor();
+        turnDebouncer?.cancel();
+        turnDebouncer = null;
+        try { recognition?.stop(); } catch (_) {}
+        recognition = null;
+        bargeInMonitor?.stop();
+        bargeInMonitor = null;
+        micCapture?.stop();
+        micCapture = null;
+        emotionDetector = null;
+        audioPlayer?.stopAll();
+        audioPlayer = null;
+        try { micStream?.getTracks().forEach((t) => t.stop()); } catch (_) {}
+        micStream = null;
+        try { audioCtx?.close(); } catch (_) {}
+        audioCtx = null;
         micBtn.classList.remove('on', 'speaking');
         micLabel.textContent = 'Voice';
         voiceHint.textContent = '';
         stopSpeaking();
       }
-
-      // Auto-pick the highest-quality system voice for the browser
-      // speechSynthesis fallback path (only used when the Kokoro PCM
-      // cache isn't primed yet, or when no server audio is coming).
-      let preferredVoice = null;
-
-      function scoreVoice(v) {
-        const lang = (navigator.language || 'en-US').toLowerCase();
-        let s = 0;
-        if (v.lang.toLowerCase().startsWith(lang.slice(0, 2))) s += 10;
-        if (v.localService) s += 2;
-        if (/premium|enhanced|neural|natural/i.test(v.name)) s += 6;
-        if (/samantha|alex|karen|daniel|serena|moira|ava|siri/i.test(v.name)) s += 3;
-        if (/google|chrome/i.test(v.name)) s += 1;
-        return s;
-      }
-
-      function pickPreferredVoice() {
-        if (!synth) return;
-        const voices = synth.getVoices();
-        if (voices.length === 0) return;
-        const sorted = [...voices].sort((a, b) => scoreVoice(b) - scoreVoice(a));
-        preferredVoice = sorted[0] ?? null;
-      }
-
-      if (synth) {
-        pickPreferredVoice();
-        synth.addEventListener?.('voiceschanged', pickPreferredVoice);
-      }
-
-      // Small random jitter so consecutive utterances don't hit the
-      // exact same prosody — fights the "robotic tag" feeling.
-      function jitter(base, amount) {
-        return base + (Math.random() - 0.5) * amount;
-      }
-
-      function speak(text, opts = {}) {
-        if (!synth) return;
-        if (!text || !text.trim()) return;
-        if (!voiceOn) return;
-        const u = new SpeechSynthesisUtterance(text);
-        if (preferredVoice) u.voice = preferredVoice;
-        // Filler: drawn-out, slightly lower pitch, moderate rate variation.
-        // Content: normal pace with a touch of jitter so it doesn't feel flat.
-        u.rate = opts.filler ? jitter(0.7, 0.1) : jitter(1.02, 0.08);
-        u.pitch = opts.filler ? jitter(0.88, 0.08) : jitter(1.0, 0.06);
-        u.onstart = () => {
-          agentSpeaking = true;
-          if (!micPausedForTts) {
-            micPausedForTts = true;
-            // Stop the recognizer so AEC leak doesn't show up as fake
-            // user turns. The user can still interrupt via the volume
-            // monitor (different mic stream with its own AEC), which
-            // fires barge-in and restarts recognition.
-            pauseListen();
-          }
-          micBtn.classList.add('speaking');
-          voiceHint.textContent = 'agent speaking — mic paused';
-        };
-        u.onend = () => {
-          currentUtterance = null;
-          const idx = ttsQueue.indexOf(u);
-          if (idx >= 0) ttsQueue.splice(idx, 1);
-          // Ask the browser directly — it knows for certain whether
-          // more utterances are still in its queue or actively speaking.
-          if (!synth.speaking && !synth.pending && ttsQueue.length === 0) {
-            agentSpeaking = false;
-            micBtn.classList.remove('speaking');
-            // Restart recognition fresh after a short tail so residual
-            // speaker audio doesn't re-trigger it. requestListen() sets
-            // the desired state; the recognition.onend retry loop will
-            // pick it up once the recognizer finishes stopping.
-            setTimeout(() => {
-              if (!synth.speaking && !synth.pending) {
-                micPausedForTts = false;
-                if (voiceOn) {
-                  voiceHint.textContent = 'listening…';
-                  requestListen();
-                }
-              }
-            }, 350);
-          }
-        };
-        ttsQueue.push(u);
-        currentUtterance = u;
-        synth.speak(u);
-      }
-
-      function stopSpeaking() {
-        // 1. Kill browser speechSynthesis (used when OASIS_TTS_BACKEND=web-speech)
-        if (synth) {
-          try { synth.cancel(); } catch (_) {}
-        }
-        ttsQueue.length = 0;
-        currentUtterance = null;
-        // 2. Kill Web Audio sources (used when OASIS_TTS_BACKEND=kokoro).
-        // This was the reason barge-in "showed interrupted but the agent
-        // kept talking" — stopSpeaking only stopped speechSynthesis
-        // before, leaving the Kokoro PCM buffers to finish playing.
-        stopAllAudio();
-        agentSpeaking = false;
-        micPausedForTts = false;
-        micBtn.classList.remove('speaking');
-      }
-
-      // Intercept streaming agent output:
-      //   • When a server-side TTS backend provides real audio (base64
-      //     PCM), play it through Web Audio for highest quality.
-      //   • Otherwise fall back to browser speechSynthesis on the text.
-      let audioCtx = null;
-      let masterGain = null;
-      let playbackStreamDest = null; // MediaStreamAudioDestinationNode
-      let agentAudioEl = null;       // <audio> element that plays the recv side
-      let sendPeer = null;
-      let recvPeer = null;
-      let webrtcReadyPromise = null; // resolves once the loopback is plumbed
-      const activeAudioSources = new Set();
-      // Slight attenuation on master — combined with the AEC reference
-      // below, agent audio bleed into the mic is reduced to near-zero
-      // and users don't need to shout to interrupt.
-      const MASTER_VOLUME = 0.85;
-
-      /**
-       * Build a local WebRTC loopback so agent audio is played through
-       * an <audio> element — the playback path Chrome's AEC references.
-       * The mic's `getUserMedia({echoCancellation: true})` stream is
-       * then fully cancelled against what we're playing, giving
-       * call-quality duplex: user can interrupt at normal volume and
-       * the recognizer no longer picks up the agent's own voice.
-       *
-       * Topology:
-       *   BufferSource → masterGain → MediaStreamDestination
-       *      → RTCPeerConnection (send) → [local loopback]
-       *      → RTCPeerConnection (recv) → <audio>.srcObject
-       */
-      async function setupWebRTCLoopback() {
-        try {
-          const send = new RTCPeerConnection();
-          const recv = new RTCPeerConnection();
-
-          // Fake signaling: both peers live in the same page, so ICE
-          // candidates go straight across.
-          send.onicecandidate = (e) => {
-            if (e.candidate) recv.addIceCandidate(e.candidate).catch(() => {});
-          };
-          recv.onicecandidate = (e) => {
-            if (e.candidate) send.addIceCandidate(e.candidate).catch(() => {});
-          };
-
-          // When the recv peer receives the track, wire it into the
-          // <audio> element. That element is what AEC references.
-          recv.ontrack = (ev) => {
-            if (!agentAudioEl) {
-              agentAudioEl = document.createElement('audio');
-              agentAudioEl.autoplay = true;
-              agentAudioEl.setAttribute('playsinline', '');
-              // Keep it in the DOM but invisible — some browsers won't
-              // drive AEC against audio attached to a detached element.
-              agentAudioEl.style.display = 'none';
-              document.body.appendChild(agentAudioEl);
-            }
-            agentAudioEl.srcObject = ev.streams[0];
-            agentAudioEl.play().catch(() => {});
-          };
-
-          // Add the agent-audio track to the send peer.
-          for (const track of playbackStreamDest.stream.getAudioTracks()) {
-            send.addTrack(track, playbackStreamDest.stream);
-          }
-
-          // Offer/answer dance — purely local.
-          const offer = await send.createOffer();
-          await send.setLocalDescription(offer);
-          await recv.setRemoteDescription(offer);
-          const answer = await recv.createAnswer();
-          await recv.setLocalDescription(answer);
-          await send.setRemoteDescription(answer);
-
-          sendPeer = send;
-          recvPeer = recv;
-        } catch (err) {
-          console.warn('webrtc loopback setup failed, falling back to direct output', err);
-          // Fall back: connect masterGain straight to destination so
-          // audio still plays, just without the AEC-friendly path.
-          try { masterGain.connect(audioCtx.destination); } catch (_) {}
-        }
-      }
-
-      function ensureAudioCtx() {
-        if (!audioCtx) {
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (!masterGain) {
-          masterGain = audioCtx.createGain();
-          masterGain.gain.value = MASTER_VOLUME;
-        }
-        if (!playbackStreamDest) {
-          playbackStreamDest = audioCtx.createMediaStreamDestination();
-          masterGain.connect(playbackStreamDest);
-          // Kick off loopback wiring; playPcm awaits this on first use.
-          webrtcReadyPromise = setupWebRTCLoopback();
-        }
-        if (audioCtx.state === 'suspended') {
-          audioCtx.resume().catch(() => {});
-        }
-        return audioCtx;
-      }
-
-      // Track filler sources with their scheduled start/end so we can
-      // cancel any filler that hasn't actually started playing yet
-      // when the real reply arrives.
-      const fillerSources = new Map(); // src -> { startAt, endAt }
-      // Per-turn "reply has started" flag so a stale filler chunk
-      // arriving after the first reply chunk gets dropped instead of
-      // playing on top of the reply.
-      const replyStartedForTurn = new Set(); // turnIds whose reply is in flight
-      // Turns whose playback has been explicitly abandoned (barge-in).
-      // Any tts.chunk that arrives for one of these is dropped on the
-      // floor — the server's abort is async, so late chunks will
-      // otherwise queue on top of the NEXT turn's audio.
-      const abandonedTurns = new Set();
-      // Most recent turnId whose chunk we've played — so triggerBargeIn()
-      // knows which turn to mark abandoned without waiting for the
-      // server's bargein event to round-trip back.
-      let currentTurnIdPlaying = null;
-
-      async function playPcm(base64, sampleRate, opts, onEnd) {
-        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-        const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
-        const float = new Float32Array(pcm.length);
-        for (let i = 0; i < pcm.length; i++) float[i] = pcm[i] / 32768;
-        const ctx = ensureAudioCtx();
-        // Wait for the WebRTC loopback to finish negotiating the first
-        // time so the opening PCM lands on the AEC-referenced path.
-        if (webrtcReadyPromise) {
-          await webrtcReadyPromise;
-          webrtcReadyPromise = null;
-        }
-        const buffer = ctx.createBuffer(1, float.length, sampleRate);
-        buffer.getChannelData(0).set(float);
-        const src = ctx.createBufferSource();
-        src.buffer = buffer;
-
-        // Emotion-adaptive TTS: pull per-turn directives (from the
-        // server's EmotionAdaptiveTts) and apply them at playback.
-        // Fillers (backchannels, pre-LLM filler) intentionally skip
-        // emotion adaptation — they're acoustic feedback, not content.
-        const dir = EMOTION_ENABLED && opts && opts.turnId && !opts.filler
-          ? directivesByTurn.get(opts.turnId)
-          : null;
-        const rate = dir && typeof dir.playbackRate === 'number' ? dir.playbackRate : 1;
-        if (rate !== 1) src.playbackRate.value = rate;
-
-        // Gain chain: backchannel opts.gain (e.g. 0.9) composes with
-        // emotion-directed gain (e.g. 0.92 for soft delivery). Both
-        // fold into a single GainNode inserted before masterGain so
-        // the signal path stays shallow.
-        let gainProduct = 1;
-        if (opts && typeof opts.gain === 'number' && opts.gain !== 1) gainProduct *= opts.gain;
-        if (dir && typeof dir.gain === 'number' && dir.gain !== 1) gainProduct *= dir.gain;
-        let dest = masterGain;
-        if (gainProduct !== 1) {
-          const gainNode = ctx.createGain();
-          gainNode.gain.value = gainProduct;
-          gainNode.connect(masterGain);
-          dest = gainNode;
-        }
-        src.connect(dest);
-
-        // Inter-chunk silence — extended pauses for sad/empathetic
-        // emotions, short gaps for happy/urgent. Applied as schedule
-        // offset; the effective chunk duration scales with playbackRate
-        // so we adjust endAt accordingly.
-        const extraSilenceSec = dir && typeof dir.interChunkSilenceMs === 'number'
-          ? dir.interChunkSilenceMs / 1000
-          : 0;
-        const effectiveDuration = buffer.duration / (rate || 1);
-        const startAt = Math.max(ctx.currentTime, audioQueueEndsAt + extraSilenceSec);
-        const endAt = startAt + effectiveDuration;
-        audioQueueEndsAt = endAt;
-        src.start(startAt);
-        activeAudioSources.add(src);
-        if (opts && opts.filler) fillerSources.set(src, { startAt, endAt });
-        src.onended = () => {
-          activeAudioSources.delete(src);
-          fillerSources.delete(src);
-          onEnd?.();
-        };
-        return src;
-      }
-
-      let audioQueueEndsAt = 0;
-
-      /**
-       * A real reply chunk just arrived. Cancel any filler that hasn't
-       * started playing yet so the reply slots in right after the
-       * currently-playing filler (or immediately if none is playing)
-       * instead of queueing behind 2-3 more pending fillers.
-       */
-      function truncatePendingFillers() {
-        const ctx = audioCtx;
-        if (!ctx) return;
-        const now = ctx.currentTime;
-        let latestInFlightEnd = now;
-        for (const [src, timing] of fillerSources) {
-          if (timing.startAt > now + 0.01) {
-            // Not started yet — cancel it.
-            try { src.stop(); } catch (_) {}
-            activeAudioSources.delete(src);
-            fillerSources.delete(src);
-          } else {
-            // Currently playing — let it finish, track its end.
-            latestInFlightEnd = Math.max(latestInFlightEnd, timing.endAt);
-          }
-        }
-        audioQueueEndsAt = latestInFlightEnd;
-      }
-
-      function stopAllAudio() {
-        for (const src of activeAudioSources) {
-          try { src.stop(); } catch (_) {}
-        }
-        activeAudioSources.clear();
-        fillerSources.clear();
-        audioQueueEndsAt = 0;
-      }
-
-      evt.addEventListener('tts.chunk', (raw) => {
-        const p = JSON.parse(raw.data);
-        if (!voiceOn) return;
-        if (p.filler && !fillerAudio) return; // user disabled audible fillers
-        // Drop any chunk for a turn the user has barged-in out of.
-        // Server abort is async so late PCM keeps arriving for a
-        // beat — letting it through overlaps the next turn's audio.
-        if (abandonedTurns.has(p.turnId)) return;
-        // Drop stale filler chunks that arrive AFTER the real reply has
-        // already started for this turn. Otherwise they'd schedule at
-        // the just-truncated audioQueueEndsAt and overlap the reply.
-        if (p.filler && replyStartedForTurn.has(p.turnId)) return;
-
-        if (p.audio) {
-          // Server-side TTS (Kokoro). Play real PCM and drive the same
-          // speaking-state bookkeeping that speechSynthesis would.
-          currentTurnIdPlaying = p.turnId;
-          if (!agentSpeaking) {
-            agentSpeaking = true;
-            micPausedForTts = true;
-            // Stop recognition during agent speech — AEC leaked too
-            // much, so we revert to the safe pause-during-playback
-            // pattern. Barge-in still works via the volume monitor
-            // on a separate AEC-enabled mic stream.
-            pauseListen();
-            micBtn.classList.add('speaking');
-            voiceHint.textContent = 'agent speaking — mic paused';
-          }
-          // On the FIRST reply chunk per turn, drop any fillers still
-          // queued but not yet playing so the answer slots in right
-          // after the currently-speaking filler. Mark the turn so:
-          //   a) late-arriving filler chunks are ignored (no overlap),
-          //   b) subsequent reply chunks don't re-truncate — they
-          //      schedule normally after the previous reply chunk.
-          if (!p.filler && !replyStartedForTurn.has(p.turnId)) {
-            replyStartedForTurn.add(p.turnId);
-            truncatePendingFillers();
-          }
-          playPcm(p.audio, p.sampleRate, { filler: p.filler === true, turnId: p.turnId }, () => {
-            if (activeAudioSources.size === 0) {
-              agentSpeaking = false;
-              micBtn.classList.remove('speaking');
-              setTimeout(() => {
-                if (activeAudioSources.size === 0) {
-                  micPausedForTts = false;
-                  if (voiceOn) {
-                    voiceHint.textContent = 'listening…';
-                    requestListen();
-                  }
-                }
-              }, 350);
-            }
-          });
-        } else {
-          // Fallback: browser speechSynthesis on the text.
-          speak(p.text, { filler: p.filler === true });
-        }
-      });
-      evt.addEventListener('bargein', (raw) => {
-        try {
-          const p = JSON.parse(raw.data);
-          if (p.interruptedTurnId) abandonedTurns.add(p.interruptedTurnId);
-        } catch (_) {}
-        stopSpeaking();
-      });
-
-      loadBackend();
-      refreshState();
-      setInterval(refreshState, 5000);
     </script>
   </body>
 </html>

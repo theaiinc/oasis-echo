@@ -7,6 +7,7 @@
     { "path": "./packages/coordinator" },
     { "path": "./packages/reasoning" },
     { "path": "./packages/orchestrator" },
+    { "path": "./packages/sdk" },
     { "path": "./packages/app" }
   ]
 }

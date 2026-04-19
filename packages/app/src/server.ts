@@ -459,6 +459,32 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Serve the compiled SDK as static ESM for the browser. We keep
+    // this simple — no mimetype table, just .js files resolving into
+    // packages/sdk/dist/. index.html pulls it in via an importmap.
+    if (req.method === 'GET' && url.pathname.startsWith('/sdk/')) {
+      const rel = url.pathname.replace(/^\/sdk\//, '');
+      if (rel.includes('..')) {
+        res.writeHead(403);
+        res.end('forbidden');
+        return;
+      }
+      const target = rel.endsWith('.js') ? rel : `${rel}/index.js`;
+      const absolute = join(__dirname, '..', '..', 'sdk', 'dist', target);
+      try {
+        const content = readFileSync(absolute, 'utf8');
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        });
+        res.end(content);
+      } catch {
+        res.writeHead(404);
+        res.end('not found');
+      }
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/turn') {
       const body = await readBody(req);
       const parsed = (() => {
