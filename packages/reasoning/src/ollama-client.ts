@@ -73,6 +73,9 @@ export class OllamaReasoner implements Reasoner {
           model: this.model,
           messages,
           stream: true,
+          // Keep the reasoner model hot in VRAM for 30 minutes so
+          // follow-up turns don't hit a cold-reload timeout.
+          keep_alive: '30m',
           // Reasoning models (gemma4, qwen3) consume num_predict on
           // invisible chain-of-thought when `think` is enabled, which
           // makes the streamed response look empty. For voice replies

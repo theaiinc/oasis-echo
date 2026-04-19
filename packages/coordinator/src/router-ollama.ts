@@ -15,9 +15,16 @@ import {
 
 /**
  * Intents the SLM is allowed to handle end-to-end with its own reply.
- * Everything else is forced to escalate to the reasoner regardless of
- * what the SLM's self-assessment says — this gives the tiered stack
- * predictable routing even when router and reasoner share a model.
+ * For these, we trust the SLM's kind="local"|"escalate" call and its
+ * generated reply. For anything else (question_*, command_*), we
+ * force escalation regardless of SLM self-assessment so real content
+ * goes through the reasoner.
+ *
+ * `unknown` is included: when the SLM can't confidently classify but
+ * does produce a reply, let that reply through. The pipeline still
+ * honors an explicit kind="escalate" from the SLM (that's how the
+ * `alwaysEscalate` fallback behaves on timeouts — intent=unknown +
+ * kind=escalate + no reply → pipeline escalates properly).
  */
 const SMALLTALK_INTENTS: ReadonlySet<Intent> = new Set([
   'greeting',
@@ -28,6 +35,7 @@ const SMALLTALK_INTENTS: ReadonlySet<Intent> = new Set([
   'cancel',
   'stop',
   'wait',
+  'unknown',
 ]);
 
 export type OllamaRouterOpts = {
@@ -80,15 +88,29 @@ export class OllamaRouter implements Router {
           model: this.model,
           messages: [{ role: 'user', content: 'ok' }],
           stream: false,
+          keep_alive: '30m',
           options: { num_predict: 1 },
         }),
         signal: AbortSignal.timeout(60_000),
       });
       this.logger?.info('slm router warm');
+      // Re-pin every 20 minutes so the model doesn't drop out of VRAM
+      // during long idle periods (default Ollama eviction is 5m).
+      if (!this.keepAliveTimer) {
+        this.keepAliveTimer = setInterval(() => {
+          this.warm().catch(() => {});
+        }, 20 * 60 * 1000);
+        // Don't block process exit on the keepalive timer.
+        if (typeof this.keepAliveTimer.unref === 'function') {
+          this.keepAliveTimer.unref();
+        }
+      }
     } catch (err) {
       this.logger?.warn('slm router warm failed', { error: String(err) });
     }
   }
+
+  private keepAliveTimer: NodeJS.Timeout | null = null;
 
   async route(input: { text: string; state: DialogueState }): Promise<RouterOutput> {
     const prompt = buildRouterPrompt(input.text, input.state);
@@ -113,6 +135,9 @@ export class OllamaRouter implements Router {
             { role: 'user', content: prompt },
           ],
           stream: false,
+          // Keep the router model hot in VRAM for 30 minutes so
+          // follow-up turns don't hit a cold-reload timeout.
+          keep_alive: '30m',
           // Disable "thinking" mode — reasoning models like gemma4
           // otherwise spend all num_predict tokens on invisible
           // internal reasoning and return an empty content field.
