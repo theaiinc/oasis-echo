@@ -5,6 +5,7 @@ import {
   LastTurnsSummarizer,
   SentenceChunker,
   type Router,
+  type SpeculationHit,
   type StreamingTts,
   type Summarizer,
 } from '@oasis-echo/coordinator';
@@ -179,6 +180,131 @@ export class Pipeline {
    */
   async bargeIn(): Promise<boolean> {
     return this.arbiter.bargeIn(Date.now());
+  }
+
+  /**
+   * Fast path for committed speculations. Skips the router (already
+   * decided) and filler logic (we already have sentences ready to
+   * speak). Drains the pre-computed sentence stream through TTS and
+   * emits the same turn.complete as a normal escalate / local.
+   */
+  async handleCommittedSpeculation(
+    hit: SpeculationHit,
+    userText: string,
+    opts: { turnId?: string } = {},
+  ): Promise<Turn> {
+    this.turnCounter++;
+    const turnId = opts.turnId ?? `t${this.turnCounter}-${Date.now().toString(36)}`;
+    const startedAtMs = Date.now();
+    const turnSpan = this.tracer?.start('turn', undefined, { turnId, speculated: 'hit' });
+
+    await this.bus.emit({
+      type: 'route.decision',
+      turnId,
+      decision: hit.routerOutput.decision,
+      atMs: Date.now(),
+    });
+
+    const signal = this.arbiter.beginTurn(turnId, () => {});
+    let agentText = '';
+    let interrupted = false;
+
+    try {
+      await this.bus.emit({ type: 'tts.start', turnId, atMs: Date.now() });
+      await this.maybeApologize(turnId, signal);
+
+      // Drain sentences from the speculation buffer into a local queue
+      // so the filler pre-roll below can race against "first sentence
+      // is ready" without consuming it from the iterator.
+      const sentenceQueue: string[] = [];
+      let drainDone = false;
+      const drainerPromise = (async () => {
+        try {
+          for await (const s of hit.sentences) {
+            if (signal.aborted) break;
+            sentenceQueue.push(s);
+          }
+        } catch {
+          /* ignore — may be aborted */
+        }
+        drainDone = true;
+      })();
+
+      // NB: we deliberately DO NOT play a thinking filler here, even
+      // if the reasoner is still mid-stream at commit time. Fillers
+      // AFTER commit feel artificial to the user — the speedup should
+      // come from speculation landing ahead of commit, not from
+      // bridging silence with "Let me think…" beats. The `escalate()`
+      // miss-path still plays fillers because that path is running
+      // the reasoner from scratch and needs to fill the >3s wait.
+      //
+      // Drain the queue; play each sentence as soon as it's available.
+      while (!signal.aborted) {
+        if (sentenceQueue.length > 0) {
+          const next = sentenceQueue.shift()!;
+          agentText = agentText ? agentText + ' ' + next : next;
+          await this.streamTts(turnId, next, signal);
+        } else if (drainDone) {
+          break;
+        } else {
+          await sleep(20);
+        }
+      }
+      await drainerPromise;
+      await hit.done.catch(() => undefined);
+
+      if (signal.aborted) {
+        interrupted = true;
+        this.metrics?.inc('interruptions_total');
+      } else {
+        await this.bus.emit({ type: 'tts.done', turnId, atMs: Date.now() });
+      }
+      this.metrics?.observe('ttfa_ms', Date.now() - startedAtMs, { tier: 'speculated' });
+      this.metrics?.inc('turns_total', { tier: 'speculated' });
+    } catch (err) {
+      if (signal.aborted) {
+        interrupted = true;
+        this.metrics?.inc('interruptions_total');
+      } else {
+        this.logger?.error('speculation playback failed', { error: String(err) });
+        const apology = "Sorry, I can't reach that right now.";
+        await this.streamTts(turnId, apology, signal).catch(() => undefined);
+        agentText = apology;
+      }
+    } finally {
+      this.arbiter.endTurn(turnId);
+    }
+
+    const tier: 'local' | 'escalated' =
+      hit.routerOutput.decision.kind === 'local' ? 'local' : 'escalated';
+    const turn: Turn = {
+      id: turnId,
+      startedAtMs,
+      endedAtMs: Date.now(),
+      userText,
+      intent: hit.routerOutput.intent as Intent,
+      agentText: agentText.trim(),
+      tier,
+      interrupted,
+    };
+
+    this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+    this.state.applyIntent(turn.intent ?? 'unknown');
+    this.state.recordTurn(turn);
+
+    if (this.turnCounter % this.summarizeEveryNTurns === 0) {
+      try {
+        const snapshot = this.state.snapshot();
+        const summary = await this.summarizer.summarize(snapshot.turns, snapshot.summary);
+        this.state.setSummary(summary);
+      } catch (err) {
+        this.logger?.warn('summarizer failed', { error: String(err) });
+      }
+    }
+
+    if (turnSpan) this.tracer?.end(turnSpan, { tier, intent: turn.intent });
+    await this.bus.emit({ type: 'turn.complete', turn });
+    return turn;
   }
 
   private async speakLocal(

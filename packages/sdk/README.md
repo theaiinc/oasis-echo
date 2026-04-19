@@ -59,11 +59,21 @@ emo.preload();
 let agentSpeaking = false;
 new BargeInMonitor({
   isActive: () => agentSpeaking,
+  // 600ms grace window after `isActive` flips true — keeps the
+  // adaptive baseline from tripping on the FIRST frames of agent TTS
+  // (residual echo bleeding through AEC) before it has a chance to
+  // stabilize. Lowered or raised per your environment.
+  graceMs: 600,
   onBargeIn: () => { player.stopAll(); client.bargeIn(); },
 }).start(source);
 
 client.on('tts.chunk', (p) => {
   agentSpeaking = true;
+  // `AudioPlayer` owns audio for the whole turn. DO NOT fall through
+  // to `speechSynthesis.speak()` on chunks without PCM — Kokoro-style
+  // backends stream one sentence per chunk and can emit an empty one
+  // mid-turn; letting synth pick up that gap causes two TTS voices
+  // to overlap.
   if (p.audio) player.playPcm(p.audio, p.sampleRate, { turnId: p.turnId, filler: p.filler });
 });
 client.on('emotion.directives', (p) => player.setDirectives(p.turnId, p.directives));
@@ -159,14 +169,43 @@ queueEndsAt = plan.endAt;
 - **`AudioPlayer`** — Web Audio playback with per-turn emotion directives (playback rate, composed gain, inter-chunk silence). Applies `scheduleChunk` under the hood.
 - **`MicCapture`** — off-main-thread PCM ring buffer via an inline `AudioWorklet`. Exposes `snapshot(durationSec)` for classification / replay. Ships a `resampleTo16k()` helper.
 - **`EmotionDetector`** — wraps `@huggingface/transformers` `audio-classification` pipeline with pre-warm, race-against-timeout classify, confidence floor + margin gate, and the "only-high-arousal-labels" filter that keeps casual speech from always reading as `sad`.
-- **`BargeInMonitor`** — adaptive volume-monitor barge-in detector with dynamic baseline (tracks ambient mic RMS while the agent is speaking and fires when user voice exceeds the baseline × multiplier).
+- **`BargeInMonitor`** — adaptive volume-monitor barge-in detector with a dynamic baseline (tracks ambient mic RMS while the agent is speaking and fires when user voice exceeds the baseline × multiplier). Options include `baselineMultiplier` (default 1.6), `absoluteFloor` (6), `holdMs` (100 — minimum sustained-speech time above threshold), and **`graceMs` (600 — observe-but-don't-fire window right after `isActive()` flips true, so the baseline can stabilize around the agent's first-frame bleed instead of false-triggering on it)**.
+
+## Behavioural invariants
+
+Things the SDK deliberately prevents — each one is a real bug we've hit:
+
+- **Single TTS path per turn.** Once `AudioPlayer.playPcm` has been called for a turn, your `tts.chunk` handler should NEVER fall through to `speechSynthesis.speak()` on chunks that happen to arrive without PCM — Kokoro-style backends stream sentence-by-sentence and can emit a gap chunk mid-turn. Letting synth cover that gap plays two agent voices simultaneously.
+- **`fetch` is called bound.** `OasisClient` wraps the default `fetch` in a closure so the browser doesn't throw `Illegal invocation` when calling it off a plain-object owner. If you pass your own `fetch`, make sure it's already bound.
+- **Barge-in grace window.** `BargeInMonitor` observes-but-doesn't-fire for the first `graceMs` after `isActive()` flips true, so the first frames of agent-TTS bleed can't trip an adaptive baseline that hasn't stabilized yet.
+- **Empty reply → no stuck UI.** Reflex-tier intents (`confirm`, `acknowledge`) can return an empty `agentText`. Callers should clear any pending/typing state and hide the reply bubble on `turn.complete` when `agentText` is empty, or the UI looks stuck.
+- **Confidence + margin gate on SER.** `EmotionDetector` requires `top1 ≥ 0.7` AND `(top1 − top2) ≥ 0.15` AND top-1 in the "informative labels" set (default excludes SAD / NEUTRAL / CALM — the classes the acted-speech-trained classifier over-fires on casual English). Keeps the server-side emotion adaptation out of always-softening mode.
 
 ## Platform notes
 
 - **SSE transport**: the SDK auto-detects `globalThis.EventSource` (native in browsers). In Node (20+) it falls back to a streaming `fetch` body reader — no extra dep required. Pass `eventSourceCtor` to override with the [`eventsource`](https://www.npmjs.com/package/eventsource) npm package if you want its reconnect semantics.
-- **`fetch`**: Node 18+ ships a native `fetch`. For older runtimes, pass your own via `new OasisClient({ fetch: customFetch })`.
+- **`fetch`**: Node 18+ ships a native `fetch`. The SDK wraps the default `fetch` in a closure internally because storing a bare reference and calling it off a non-`Window` owner throws `Illegal invocation` in browsers. If you supply `new OasisClient({ fetch: customFetch })`, we call it as-is — make sure your wrapper is already bound correctly.
 - **Zero coordinator dep**: the SDK does not import `@oasis-echo/coordinator` or any other server package. It carries its own minimal type definitions that mirror the server's SSE payloads.
 - **`@huggingface/transformers` is a peer dep**: only required if you use `EmotionDetector` (browser). Node / headless usage doesn't need it.
+- **Importing in a raw HTML page**: use an import map. The reference wiring in [packages/app/src/index.html](../app/src/index.html) is the canonical example:
+
+  ```html
+  <script type="importmap">
+    {
+      "imports": {
+        "@oasis-echo/sdk": "/sdk/index.js",
+        "@oasis-echo/sdk/browser": "/sdk/browser/index.js",
+        "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0"
+      }
+    }
+  </script>
+  <script type="module">
+    import { OasisClient } from '@oasis-echo/sdk';
+    // …
+  </script>
+  ```
+
+  The server in `packages/app` already serves compiled SDK files from `/sdk/*` (see its `GET /sdk/*` handler in `server.ts`), so the HTML just needs to point the import map at the right URLs.
 
 ## Deferred (phase 2)
 

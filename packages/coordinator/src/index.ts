@@ -8,3 +8,5 @@ export * from './router.js';
 export * from './router-ollama.js';
 export * from './summarizer.js';
 export * from './guardrail.js';
+export * from './speculation.js';
+export * from './streaming-stt.js';

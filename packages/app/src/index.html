@@ -339,6 +339,7 @@
       import { OasisClient, TurnDebouncer } from '@oasis-echo/sdk';
       import {
         AudioPlayer,
+        AudioStreamUpload,
         BargeInMonitor,
         EmotionDetector,
         MicCapture,
@@ -491,6 +492,12 @@
       let currentTurnIdPlaying = null;
       let agentSpeaking = false;
       let replyStartedForTurn = new Set();
+      // Turns the server has marked complete. audioPlayer.onEnd only
+      // restarts the mic when the currently-playing turn is in this
+      // set — otherwise brief gaps between sentence chunks would
+      // prematurely resume the mic, let ambient noise trigger a new
+      // /turn, and the arbiter aborts the in-flight reply.
+      const completedTurns = new Set();
 
       client.on('user.input', (p) => {
         addEvent('user.input', p);
@@ -545,7 +552,14 @@
             t.agentText = p.text;
             t.agentEl.textContent = p.text;
             t.hasModelText = true;
-          } else if (!t.agentEl.textContent.endsWith(p.text)) {
+          } else if (!t.agentEl.textContent.includes(p.text)) {
+            // `includes`, not `endsWith`: `route.decision` for a
+            // local turn sets the FULL reply in the bubble up front,
+            // then per-sentence `tts.chunk` events arrive with
+            // portions of that reply. Those portions appear earlier
+            // in the existing text (not at the end), so `endsWith`
+            // fails and the portion gets APPENDED — duplicating the
+            // reply. Substring check dedupes that cleanly.
             t.agentText = (t.agentText ? t.agentText + ' ' : '') + p.text;
             t.agentEl.textContent = t.agentText;
           }
@@ -605,7 +619,25 @@
         replyStartedForTurn.delete(p.turn.id);
         abandonedTurns.delete(p.turn.id);
         audioPlayer?.forgetDirectives(p.turn.id);
+        completedTurns.add(p.turn.id);
+        // Cap growth — only the currently-playing turnId matters, older
+        // ids are dead weight.
+        if (completedTurns.size > 32) {
+          const iter = completedTurns.values();
+          for (let i = 0; i < 16; i++) completedTurns.delete(iter.next().value);
+        }
+        // If the turn's last chunk already finished playing before
+        // turn.complete arrived (unusual but possible), resume mic now.
         if (currentTurnIdPlaying === p.turn.id) currentTurnIdPlaying = null;
+        if (audioPlayer && audioPlayer.activeCount === 0 && agentSpeaking) {
+          agentSpeaking = false;
+          micBtn.classList.remove('speaking');
+          micPausedForTts = false;
+          if (voiceOn) {
+            voiceHint.textContent = 'listening…';
+            requestListen();
+          }
+        }
       });
 
       client.on('turn.summary', (p) => {
@@ -621,7 +653,13 @@
 
       client.on('bargein', (p) => {
         addEvent('bargein', p);
-        if (p.interruptedTurnId) abandonedTurns.add(p.interruptedTurnId);
+        if (p.interruptedTurnId) {
+          abandonedTurns.add(p.interruptedTurnId);
+          // Treat an interrupted turn as "complete" for mic-resume
+          // purposes so any remaining queued chunks that still play
+          // can hand control back to the mic once they drain.
+          completedTurns.add(p.interruptedTurnId);
+        }
         stopSpeaking();
       });
 
@@ -643,12 +681,77 @@
       sessionLabel.textContent = 'live';
 
       /* ───────────────── Text-input submission ───────────────── */
+      // Speculation id generated fresh per utterance. Passed on every
+      // `sendPartial` + the final `sendTurn` so the server can stitch
+      // pre-computed work to the commit.
+      let speculationId = null;
+      let speculationFiredForBuffer = '';
+      // Interim-stability tracking: when the browser's `interim`
+      // text stops changing for INTERIM_STABLE_MS, treat it as a
+      // good speculation seed and fire sendPartial BEFORE the
+      // browser fires its first `isFinal`. Saves the 300-600ms
+      // between "user stops talking" and "browser emits isFinal",
+      // giving the server that much more time to pre-compute
+      // router + reasoner.
+      let lastInterim = '';
+      let interimStableTimer = null;
+      // Lowered from 400 → 300: each stable-interim plateau fires
+      // speculation 100ms earlier, giving the server's router +
+      // reasoner that much more runway before commit. The trade-off
+      // is slightly more restarts on volatile speech, but the
+      // restart threshold (0.78) tolerates STT tail wiggles cleanly.
+      const INTERIM_STABLE_MS = 300;
+      function clearInterimStability() {
+        if (interimStableTimer) {
+          clearTimeout(interimStableTimer);
+          interimStableTimer = null;
+        }
+        lastInterim = '';
+      }
+
+      // Mid-utterance backchannel ("mm hmm", "uh huh", "right") —
+      // fired ONLY when the user has clearly paused mid-thought, not
+      // after they've actually finished. Triggered from the
+      // interim-stability timer when the tail looks like an
+      // incomplete-thought fragment (conjunction, article, filler
+      // word). Never fires after commit — the agent responds cleanly,
+      // no "let me think" beats.
+      const INCOMPLETE_TAIL =
+        /(?:^|\s)(?:but|and|or|if|because|cause|cuz|so|when|while|as|though|although|yet|plus|like|with|for|to|of|at|what if|even if|only if|in case|what about|how about|the|a|an|my|your|his|her|their|our)\s*$/i;
+      const BACKCHANNEL_COOLDOWN_MS = 4500;
+      let lastBackchannelAt = 0;
+      async function maybeFireBackchannel(tail) {
+        if (!voiceOn || agentSpeaking || micPausedForTts) return;
+        if (!tail || !INCOMPLETE_TAIL.test(tail.trim())) return;
+        const now = performance.now();
+        if (now - lastBackchannelAt < BACKCHANNEL_COOLDOWN_MS) return;
+        lastBackchannelAt = now;
+        try {
+          const res = await fetch('/backchannel').then((r) => r.json());
+          if (!res?.ready || !res.audio || !audioPlayer) return;
+          // Play at 0.8× gain — backchannel should sit under the
+          // user's voice, not compete with it.
+          audioPlayer.playPcm(res.audio, res.sampleRate, {
+            filler: true,
+            gain: 0.8,
+          });
+        } catch (_) { /* non-fatal */ }
+      }
+      function newSpeculationId() {
+        return 'sp-' + Math.random().toString(36).slice(2, 10);
+      }
+
       async function sendText(text, emotion) {
         const t = (text ?? input.value ?? '').trim();
         if (!t) return;
         input.value = '';
         turnDebouncer?.cancel(); // flush any stale voice buffer
-        await client.sendTurn(emotion ? { text: t, emotion } : { text: t });
+        clearInterimStability();
+        const body = emotion ? { text: t, emotion } : { text: t };
+        if (speculationId) body.speculationId = speculationId;
+        speculationId = null;
+        speculationFiredForBuffer = '';
+        await client.sendTurn(body);
       }
 
       sendBtn.addEventListener('click', () => sendText());
@@ -738,6 +841,13 @@
       let bargeInMonitor = null;
       let turnDebouncer = null;
       let pendingEmotionResult = null;
+      // Server-side streaming STT over WebSocket. When connected, it
+      // replaces the browser SpeechRecognition as the source-of-truth
+      // transcript and drives speculation from server-side partials
+      // instead of the client debouncer.
+      let audioStream = null;
+      let audioStreamReady = false;
+      let serverPartialBuffer = '';
 
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) {
@@ -764,7 +874,23 @@
       function triggerBargeIn() {
         if (currentTurnIdPlaying) abandonedTurns.add(currentTurnIdPlaying);
         stopSpeaking();
-        client.bargeIn().catch(() => {});
+        // Forward any in-flight speculationId so the server can drop
+        // the pre-computation for the abandoned turn instead of
+        // keeping it sitting around waiting for a commit that won't come.
+        const abortedSpec = speculationId;
+        speculationId = null;
+        speculationFiredForBuffer = '';
+        serverPartialBuffer = '';
+        clearInterimStability();
+        // Tell the audio-stream WebSocket to flush server-side STT
+        // state too; otherwise the abandoned utterance's PCM keeps
+        // accumulating in the Whisper buffer and pollutes the next turn.
+        audioStream?.abortUtterance();
+        fetch('/bargein', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(abortedSpec ? { speculationId: abortedSpec } : {}),
+        }).catch(() => {});
         voiceHint.textContent = 'interrupted — listening…';
         micPausedForTts = false;
         if (voiceOn) requestListen();
@@ -794,6 +920,14 @@
         audioPlayer = new AudioPlayer({
           audioContext: audioCtx,
           onEnd: () => {
+            // Only resume mic if the SERVER has already marked this
+            // turn complete — otherwise a brief gap between sentence
+            // chunks (Kokoro synth pause) would restart mic capture,
+            // ambient audio could trigger recognition.onresult, and
+            // the turn-debouncer would fire a second /turn that
+            // aborts the in-flight reply via the arbiter.
+            const finishedTurnId = currentTurnIdPlaying;
+            if (!finishedTurnId || !completedTurns.has(finishedTurnId)) return;
             agentSpeaking = false;
             micBtn.classList.remove('speaking');
             setTimeout(() => {
@@ -814,6 +948,47 @@
         } catch (err) {
           console.warn('[voice] MicCapture failed:', err);
           micCapture = null;
+        }
+
+        // Server-side streaming STT over WebSocket is OFF by default —
+        // browser SpeechRecognition (Google's engine in Chrome) is
+        // faster, more accurate, and already on the client's critical
+        // path via `recognition.onresult`. Opt in with `?serverstt=1`
+        // if you want to experiment with the Whisper path.
+        if (/[?&]serverstt=1/.test(location.search)) {
+          audioStream = new AudioStreamUpload({ audioContext: audioCtx, source });
+          audioStream.on('partial', (text) => {
+            serverPartialBuffer = text;
+            input.value = text;
+            voiceHint.textContent = 'listening…';
+          });
+          audioStream.on('final', (payload) => {
+            const t = (payload.text ?? '').trim();
+            if (!t) return;
+            const commitSpecId = payload.speculationId ?? speculationId ?? null;
+            speculationId = null;
+            speculationFiredForBuffer = '';
+            serverPartialBuffer = '';
+            input.value = t;
+            const body = { text: t };
+            if (commitSpecId) body.speculationId = commitSpecId;
+            client.sendTurn(body).catch(() => {});
+          });
+          audioStream.on('error', (err) => {
+            console.warn('[voice] audioStream error — falling back to browser STT', err);
+            audioStreamReady = false;
+          });
+          audioStream.on('close', () => {
+            audioStreamReady = false;
+          });
+          try {
+            await audioStream.connect();
+            audioStreamReady = true;
+          } catch (err) {
+            console.warn('[voice] WebSocket /audio connect failed, falling back:', err);
+            audioStream = null;
+            audioStreamReady = false;
+          }
         }
 
         if (EMOTION_ENABLED) {
@@ -851,9 +1026,23 @@
             if (s.kind === 'listening') {
               input.value = s.preview;
               voiceHint.textContent = 'listening…';
-            } else if (s.kind === 'pausing') {
+              // User is speaking more — any in-flight speculation on
+              // the previous buffer is now potentially stale. Next
+              // 'pausing' will decide whether to re-speculate.
+              return;
+            }
+            if (s.kind === 'pausing') {
               input.value = s.buffer;
               voiceHint.textContent = 'pausing…';
+              // Kick off server-side speculation on this stable partial
+              // so by the time the commit timer fires, router + reasoner
+              // are already warming up. Only fire ONCE per distinct
+              // buffer so we don't hammer the server on rapid transitions.
+              if (s.buffer && s.buffer !== speculationFiredForBuffer && s.buffer.split(/\s+/).length >= 3) {
+                speculationFiredForBuffer = s.buffer;
+                if (!speculationId) speculationId = newSpeculationId();
+                client.sendPartial({ speculationId, text: s.buffer }).catch(() => {});
+              }
             }
           },
         });
@@ -881,13 +1070,70 @@
               interim += r[0].transcript;
             }
           }
-          if (interim.trim()) turnDebouncer.onInterim(interim);
+
+          // Server-STT path: browser recognition drives VAD only
+          // (when did the user start + stop). We use the server's
+          // streaming Whisper as the authoritative transcript, so we
+          // do NOT funnel text into the client debouncer.
+          if (audioStreamReady && audioStream) {
+            if ((interim.trim() || finalText.trim()) && !speculationId) {
+              speculationId = newSpeculationId();
+              audioStream.startUtterance(speculationId);
+            }
+            if (finalText.trim()) {
+              // Browser thinks the utterance is over — trigger the
+              // server's final transcription. Server will reply via
+              // the 'final' handler which commits the turn.
+              audioStream.endUtterance();
+            }
+            return;
+          }
+
+          // Fallback path (no WebSocket): original browser-STT +
+          // debouncer flow, preserved for graceful degradation when
+          // the /audio endpoint is unreachable.
+          if (interim.trim()) {
+            turnDebouncer.onInterim(interim);
+            // Two separate triggers:
+            //   1. sendPartial — fires on EVERY interim change (≥3
+            //      words, deduped). No stability wait. Server's
+            //      `speculation.update` has a prefix-extension
+            //      short-circuit so 30 interim updates on one
+            //      continuously-spoken sentence only cost ONE
+            //      reasoner run — and that reasoner gets the full
+            //      duration of the utterance to pre-compute.
+            //   2. backchannel — fires on the stability timer
+            //      (`INTERIM_STABLE_MS` of no change) when the tail
+            //      looks mid-thought. That's the "user paused mid-
+            //      utterance" signal.
+            if (interim !== lastInterim) {
+              lastInterim = interim;
+              const trimmed = interim.trim();
+              if (trimmed.split(/\s+/).length >= 3 && trimmed !== speculationFiredForBuffer) {
+                speculationFiredForBuffer = trimmed;
+                if (!speculationId) speculationId = newSpeculationId();
+                client.sendPartial({ speculationId, text: trimmed }).catch(() => {});
+              }
+              // Restart the stability timer — used ONLY for
+              // mid-utterance backchannel acknowledgements.
+              if (interimStableTimer) clearTimeout(interimStableTimer);
+              interimStableTimer = setTimeout(() => {
+                interimStableTimer = null;
+                const stable = lastInterim.trim();
+                if (!stable || stable.split(/\s+/).length < 3) return;
+                maybeFireBackchannel(stable);
+              }, INTERIM_STABLE_MS);
+            }
+          }
           if (finalText.trim()) {
+            // A final segment landed — the next onresult may start a
+            // fresh interim, so kill any pending stable-interim timer
+            // so it doesn't fire with stale text from the just-ended
+            // segment.
+            clearInterimStability();
             turnDebouncer.onFinal(finalText);
             if (finalConf > 0 && finalConf < 0.55) voiceHint.classList.add('warn');
             else voiceHint.classList.remove('warn');
-            // Pre-fetch emotion classification so it's usually ready by
-            // the time the debounce commits.
             if (EMOTION_ENABLED && emotionDetector && micCapture) {
               const pcm = micCapture.snapshot(5);
               if (pcm) {
@@ -920,6 +1166,9 @@
         shouldListen = false;
         turnDebouncer?.cancel();
         turnDebouncer = null;
+        clearInterimStability();
+        speculationId = null;
+        speculationFiredForBuffer = '';
         try { recognition?.stop(); } catch (_) {}
         recognition = null;
         bargeInMonitor?.stop();
@@ -929,6 +1178,9 @@
         emotionDetector = null;
         audioPlayer?.stopAll();
         audioPlayer = null;
+        audioStream?.close();
+        audioStream = null;
+        audioStreamReady = false;
         try { micStream?.getTracks().forEach((t) => t.stop()); } catch (_) {}
         micStream = null;
         try { audioCtx?.close(); } catch (_) {}

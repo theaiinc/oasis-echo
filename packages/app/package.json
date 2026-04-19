@@ -19,6 +19,10 @@
     "@oasis-echo/reasoning": "*",
     "@oasis-echo/reflex": "*",
     "@oasis-echo/telemetry": "*",
-    "@oasis-echo/types": "*"
+    "@oasis-echo/types": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
   }
 }

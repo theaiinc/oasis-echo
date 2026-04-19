@@ -6,6 +6,7 @@ import type {
 import { openSse, type EventSourceLike, type SseHandle } from './sse.js';
 import type {
   CorrectionsState,
+  PartialRequest,
   TurnRequest,
 } from './types.js';
 
@@ -128,6 +129,22 @@ export class OasisClient {
       body: JSON.stringify(req),
     });
     if (!res.ok) throw new Error(`sendTurn ${res.status}: ${await res.text()}`);
+    return res.json() as Promise<{ accepted: true }>;
+  }
+
+  /**
+   * Tell the server we have a stable partial transcript so it can run
+   * speculative routing + reasoning in the background. Zero user-visible
+   * effect on its own — the work lands on the next `sendTurn` that
+   * carries the same `speculationId`.
+   */
+  async sendPartial(req: PartialRequest): Promise<{ accepted: true }> {
+    const res = await this.fetchFn(`${this.baseUrl}/turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...req, partial: true }),
+    });
+    if (!res.ok) throw new Error(`sendPartial ${res.status}: ${await res.text()}`);
     return res.json() as Promise<{ accepted: true }>;
   }
 

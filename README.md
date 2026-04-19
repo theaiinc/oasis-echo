@@ -178,6 +178,16 @@ Copy `.env.example` to `.env`. All keys documented there. Key ones:
 - `?noemotion=1` URL flag disables the entire client-side pipeline for quick A/B
 - See [docs/EMOTION_ADAPTIVE_TTS.md](docs/EMOTION_ADAPTIVE_TTS.md) for architecture, parameter tables, safety properties, and integration examples
 
+### Client SDK (`@oasis-echo/sdk`)
+All of the voice-pipeline logic is available as a reusable package so you can wire oasis-echo into **any** client — not just the shipped web UI.
+
+- Works in browsers **and** Node.js. Universal `OasisClient` handles SSE + `POST /turn` + `POST /correction` + `POST /bargein`, with a strongly-typed event map (`tts.chunk`, `emotion.directives`, `turn.complete`, `stt.postprocess`, etc.). Cross-platform transport — native `EventSource` in browsers, streaming `fetch` body reader in Node.
+- **Browser subpath** (`@oasis-echo/sdk/browser`) ships the full voice stack as composable primitives — `AudioPlayer` (Web Audio + per-turn emotion directives), `MicCapture` (off-main-thread PCM ring buffer via inline `AudioWorklet`), `EmotionDetector` (transformers.js SER with pre-warm + commit-time cap + confidence/margin gate), `BargeInMonitor` (adaptive baseline + 600ms grace window), `TurnDebouncer` (silence-debounced commit with incomplete-tail extension).
+- **Zero runtime dep** on any server-side package. SDK carries its own minimal types. `@huggingface/transformers` is an optional peer dep (only needed for browser emotion detection).
+- **Backend integration patterns**: wire into Slack / Discord / Twilio / IVR by subscribing to `emotion.directives` and forwarding the SSML fragment (or numeric directives) to your downstream TTS engine.
+- `packages/app/src/index.html` now uses the SDK via an import map, and `packages/app/src/server.ts` serves the compiled `/sdk/*` bundle so browsers can import it directly.
+- Full API, examples (`node-text-only.ts`, `browser.ts`), and behavioural invariants in [packages/sdk/README.md](packages/sdk/README.md).
+
 ## Where to plug future backends in
 
 | Interface | File | Candidate impls |
@@ -192,8 +202,9 @@ Copy `.env.example` to `.env`. All keys documented there. Key ones:
 
 - `npm run typecheck` — project-reference typecheck across all workspaces
 - `npm run build` — emits `packages/*/dist`
-- `npm test` — vitest suite (77 tests)
+- `npm test` — vitest suite (242 tests across all workspaces)
 - `npm run server` — launch the web UI
+- `npm run -w @oasis-echo/sdk build` — build the client SDK in isolation
 
 ## License
 

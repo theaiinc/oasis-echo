@@ -77,4 +77,17 @@ export type EmotionPayload = {
 export type TurnRequest = {
   text: string;
   emotion?: EmotionPayload;
+  /**
+   * Stitch this commit to prior `sendPartial` calls — the server can
+   * promote already-computed router + reasoner work instead of starting
+   * from scratch. Opaque string chosen by the client; one per turn.
+   */
+  speculationId?: string;
+};
+
+export type PartialRequest = {
+  /** Opaque per-turn id; must match the `speculationId` on the later commit. */
+  speculationId: string;
+  /** Current best partial STT text. Should be the longest stable prefix. */
+  text: string;
 };

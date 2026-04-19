@@ -30,8 +30,18 @@ export type TurnDebouncerOpts = {
    * isn't done talking.
    */
   incompleteTailMultiplier?: number;
+  /**
+   * Multiplier applied to `silenceMs` when the buffered tail looks
+   * unambiguously finished (ends with `?`, `!`, `.`, or a clear
+   * sign-off word like "please" / "thanks" / "that's it"). Commits
+   * fast — saves up to 600ms per turn on clearly-ended utterances.
+   * Default 0.5.
+   */
+  completeTailMultiplier?: number;
   /** Override the incomplete-tail regex if you want a different policy. */
   incompleteTailRegex?: RegExp;
+  /** Override the complete-tail regex if you want a different policy. */
+  completeTailRegex?: RegExp;
   /** Called when an utterance commits. */
   onCommit: (text: string) => void;
   /** Optional: called on every state change (for UI hints like "pausing..."). */
@@ -46,10 +56,22 @@ export type DebouncerState =
 const DEFAULT_INCOMPLETE_TAIL =
   /(?:^|\s)(?:but|and|or|if|because|cause|cuz|so|when|while|as|though|although|yet|plus|like|with|for|to|of|at|what if|even if|only if|in case|what about|how about|the|a|an|my|your|his|her|their|our)\s*$/i;
 
+/**
+ * Tails that are CLEARLY the end of a thought — ends with a sentence
+ * terminator OR a strong sign-off word. When matched, we commit in
+ * half the normal silence window (600ms default). Lets questions and
+ * short directive sentences round-trip faster without any risk of
+ * splitting mid-sentence.
+ */
+const DEFAULT_COMPLETE_TAIL =
+  /(?:[.!?…]\s*$)|(?:\b(?:please|thanks|thank you|that's it|that is it|right now|period|end of message)\s*[.!?…]?\s*$)/i;
+
 export class TurnDebouncer {
   private readonly silenceMs: number;
-  private readonly multiplier: number;
+  private readonly incompleteMultiplier: number;
+  private readonly completeMultiplier: number;
   private readonly incompleteTail: RegExp;
+  private readonly completeTail: RegExp;
   private readonly onCommit: (text: string) => void;
   private readonly onStateChange?: (state: DebouncerState) => void;
 
@@ -59,8 +81,10 @@ export class TurnDebouncer {
 
   constructor(opts: TurnDebouncerOpts) {
     this.silenceMs = opts.silenceMs ?? 1200;
-    this.multiplier = opts.incompleteTailMultiplier ?? 2;
+    this.incompleteMultiplier = opts.incompleteTailMultiplier ?? 2;
+    this.completeMultiplier = opts.completeTailMultiplier ?? 0.5;
     this.incompleteTail = opts.incompleteTailRegex ?? DEFAULT_INCOMPLETE_TAIL;
+    this.completeTail = opts.completeTailRegex ?? DEFAULT_COMPLETE_TAIL;
     this.onCommit = opts.onCommit;
     if (opts.onStateChange) this.onStateChange = opts.onStateChange;
   }
@@ -109,9 +133,23 @@ export class TurnDebouncer {
   private scheduleCommit(): void {
     const tail = this.buffer.trim();
     if (!tail) return;
-    const delay = this.incompleteTail.test(tail)
-      ? this.silenceMs * this.multiplier
-      : this.silenceMs;
+    // Three-tier debounce window:
+    //   - tail looks like end-of-thought (`?`, `!`, `.`, "thanks", …)
+    //     → commit fast (0.5× = 600ms default)
+    //   - tail looks like mid-thought fragment (`but`, `and`, …)
+    //     → commit slow (2× = 2400ms default)
+    //   - otherwise → normal (1× = 1200ms default)
+    //
+    // The complete-tail gate is deliberately conservative: the regex
+    // requires an unambiguous end marker, so we never mis-commit
+    // someone who's still talking.
+    let multiplier = 1;
+    if (this.completeTail.test(tail)) {
+      multiplier = this.completeMultiplier;
+    } else if (this.incompleteTail.test(tail)) {
+      multiplier = this.incompleteMultiplier;
+    }
+    const delay = this.silenceMs * multiplier;
     this.clearTimer();
     this.deadlineMs = performanceNow() + delay;
     this.timer = setTimeout(() => this.commit(), delay);

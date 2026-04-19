@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WebSocketServer, type WebSocket } from 'ws';
 import { loadDotenv } from './env.js';
 import {
   ContextBiasStage,
@@ -14,6 +15,8 @@ import {
   PostProcessPipeline,
   RuleStage,
   SemanticCorrectionStage,
+  SpeculationManager,
+  WhisperStreamingStt,
   alwaysEscalate,
   classifyQuestion,
   detectEmotionFromText,
@@ -222,6 +225,16 @@ async function main(): Promise<void> {
     tracer: new Tracer(),
   });
 
+  // Speculative execution: run router + reasoner on stable partials
+  // while the user is still speaking, so first TTS chunk can fire
+  // within tens of milliseconds of the commit when the partial matches.
+  const speculation = new SpeculationManager({
+    router,
+    reasoner,
+    getState: () => pipeline.state.snapshot(),
+    logger,
+  });
+
   // STT post-processing pipeline: cleans the raw transcript before it
   // hits the dialogue pipeline. Three stages in order:
   //   1. rules   — strip fillers, collapse repeats, phonetic fixes
@@ -362,18 +375,16 @@ async function main(): Promise<void> {
     }
   });
 
-  async function simulateTranscription(text: string, turnId: string): Promise<void> {
-    const words = text.split(/(\s+)/).filter((w) => w.length > 0);
-    let partial = '';
-    for (let i = 0; i < words.length; i++) {
-      if (i > 0) await sleep(40);
-      partial += words[i];
-      hub.broadcast('stt.partial', {
-        turnId,
-        text: partial,
-        atMs: Date.now(),
-      });
-    }
+  /**
+   * Emit a single `stt.final` for the UI. Previously this function
+   * replayed the text word-by-word with a 40ms sleep per word for a
+   * "typing" effect; that added up to ~1s of blocking delay on long
+   * utterances BEFORE the reasoner's pre-buffered reply could flow
+   * through TTS. With `sendPartial` streaming every browser interim
+   * during the utterance, the UI already has live transcript — the
+   * animation is redundant.
+   */
+  function emitFinalTranscript(text: string, turnId: string): void {
     hub.broadcast('stt.final', { turnId, text: text.trim(), atMs: Date.now() });
   }
 
@@ -492,6 +503,8 @@ async function main(): Promise<void> {
           return JSON.parse(body) as {
             text?: unknown;
             emotion?: { label?: unknown; confidence?: unknown; strategy?: unknown };
+            speculationId?: unknown;
+            partial?: unknown;
           };
         } catch {
           return {};
@@ -501,6 +514,23 @@ async function main(): Promise<void> {
       if (!text.trim()) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'missing text' }));
+        return;
+      }
+      const speculationId =
+        typeof parsed.speculationId === 'string' && parsed.speculationId.trim().length > 0
+          ? parsed.speculationId
+          : null;
+      // Partial-update branch: the user is still talking. Fire router
+      // + reasoner speculatively, then return quickly. No SSE events
+      // flow from this call until the matching commit arrives.
+      if (parsed.partial === true && speculationId) {
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ accepted: true, speculating: true }));
+        try {
+          speculation.update(speculationId, text);
+        } catch (err) {
+          logger.warn('speculation update threw', { error: String(err) });
+        }
         return;
       }
       // Parse optional emotion payload from the client's SER classifier.
@@ -532,34 +562,72 @@ async function main(): Promise<void> {
       });
       void (async () => {
         try {
-          // STT post-processing first. If a stage mutates the text,
-          // log the diff and broadcast a trace event so the UI can
-          // show "cleaned from X to Y" for debugging. Agent context
-          // from the previous turn feeds context-bias + semantic.
-          const pp = await postprocess.process({
-            text,
-            ...(agentContext.lastUtterance ? { agentContext } : {}),
-          });
-          if (pp.stagesApplied.length > 0) {
-            logger.info('stt.postprocess', {
-              turnId,
-              original: pp.original,
-              final: pp.text,
-              stages: pp.stagesApplied,
-              latencyMs: pp.latencyMs,
-            });
-            hub.broadcast('stt.postprocess', {
-              turnId,
-              original: pp.original,
-              final: pp.text,
-              stages: pp.stagesApplied,
-              history: pp.history,
-              latencyMs: pp.latencyMs,
-              atMs: Date.now(),
-            });
+          // ─── Speculation-first ordering ────────────────────────
+          // Previously STT-postprocess (semantic LLM call, 1-2s) +
+          // simulateTranscription (~1s) ran BEFORE speculation.commit
+          // could promote the buffered reply. That silence is why
+          // the first TTS chunk took 3-5s to arrive on hit turns.
+          //
+          // New ordering:
+          //   1. Try speculation.commit with the RAW user text.
+          //      (Speculation was seeded on raw text via sendPartial,
+          //       so the similarity check lines up without postprocess
+          //       touching anything.)
+          //   2. On HIT — skip postprocess entirely. The buffered
+          //      reply matches the user's actual words. Emit a single
+          //      stt.final immediately for the UI. Jump to TTS.
+          //   3. On MISS — fall back to postprocess + fresh pipeline
+          //      as before. That path runs the reasoner from scratch
+          //      anyway so an extra 1-2s of postprocess doesn't hurt
+          //      (and `escalate`'s filler bridges the gap).
+          let specResult: Awaited<ReturnType<typeof speculation.commit>> | null = null;
+          if (speculationId) {
+            specResult = await speculation.commit(speculationId, text);
           }
-          const cleanText = pp.text;
-          await simulateTranscription(cleanText, turnId);
+
+          let cleanText: string;
+          if (specResult?.kind === 'hit') {
+            cleanText = text;
+            emitFinalTranscript(cleanText, turnId);
+            logger.info('speculation.promoted', {
+              turnId,
+              decision: specResult.routerOutput.decision.kind,
+              intent: specResult.routerOutput.intent,
+            });
+          } else {
+            if (specResult) {
+              logger.info('speculation.missed', {
+                turnId,
+                reason: specResult.reason,
+              });
+            }
+            // STT post-processing (semantic LLM, rules, context-bias).
+            // Only runs on miss so the hit path doesn't pay its cost.
+            const pp = await postprocess.process({
+              text,
+              ...(agentContext.lastUtterance ? { agentContext } : {}),
+            });
+            if (pp.stagesApplied.length > 0) {
+              logger.info('stt.postprocess', {
+                turnId,
+                original: pp.original,
+                final: pp.text,
+                stages: pp.stagesApplied,
+                latencyMs: pp.latencyMs,
+              });
+              hub.broadcast('stt.postprocess', {
+                turnId,
+                original: pp.original,
+                final: pp.text,
+                stages: pp.stagesApplied,
+                history: pp.history,
+                latencyMs: pp.latencyMs,
+                atMs: Date.now(),
+              });
+            }
+            cleanText = pp.text;
+            emitFinalTranscript(cleanText, turnId);
+          }
 
           // Complementary emotion signals.
           //
@@ -656,7 +724,17 @@ async function main(): Promise<void> {
             });
           }
 
-          const turn = await pipeline.handleTurn(cleanText, { turnId });
+          // Speculation.commit already ran above (pre-postprocess) so
+          // the hit/miss decision and the pipeline hand-off are split:
+          //   HIT  → handleCommittedSpeculation with raw-but-committed
+          //          text (postprocess was skipped)
+          //   MISS → handleTurn with postprocessed text
+          let turn;
+          if (specResult?.kind === 'hit') {
+            turn = await pipeline.handleCommittedSpeculation(specResult, cleanText, { turnId });
+          } else {
+            turn = await pipeline.handleTurn(cleanText, { turnId });
+          }
           hub.broadcast('turn.summary', {
             turnId: turn.id,
             tier: turn.tier,
@@ -675,6 +753,17 @@ async function main(): Promise<void> {
     }
 
     if (req.method === 'POST' && url.pathname === '/bargein') {
+      // Accept an optional `speculationId` so the client can tear down
+      // any in-flight pre-computation for the abandoned turn.
+      let bargeSpeculationId: string | null = null;
+      try {
+        const b = await readBody(req);
+        if (b) {
+          const p = JSON.parse(b) as { speculationId?: unknown };
+          if (typeof p.speculationId === 'string') bargeSpeculationId = p.speculationId;
+        }
+      } catch { /* tolerate empty/bad body */ }
+      if (bargeSpeculationId) speculation.abort(bargeSpeculationId);
       const interrupted = await pipeline.bargeIn();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ interrupted }));
@@ -744,6 +833,158 @@ async function main(): Promise<void> {
   server.headersTimeout = 0;
   server.keepAliveTimeout = 120_000;
   server.timeout = 0;
+
+  // ──────────────────────── WebSocket /audio ────────────────────────
+  // Streaming upstream: client sends PCM16 16kHz mono binary frames;
+  // server runs streaming Whisper and sends back stt.partial events in
+  // real time. Control messages flow as JSON text frames in both
+  // directions. Pre-existing HTTP flow (SSE events + POST /turn) stays
+  // authoritative for turn commit + TTS chunks; this endpoint purely
+  // replaces the browser's SpeechRecognition with server-side STT.
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    if (url.pathname === '/audio') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+      return;
+    }
+    socket.destroy();
+  });
+
+  // NOTE: previously warmed the Whisper model at startup to spare the
+  // first WebSocket client a cold load. That caused a SIGSEGV because
+  // two ONNX Runtime sessions (Whisper + Kokoro) racing during startup
+  // destabilize the native runtime. First connection now triggers the
+  // load; transformers.js caches the weights so subsequent connections
+  // are fast.
+
+  wss.on('connection', (ws: WebSocket) => {
+    const stt = new WhisperStreamingStt({ logger });
+    // Fire-and-forget: download the model in the background so the
+    // first partial doesn't pay the full cold-start cost.
+    stt.preload().catch(() => {});
+    let sessionSpeculationId: string | null = null;
+    let partialLoopTimer: ReturnType<typeof setInterval> | null = null;
+    let lastEmittedPartial = '';
+    let closed = false;
+
+    const emit = (payload: Record<string, unknown>): void => {
+      if (closed || ws.readyState !== ws.OPEN) return;
+      try {
+        ws.send(JSON.stringify(payload));
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const startPartialLoop = (): void => {
+      if (partialLoopTimer) return;
+      partialLoopTimer = setInterval(() => {
+        void (async () => {
+          try {
+            const p = await stt.partial();
+            if (p !== null && p !== lastEmittedPartial) {
+              lastEmittedPartial = p;
+              emit({ type: 'stt.partial', text: p, atMs: Date.now() });
+              // Fire speculation on the server's own partials as they
+              // grow — bypasses the client debouncer entirely. Only
+              // start speculating once we have ~3 words of text.
+              if (sessionSpeculationId && p.trim().split(/\s+/).length >= 3) {
+                try {
+                  speculation.update(sessionSpeculationId, p);
+                } catch (err) {
+                  logger.warn('server-partial speculation failed', {
+                    error: String(err),
+                  });
+                }
+              }
+            }
+          } catch (err) {
+            logger.warn('stt partial loop error', { error: String(err) });
+          }
+        })();
+      }, 400);
+    };
+
+    const stopPartialLoop = (): void => {
+      if (partialLoopTimer) {
+        clearInterval(partialLoopTimer);
+        partialLoopTimer = null;
+      }
+    };
+
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        // Binary frame = Float32 PCM at 16kHz mono.
+        //
+        // Node's `Buffer` instances are views into a shared pool and
+        // carry an arbitrary `byteOffset` which is NOT guaranteed to
+        // be 4-byte aligned. Creating a Float32Array directly on such
+        // a buffer throws `start offset of Float32Array should be a
+        // multiple of 4` and takes down the whole process (libc++abi
+        // mutex crash follows because ONNX Runtime is mid-inference).
+        //
+        // We copy into a fresh aligned ArrayBuffer. One memcpy; cost
+        // is negligible for ~170-byte PCM blocks.
+        const buf = data as Buffer;
+        const aligned = new ArrayBuffer(buf.byteLength - (buf.byteLength % 4));
+        new Uint8Array(aligned).set(buf.subarray(0, aligned.byteLength));
+        const f32 = new Float32Array(aligned);
+        stt.feed(f32);
+        startPartialLoop();
+        return;
+      }
+      // Text frame — JSON control message.
+      let msg: { type?: string; speculationId?: string } = {};
+      try {
+        msg = JSON.parse(data.toString('utf8')) as {
+          type?: string;
+          speculationId?: string;
+        };
+      } catch {
+        return;
+      }
+      if (msg.type === 'start') {
+        sessionSpeculationId = msg.speculationId ?? null;
+        stt.reset();
+        lastEmittedPartial = '';
+        emit({ type: 'ready', atMs: Date.now() });
+      } else if (msg.type === 'end') {
+        // User signaled end of utterance. Produce a final transcript
+        // and hand back to the client; it will post /turn with that
+        // text + the same speculationId to promote the buffer.
+        void (async () => {
+          stopPartialLoop();
+          const finalText = await stt.transcribeAll();
+          emit({
+            type: 'stt.final',
+            text: finalText,
+            speculationId: sessionSpeculationId,
+            atMs: Date.now(),
+          });
+          stt.reset();
+          lastEmittedPartial = '';
+          sessionSpeculationId = null;
+        })();
+      } else if (msg.type === 'abort') {
+        stopPartialLoop();
+        stt.reset();
+        lastEmittedPartial = '';
+        if (sessionSpeculationId) {
+          speculation.abort(sessionSpeculationId);
+          sessionSpeculationId = null;
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      closed = true;
+      stopPartialLoop();
+      if (sessionSpeculationId) speculation.abort(sessionSpeculationId);
+    });
+  });
 
   server.listen(PORT, () => {
     const reasonerLabel =

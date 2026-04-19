@@ -4,7 +4,21 @@ import { extractSalientTokens, isStopword, soundex, type SalientToken } from './
 import { levenshtein } from './phrases.js';
 
 export type ContextBiasOpts = {
-  /** Reject candidates whose weight is below this threshold. Default 0.5. */
+  /**
+   * Reject candidates whose weight is below this threshold.
+   *
+   * Default 2.0 — only strong-prior salient tokens (proper nouns,
+   * code identifiers, backticked) are allowed to trigger swaps.
+   * Rare content words (weight 1.0) and plain content (weight 0.3)
+   * are excluded because their Soundex collisions with common
+   * English words like "thing"↔"thanks" (both T520) cause harmful
+   * substitutions far more often than they fix real mis-hearings.
+   *
+   * If you want more aggressive biasing for specific use cases
+   * (e.g. domain glossary recovery), pass a lower threshold
+   * explicitly and expect occasional false positives on common
+   * words that phonetically resemble your domain terms.
+   */
   minCandidateWeight?: number;
   /**
    * Max token-window size to fold into a single candidate. Needs to be
@@ -56,7 +70,7 @@ export class ContextBiasStage implements PostProcessStage {
   private readonly strongPriorWeight: number;
 
   constructor(opts: ContextBiasOpts = {}) {
-    this.minCandidateWeight = opts.minCandidateWeight ?? 0.5;
+    this.minCandidateWeight = opts.minCandidateWeight ?? 2.0;
     this.maxWindowSize = opts.maxWindowSize ?? 4;
     this.minWindowChars = opts.minWindowChars ?? 3;
     this.maxRelDist = opts.maxRelativeDistance ?? 0.5;

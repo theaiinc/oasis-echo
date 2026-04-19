@@ -63,6 +63,44 @@ describe('TurnDebouncer', () => {
     expect(onCommit).toHaveBeenCalledOnce();
   });
 
+  it('commits FAST when the tail is clearly complete (ends with ?/!/.)', () => {
+    const onCommit = vi.fn();
+    const deb = new TurnDebouncer({
+      silenceMs: 1000,
+      completeTailMultiplier: 0.5, // 500ms
+      onCommit,
+    });
+    deb.onFinal('what time is it?');
+    vi.advanceTimersByTime(400);
+    expect(onCommit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(150); // total 550ms — past the 500ms fast window
+    expect(onCommit).toHaveBeenCalledWith('what time is it?');
+  });
+
+  it('commits FAST when the tail is a clear sign-off ("thanks", "please")', () => {
+    const onCommit = vi.fn();
+    const deb = new TurnDebouncer({
+      silenceMs: 1000,
+      completeTailMultiplier: 0.5,
+      onCommit,
+    });
+    deb.onFinal('send the email please');
+    vi.advanceTimersByTime(520);
+    expect(onCommit).toHaveBeenCalledWith('send the email please');
+  });
+
+  it('does NOT apply complete-tail shortcut to mid-thought endings', () => {
+    const onCommit = vi.fn();
+    const deb = new TurnDebouncer({
+      silenceMs: 1000,
+      completeTailMultiplier: 0.5,
+      onCommit,
+    });
+    deb.onFinal('tell me about'); // ends with "about" — definitely not complete
+    vi.advanceTimersByTime(600);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
   it('flush() commits immediately and resets buffer', () => {
     const onCommit = vi.fn();
     const deb = new TurnDebouncer({ silenceMs: 1000, onCommit });
