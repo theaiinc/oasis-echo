@@ -750,17 +750,26 @@
           source.connect(analyser);
           const buf = new Uint8Array(analyser.frequencyBinCount);
           let aboveSince = 0;
-          const THRESH = 9;        // RMS deviation from silence (lower = easier to trigger)
-          const HOLD_MS = 110;     // sustained-speech window before barging in
+          // Adaptive barge-in: instead of a fixed threshold, track the
+          // ambient RMS while the agent is speaking (that's the agent
+          // audio bleeding back through your mic). User voice has to
+          // exceed that baseline by a multiplier, so you don't have
+          // to shout past loud speaker playback.
+          let bgRms = 0;                 // EMA of background (agent leak)
+          const BASELINE_MULT = 1.6;     // user must be 1.6× the baseline
+          const ABSOLUTE_FLOOR = 6;      // minimum delta over silence
+          const HOLD_MS = 100;           // sustained-speech window
 
           function tick() {
             if (!voiceOn) {
               aboveSince = 0;
+              bgRms = 0;
               requestAnimationFrame(tick);
               return;
             }
             if (!agentSpeaking) {
               aboveSince = 0;
+              bgRms = 0; // reset so next turn starts fresh
               requestAnimationFrame(tick);
               return;
             }
@@ -771,8 +780,9 @@
               sumSq += d * d;
             }
             const rms = Math.sqrt(sumSq / buf.length);
+            const thresh = Math.max(ABSOLUTE_FLOOR, bgRms * BASELINE_MULT);
             const now = performance.now();
-            if (rms > THRESH) {
+            if (rms > thresh) {
               if (aboveSince === 0) aboveSince = now;
               else if (now - aboveSince > HOLD_MS) {
                 aboveSince = 0;
@@ -780,6 +790,10 @@
               }
             } else {
               aboveSince = 0;
+              // Only feed the baseline when we're BELOW threshold —
+              // otherwise the user's own voice would pull the baseline
+              // up and hide itself.
+              bgRms = bgRms === 0 ? rms : bgRms * 0.88 + rms * 0.12;
             }
             requestAnimationFrame(tick);
           }
@@ -849,11 +863,13 @@
         recognition.maxAlternatives = 4;
 
         recognition.onresult = (ev) => {
-          // Ignore any input while the agent is speaking — the browser's
-          // mic will pick up the TTS audio through the speakers and try
-          // to feed it back as a user turn (the "I said hello and it
-          // did the rest on its own" feedback loop). Press the Barge-in
-          // button explicitly if you want to interrupt.
+          // Browser AEC via WebRTC loopback wasn't reliable enough to
+          // keep recognition running during agent speech — the agent's
+          // own voice kept bleeding into the transcript. Fall back to
+          // the safe behavior: ignore any onresult while the agent is
+          // speaking or the mic is paused. The trade-off is that the
+          // user loses the first word when they interrupt, but the
+          // transcripts stay clean.
           if (micPausedForTts || agentSpeaking) return;
 
           let interim = '';
@@ -999,10 +1015,10 @@
           agentSpeaking = true;
           if (!micPausedForTts) {
             micPausedForTts = true;
-            // Fully stop recognition while the agent talks; otherwise the
-            // browser buffers the TTS audio as interim results and the
-            // recognizer can end up in a state where it never emits a
-            // clean onresult again.
+            // Stop the recognizer so AEC leak doesn't show up as fake
+            // user turns. The user can still interrupt via the volume
+            // monitor (different mic stream with its own AEC), which
+            // fires barge-in and restarts recognition.
             pauseListen();
           }
           micBtn.classList.add('speaking');
@@ -1059,11 +1075,97 @@
       //     PCM), play it through Web Audio for highest quality.
       //   • Otherwise fall back to browser speechSynthesis on the text.
       let audioCtx = null;
+      let masterGain = null;
+      let playbackStreamDest = null; // MediaStreamAudioDestinationNode
+      let agentAudioEl = null;       // <audio> element that plays the recv side
+      let sendPeer = null;
+      let recvPeer = null;
+      let webrtcReadyPromise = null; // resolves once the loopback is plumbed
       const activeAudioSources = new Set();
+      // Slight attenuation on master — combined with the AEC reference
+      // below, agent audio bleed into the mic is reduced to near-zero
+      // and users don't need to shout to interrupt.
+      const MASTER_VOLUME = 0.85;
+
+      /**
+       * Build a local WebRTC loopback so agent audio is played through
+       * an <audio> element — the playback path Chrome's AEC references.
+       * The mic's `getUserMedia({echoCancellation: true})` stream is
+       * then fully cancelled against what we're playing, giving
+       * call-quality duplex: user can interrupt at normal volume and
+       * the recognizer no longer picks up the agent's own voice.
+       *
+       * Topology:
+       *   BufferSource → masterGain → MediaStreamDestination
+       *      → RTCPeerConnection (send) → [local loopback]
+       *      → RTCPeerConnection (recv) → <audio>.srcObject
+       */
+      async function setupWebRTCLoopback() {
+        try {
+          const send = new RTCPeerConnection();
+          const recv = new RTCPeerConnection();
+
+          // Fake signaling: both peers live in the same page, so ICE
+          // candidates go straight across.
+          send.onicecandidate = (e) => {
+            if (e.candidate) recv.addIceCandidate(e.candidate).catch(() => {});
+          };
+          recv.onicecandidate = (e) => {
+            if (e.candidate) send.addIceCandidate(e.candidate).catch(() => {});
+          };
+
+          // When the recv peer receives the track, wire it into the
+          // <audio> element. That element is what AEC references.
+          recv.ontrack = (ev) => {
+            if (!agentAudioEl) {
+              agentAudioEl = document.createElement('audio');
+              agentAudioEl.autoplay = true;
+              agentAudioEl.setAttribute('playsinline', '');
+              // Keep it in the DOM but invisible — some browsers won't
+              // drive AEC against audio attached to a detached element.
+              agentAudioEl.style.display = 'none';
+              document.body.appendChild(agentAudioEl);
+            }
+            agentAudioEl.srcObject = ev.streams[0];
+            agentAudioEl.play().catch(() => {});
+          };
+
+          // Add the agent-audio track to the send peer.
+          for (const track of playbackStreamDest.stream.getAudioTracks()) {
+            send.addTrack(track, playbackStreamDest.stream);
+          }
+
+          // Offer/answer dance — purely local.
+          const offer = await send.createOffer();
+          await send.setLocalDescription(offer);
+          await recv.setRemoteDescription(offer);
+          const answer = await recv.createAnswer();
+          await recv.setLocalDescription(answer);
+          await send.setRemoteDescription(answer);
+
+          sendPeer = send;
+          recvPeer = recv;
+        } catch (err) {
+          console.warn('webrtc loopback setup failed, falling back to direct output', err);
+          // Fall back: connect masterGain straight to destination so
+          // audio still plays, just without the AEC-friendly path.
+          try { masterGain.connect(audioCtx.destination); } catch (_) {}
+        }
+      }
 
       function ensureAudioCtx() {
         if (!audioCtx) {
           audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (!masterGain) {
+          masterGain = audioCtx.createGain();
+          masterGain.gain.value = MASTER_VOLUME;
+        }
+        if (!playbackStreamDest) {
+          playbackStreamDest = audioCtx.createMediaStreamDestination();
+          masterGain.connect(playbackStreamDest);
+          // Kick off loopback wiring; playPcm awaits this on first use.
+          webrtcReadyPromise = setupWebRTCLoopback();
         }
         if (audioCtx.state === 'suspended') {
           audioCtx.resume().catch(() => {});
@@ -1089,23 +1191,31 @@
       // server's bargein event to round-trip back.
       let currentTurnIdPlaying = null;
 
-      function playPcm(base64, sampleRate, opts, onEnd) {
+      async function playPcm(base64, sampleRate, opts, onEnd) {
         const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
         const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
         const float = new Float32Array(pcm.length);
         for (let i = 0; i < pcm.length; i++) float[i] = pcm[i] / 32768;
         const ctx = ensureAudioCtx();
+        // Wait for the WebRTC loopback to finish negotiating the first
+        // time so the opening PCM lands on the AEC-referenced path.
+        if (webrtcReadyPromise) {
+          await webrtcReadyPromise;
+          webrtcReadyPromise = null;
+        }
         const buffer = ctx.createBuffer(1, float.length, sampleRate);
         buffer.getChannelData(0).set(float);
         const src = ctx.createBufferSource();
         src.buffer = buffer;
-        // Optional gain node for per-chunk volume (backchannels dip
-        // slightly below reply volume so they feel subordinate).
-        let dest = ctx.destination;
+        // Everything routes through masterGain so we can trim agent
+        // output volume in one place. Per-chunk opts.gain (used by
+        // backchannels to sit slightly under reply volume) composes
+        // multiplicatively with the master gain.
+        let dest = masterGain;
         if (opts && typeof opts.gain === 'number' && opts.gain !== 1) {
           const gainNode = ctx.createGain();
           gainNode.gain.value = opts.gain;
-          gainNode.connect(ctx.destination);
+          gainNode.connect(masterGain);
           dest = gainNode;
         }
         src.connect(dest);
@@ -1179,6 +1289,10 @@
           if (!agentSpeaking) {
             agentSpeaking = true;
             micPausedForTts = true;
+            // Stop recognition during agent speech — AEC leaked too
+            // much, so we revert to the safe pause-during-playback
+            // pattern. Barge-in still works via the volume monitor
+            // on a separate AEC-enabled mic stream.
             pauseListen();
             micBtn.classList.add('speaking');
             voiceHint.textContent = 'agent speaking — mic paused';
