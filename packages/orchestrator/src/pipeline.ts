@@ -2,7 +2,6 @@ import { reflexClassify } from '@oasis-echo/reflex';
 import {
   DialogueStateStore,
   Guardrail,
-  HeuristicRouter,
   LastTurnsSummarizer,
   SentenceChunker,
   type Router,
@@ -18,7 +17,7 @@ import { pickApology, pickContinuationFiller, pickFirstFiller } from './filler.j
 
 export type PipelineOpts = {
   sessionId: string;
-  router?: Router;
+  router: Router;
   reasoner: Reasoner;
   tts: StreamingTts;
   summarizer?: Summarizer;
@@ -87,7 +86,7 @@ export class Pipeline {
       ...(opts.logger ? { logger: opts.logger } : {}),
       ...(opts.metrics ? { metrics: opts.metrics } : {}),
     });
-    this.router = opts.router ?? new HeuristicRouter();
+    this.router = opts.router;
     this.reasoner = opts.reasoner;
     this.tts = opts.tts;
     this.summarizer = opts.summarizer ?? new LastTurnsSummarizer();

@@ -1,44 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { newDialogueState, ALLOWED_INTENTS_BY_PHASE } from '@oasis-echo/types';
+import { newDialogueState } from '@oasis-echo/types';
 import {
+  alwaysEscalate,
   buildRouterPrompt,
-  HeuristicRouter,
   parseRouterJson,
   toRouterOutput,
 } from '../src/router.js';
 
-describe('HeuristicRouter', () => {
-  const router = new HeuristicRouter();
-
-  it('routes greetings locally', async () => {
-    const state = newDialogueState('s', 0);
-    const out = await router.route({ text: 'hey there', state });
-    expect(out.intent).toBe('greeting');
-    expect(out.decision.kind).toBe('local');
-  });
-
-  it('escalates tool commands', async () => {
-    const state = newDialogueState('s', 0);
-    const out = await router.route({ text: 'schedule a meeting for tomorrow', state });
-    expect(out.decision.kind).toBe('escalate');
-    if (out.decision.kind === 'escalate') {
-      expect(out.decision.reason).toBe('tool-needed');
-    }
-  });
-
-  it('is state-aware: "yes" is confirm only in confirming phase', async () => {
-    const idle = newDialogueState('s', 0);
-    const idleOut = await router.route({ text: 'yes', state: idle });
-    expect(idleOut.intent).not.toBe('confirm');
-
-    const confirming = { ...idle, phase: 'confirming' as const, allowedIntents: ALLOWED_INTENTS_BY_PHASE.confirming };
-    const confOut = await router.route({ text: 'yes', state: confirming });
-    expect(confOut.intent).toBe('confirm');
-  });
-
-  it('escalates complex questions', async () => {
-    const state = newDialogueState('s', 0);
-    const out = await router.route({ text: 'why does gravity exist', state });
+describe('alwaysEscalate', () => {
+  it('always returns an escalate decision', async () => {
+    const out = await alwaysEscalate.route({ text: 'anything', state: newDialogueState('s', 0) });
     expect(out.decision.kind).toBe('escalate');
   });
 });

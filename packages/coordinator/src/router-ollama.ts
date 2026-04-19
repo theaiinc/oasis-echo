@@ -1,6 +1,7 @@
 import type { Logger } from '@oasis-echo/telemetry';
 import type { DialogueState, Intent, RouterOutput } from '@oasis-echo/types';
 import {
+  alwaysEscalate,
   buildRouterPrompt,
   parseRouterJson,
   toRouterOutput,
@@ -174,16 +175,7 @@ export class OllamaRouter implements Router {
         error: String(err),
         ms: Date.now() - startedAt,
       });
-      if (this.fallback) return this.fallback.route(input);
-      return {
-        intent: 'unknown',
-        confidence: 0.3,
-        decision: {
-          kind: 'escalate',
-          intent: 'unknown',
-          reason: 'unclassified',
-        },
-      };
+      return (this.fallback ?? alwaysEscalate).route(input);
     }
   }
 }

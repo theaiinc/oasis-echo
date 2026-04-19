@@ -1,14 +1,60 @@
 import { describe, expect, it } from 'vitest';
-import { MockTts } from '@oasis-echo/coordinator';
-import { MockReasoner } from '@oasis-echo/reasoning';
+import { PassthroughTts, type Router } from '@oasis-echo/coordinator';
+import type {
+  Reasoner,
+  ReasoningStreamEvent,
+} from '@oasis-echo/reasoning';
 import { Metrics } from '@oasis-echo/telemetry';
+import type { DialogueState, Intent } from '@oasis-echo/types';
 import { Pipeline } from '../src/pipeline.js';
+
+/**
+ * Inline test-only reasoner. Lets each test specify the exact tokens
+ * and per-token delay — no mock implementation is shipped in the
+ * production bundle, so tests define their own fakes.
+ */
+class FakeReasoner implements Reasoner {
+  constructor(private readonly opts: { tokens: string[]; delayMs?: number }) {}
+  async *stream(input: {
+    userText: string;
+    state: DialogueState;
+    signal?: AbortSignal;
+  }): AsyncIterable<ReasoningStreamEvent> {
+    const delay = this.opts.delayMs ?? 5;
+    for (const tok of this.opts.tokens) {
+      if (input.signal?.aborted) return;
+      await new Promise((r) => setTimeout(r, delay));
+      yield { type: 'token', text: tok };
+    }
+    yield {
+      type: 'done',
+      stopReason: 'stop',
+      inputTokens: 0,
+      outputTokens: this.opts.tokens.length,
+    };
+  }
+}
+
+/** Predictable test router — always escalates to the given intent. */
+function makeRouter(intent: Intent, reason: string): Router {
+  return {
+    async route() {
+      return {
+        intent,
+        confidence: 0.9,
+        decision: { kind: 'escalate', intent, reason },
+      };
+    },
+  };
+}
+
+const escalateComplex = makeRouter('question_complex', 'complex-reasoning');
 
 describe('Pipeline', () => {
   it('runs a reflex turn without calling the reasoner', async () => {
     const metrics = new Metrics();
     let reasonerCalls = 0;
-    const reasoner = new MockReasoner();
+    const reasoner = new FakeReasoner({ tokens: ['unused'] });
     const origStream = reasoner.stream.bind(reasoner);
     reasoner.stream = (input) => {
       reasonerCalls++;
@@ -16,8 +62,9 @@ describe('Pipeline', () => {
     };
     const p = new Pipeline({
       sessionId: 't',
+      router: escalateComplex,
       reasoner,
-      tts: new MockTts(),
+      tts: new PassthroughTts(),
       metrics,
     });
     const chunks: string[] = [];
@@ -29,21 +76,12 @@ describe('Pipeline', () => {
     expect(chunks.join('')).toContain('Hi');
   });
 
-  it('runs a local coordinator turn for smalltalk', async () => {
-    const p = new Pipeline({
-      sessionId: 't',
-      reasoner: new MockReasoner(),
-      tts: new MockTts(),
-    });
-    const turn = await p.handleTurn('sure thing');
-    expect(['reflex', 'local']).toContain(turn.tier);
-  });
-
   it('escalates complex questions through the reasoner', async () => {
     const p = new Pipeline({
       sessionId: 't',
-      reasoner: new MockReasoner({ tokens: ['This ', 'is ', 'a ', 'cloud ', 'answer.'] }),
-      tts: new MockTts(),
+      router: escalateComplex,
+      reasoner: new FakeReasoner({ tokens: ['This ', 'is ', 'a ', 'cloud ', 'answer.'] }),
+      tts: new PassthroughTts(),
     });
     const chunks: string[] = [];
     p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
@@ -56,11 +94,12 @@ describe('Pipeline', () => {
   it('plays a filler chunk first when the reasoner is slow', async () => {
     const slow = new Pipeline({
       sessionId: 's',
-      reasoner: new MockReasoner({
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
         tokens: ['Slow ', 'answer.'],
-        delayMs: 800, // first token at ~800ms, past the 600ms threshold
+        delayMs: 800, // first token past the 600ms filler threshold
       }),
-      tts: new MockTts(),
+      tts: new PassthroughTts(),
     });
     const events: Array<{ text: string; filler: boolean }> = [];
     slow.bus.on('tts.chunk', (e) =>
@@ -75,11 +114,12 @@ describe('Pipeline', () => {
   it('skips the filler entirely when the reasoner is fast', async () => {
     const fast = new Pipeline({
       sessionId: 'f',
-      reasoner: new MockReasoner({
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
         tokens: ['Fast ', 'answer.'],
-        delayMs: 10, // first token well before the 600ms threshold
+        delayMs: 10,
       }),
-      tts: new MockTts(),
+      tts: new PassthroughTts(),
     });
     const events: Array<{ text: string; filler: boolean }> = [];
     fast.bus.on('tts.chunk', (e) =>
@@ -94,8 +134,9 @@ describe('Pipeline', () => {
   it('emits route.decision and turn.complete events', async () => {
     const p = new Pipeline({
       sessionId: 't',
-      reasoner: new MockReasoner(),
-      tts: new MockTts(),
+      router: escalateComplex,
+      reasoner: new FakeReasoner({ tokens: ['Hi.'] }),
+      tts: new PassthroughTts(),
     });
     const decisions: string[] = [];
     const completions: string[] = [];
@@ -109,11 +150,12 @@ describe('Pipeline', () => {
   it('barge-in aborts the turn mid-flight', async () => {
     const p = new Pipeline({
       sessionId: 't',
-      reasoner: new MockReasoner({
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
         tokens: ['slow ', 'slow ', 'slow ', 'slow ', 'slow ', 'slow ', 'slow.'],
         delayMs: 30,
       }),
-      tts: new MockTts(),
+      tts: new PassthroughTts(),
     });
     const promise = p.handleTurn('why is gravity a thing');
     await new Promise((r) => setTimeout(r, 40));
@@ -128,8 +170,9 @@ describe('Pipeline', () => {
     const metrics = new Metrics();
     const p = new Pipeline({
       sessionId: 't',
-      reasoner: new MockReasoner(),
-      tts: new MockTts(),
+      router: escalateComplex,
+      reasoner: new FakeReasoner({ tokens: ['ok.'] }),
+      tts: new PassthroughTts(),
       metrics,
     });
     await p.handleTurn('hello');
@@ -142,8 +185,9 @@ describe('Pipeline', () => {
   it('updates dialogue state across turns', async () => {
     const p = new Pipeline({
       sessionId: 't',
-      reasoner: new MockReasoner(),
-      tts: new MockTts(),
+      router: escalateComplex,
+      reasoner: new FakeReasoner({ tokens: ['reply.'] }),
+      tts: new PassthroughTts(),
     });
     await p.handleTurn('hello');
     await p.handleTurn('schedule a meeting');

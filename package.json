@@ -20,8 +20,6 @@
     "test": "npm run -s build && vitest run",
     "test:watch": "vitest",
     "lint": "eslint 'packages/*/src/**/*.ts' 'packages/*/test/**/*.ts'",
-    "dev": "npm run dev -w @oasis-echo/app",
-    "demo": "npm run demo -w @oasis-echo/app",
     "server": "npm run server -w @oasis-echo/app",
     "clean": "tsc -b --clean"
   },

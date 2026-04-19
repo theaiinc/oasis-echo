@@ -54,12 +54,13 @@ export class SentenceChunker {
 }
 
 /**
- * Mock TTS that emits one text chunk per sentence — no real audio.
- * The client is responsible for rendering the text (and optionally
- * invoking browser speechSynthesis). Used in tests and by default
- * when no audio backend is wired up.
+ * Passthrough TTS — splits text into sentences and emits them as
+ * text-only chunks (no PCM). The browser client receives them via SSE
+ * and voices each sentence through `speechSynthesis`. Used when the
+ * server is configured with `OASIS_TTS_BACKEND=web-speech` (the
+ * fallback path; Kokoro is the preferred local backend).
  */
-export class MockTts implements StreamingTts {
+export class PassthroughTts implements StreamingTts {
   constructor(private readonly sampleRate = 22_050) {}
 
   async *synthesize(

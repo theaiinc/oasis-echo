@@ -3,15 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/server.js",
   "bin": {
-    "oasis-echo": "./dist/index.js"
+    "oasis-echo": "./dist/server.js"
   },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
-    "dev": "node --import tsx src/index.ts",
-    "demo": "node --import tsx src/demo.ts",
     "server": "node --import tsx src/server.ts",
     "start": "node dist/server.js"
   },

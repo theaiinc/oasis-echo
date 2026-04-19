@@ -4,18 +4,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDotenv } from './env.js';
 import {
-  HeuristicRouter,
   KokoroTts,
-  MockTts,
   OllamaRouter,
-  PassthroughRouter,
+  PassthroughTts,
+  alwaysEscalate,
   type Router,
   type StreamingTts,
 } from '@oasis-echo/coordinator';
 import { Pipeline } from '@oasis-echo/orchestrator';
 import {
   AnthropicReasoner,
-  MockReasoner,
   OllamaReasoner,
   OpenAIReasoner,
   ToolRegistry,
@@ -144,43 +142,28 @@ async function main(): Promise<void> {
       baseUrl: cfg.ollamaBaseUrl,
     });
     logger.info('reasoner', { backend: 'ollama', model: cfg.model, baseUrl: cfg.ollamaBaseUrl });
-  } else if (cfg.backend === 'openai') {
+  } else {
     reasoner = new OpenAIReasoner({
       logger,
       model: cfg.model,
       baseUrl: cfg.openaiBaseUrl,
     });
     logger.info('reasoner', { backend: 'openai', model: cfg.model, baseUrl: cfg.openaiBaseUrl });
-  } else {
-    reasoner = new MockReasoner();
-    logger.info('reasoner', { backend: 'mock' });
   }
 
-  // Router selection:
-  //   slm         → SLM-backed (Tier-1 coordinator) using Ollama
-  //                 for intent + reply decisions. Falls back to
-  //                 passthrough if the SLM call fails.
-  //   passthrough → always escalate past the reflex tier (useful for
-  //                 pure cloud setups where every turn goes to Claude).
-  //   heuristic   → regex rules, no model call. Fast but dumb.
-  let router: Router;
-  if (cfg.router === 'slm') {
-    const slm = new OllamaRouter({
-      baseUrl: cfg.ollamaBaseUrl,
-      model: cfg.routerModel,
-      logger,
-      fallback: new PassthroughRouter(),
-    });
-    router = slm;
-    void slm.warm();
-    logger.info('router', { backend: 'slm', model: cfg.routerModel });
-  } else if (cfg.router === 'heuristic') {
-    router = new HeuristicRouter();
-    logger.info('router', { backend: 'heuristic' });
-  } else {
-    router = new PassthroughRouter();
-    logger.info('router', { backend: 'passthrough' });
-  }
+  // Tier-1 coordinator: SLM-backed routing via Ollama. Small JSON
+  // output (intent + reply or escalation) informed by the router
+  // prompt + few-shot examples. Falls through to `alwaysEscalate`
+  // inline if the SLM call ever fails.
+  const slm = new OllamaRouter({
+    baseUrl: cfg.routerBaseUrl,
+    model: cfg.routerModel,
+    logger,
+    fallback: alwaysEscalate,
+  });
+  const router: Router = slm;
+  void slm.warm();
+  logger.info('router', { backend: 'slm', model: cfg.routerModel, baseUrl: cfg.routerBaseUrl });
 
   let tts: StreamingTts;
   let kokoroInstance: KokoroTts | null = null;
@@ -192,8 +175,8 @@ async function main(): Promise<void> {
     });
     tts = kokoroInstance;
     // Warm the model in the background so the first turn isn't a
-    // 10-second cold start. The user can chat with mock audio
-    // fallback while it loads.
+    // 10-second cold start. While loading, the passthrough path below
+    // kicks in so the pipeline still functions.
     void kokoroInstance.warm().then(async () => {
       // After warm-up, synthesize each backchannel phrase once and
       // cache the PCM so the client can fetch them instantly at full
@@ -205,7 +188,9 @@ async function main(): Promise<void> {
       logger.error('kokoro warm failed', { error: String(err) });
     });
   } else {
-    tts = new MockTts();
+    // Text-only passthrough — the browser client voices each chunk
+    // via speechSynthesis on receipt.
+    tts = new PassthroughTts();
   }
 
   const pipeline = new Pipeline({
@@ -302,7 +287,7 @@ async function main(): Promise<void> {
       res.end(
         JSON.stringify({
           backend: cfg.backend,
-          model: cfg.backend === 'mock' ? null : cfg.model,
+          model: cfg.model,
           ...(cfg.backend === 'ollama' ? { baseUrl: cfg.ollamaBaseUrl } : {}),
           ...(cfg.backend === 'openai' ? { baseUrl: cfg.openaiBaseUrl } : {}),
           tts: {
@@ -421,15 +406,12 @@ async function main(): Promise<void> {
         ? `anthropic (${cfg.model})`
         : cfg.backend === 'ollama'
         ? `ollama (${cfg.model} @ ${cfg.ollamaBaseUrl})`
-        : cfg.backend === 'openai'
-        ? `openai (${cfg.model} @ ${cfg.openaiBaseUrl})`
-        : 'mock';
+        : `openai (${cfg.model} @ ${cfg.openaiBaseUrl})`;
     const ttsLabel =
       cfg.ttsBackend === 'kokoro'
         ? `kokoro (${cfg.kokoroVoice}, ${cfg.kokoroDtype})`
         : 'web-speech (browser)';
-    const routerLabel =
-      cfg.router === 'slm' ? `slm (${cfg.routerModel})` : cfg.router;
+    const routerLabel = `slm (${cfg.routerModel})`;
     process.stdout.write(
       `\n  oasis-echo web is live at http://localhost:${PORT}\n` +
         `  router:   ${routerLabel}\n` +

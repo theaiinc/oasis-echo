@@ -125,133 +125,17 @@ export function toRouterOutput(json: RouterJson): RouterOutput {
 }
 
 /**
- * Always escalates past the reflex tier. Used when a real reasoner
- * (Anthropic or Ollama) is available and we want most turns to flow
- * through the model instead of a canned local reply. The reflex tier
- * still short-circuits greetings/confirms/cancels before this runs.
+ * Inline fallback used by OllamaRouter when the SLM call fails — we
+ * still need to make some decision rather than block the turn. A bare
+ * "always escalate" punt is fine: the reasoning tier will handle
+ * whatever the intent actually is.
  */
-export class PassthroughRouter implements Router {
-  async route(input: { text: string; state: DialogueState }): Promise<RouterOutput> {
-    void input.state;
-    const text = input.text.trim();
-    if (text.length === 0) {
-      return {
-        intent: 'unknown',
-        confidence: 0.4,
-        decision: { kind: 'escalate', intent: 'unknown', reason: 'unclassified' },
-      };
-    }
-    const lower = text.toLowerCase();
-    const isQuestion = /\?$/.test(text) || /^(what|when|where|who|why|how|which|is|are|can|could|would|should|do|does|did)\b/.test(lower);
-    const isCommand = /^(please |hey |)?(search|look\s*up|find|schedule|book|call|email|send|create|delete|update|open|close|remind|play|pause)\b/.test(lower);
-    const intent = isCommand ? 'command_tool' : isQuestion ? 'question_complex' : 'question_complex';
-    return {
-      intent,
-      confidence: 0.8,
-      decision: {
-        kind: 'escalate',
-        intent,
-        reason: isCommand ? 'tool-needed' : 'complex-reasoning',
-        // Leave filler unset so the pipeline rotates through the pool
-        // for this reason — avoids the same word every turn.
-      },
-    };
-  }
-}
-
-/**
- * Heuristic router used in tests and as a fallback when no SLM backend
- * is configured. Covers the decision logic in prod but with regex
- * instead of a model. Good enough to validate the orchestration spine.
- */
-export class HeuristicRouter implements Router {
-  async route(input: { text: string; state: DialogueState }): Promise<RouterOutput> {
-    const text = input.text.toLowerCase().trim();
-    const phase = input.state.phase;
-
-    if (phase === 'confirming') {
-      if (/^(yes|yeah|yep|yup|correct|right|sure|confirm)\b/.test(text)) {
-        return {
-          intent: 'confirm',
-          confidence: 0.95,
-          decision: { kind: 'local', intent: 'confirm', reply: 'Confirmed.' },
-        };
-      }
-      if (/^(no|nope|nah|deny|cancel|wrong)\b/.test(text)) {
-        return {
-          intent: 'deny',
-          confidence: 0.95,
-          decision: { kind: 'local', intent: 'deny', reply: 'Okay, cancelled.' },
-        };
-      }
-    }
-
-    if (/^(hi|hello|hey|good\s+(morning|afternoon|evening))\b/.test(text)) {
-      return {
-        intent: 'greeting',
-        confidence: 0.97,
-        decision: { kind: 'local', intent: 'greeting', reply: 'Hi there!' },
-      };
-    }
-
-    if (/\b(search|look\s*up|find|schedule|book|call|email|send|create|delete|update)\b/.test(text)) {
-      return {
-        intent: 'command_tool',
-        confidence: 0.8,
-        decision: {
-          kind: 'escalate',
-          intent: 'command_tool',
-          reason: 'tool-needed',
-          // filler left blank — pipeline picks from the pool
-        },
-      };
-    }
-
-    if (/\b(why|how|explain|compare|analyze|summariz|differen)/.test(text)) {
-      return {
-        intent: 'question_complex',
-        confidence: 0.75,
-        decision: {
-          kind: 'escalate',
-          intent: 'question_complex',
-          reason: 'complex-reasoning',
-        },
-      };
-    }
-
-    if (text.length < 60 && /^(what|when|where|who)\b/.test(text)) {
-      return {
-        intent: 'question_simple',
-        confidence: 0.7,
-        decision: {
-          kind: 'escalate',
-          intent: 'question_simple',
-          reason: 'factual-lookup',
-        },
-      };
-    }
-
-    if (text.length < 40) {
-      return {
-        intent: 'smalltalk',
-        confidence: 0.6,
-        decision: {
-          kind: 'local',
-          intent: 'smalltalk',
-          reply: 'Got it.',
-        },
-      };
-    }
-
+export const alwaysEscalate: Router = {
+  async route() {
     return {
       intent: 'unknown',
-      confidence: 0.4,
-      decision: {
-        kind: 'escalate',
-        intent: 'unknown',
-        reason: 'unclassified',
-        filler: 'One moment.',
-      },
+      confidence: 0.3,
+      decision: { kind: 'escalate', intent: 'unknown', reason: 'unclassified' },
     };
-  }
-}
+  },
+};

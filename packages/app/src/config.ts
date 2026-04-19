@@ -1,8 +1,13 @@
-export type Backend = 'anthropic' | 'ollama' | 'openai' | 'mock';
+export type Backend = 'anthropic' | 'ollama' | 'openai';
 
 export type TtsBackend = 'kokoro' | 'web-speech';
 
-export type RouterBackend = 'slm' | 'passthrough' | 'heuristic';
+/**
+ * Only one router option now: the SLM coordinator (Ollama-backed).
+ * The former `heuristic` and `passthrough` routers were regex stubs
+ * and have been removed.
+ */
+export type RouterBackend = 'slm';
 
 export type RuntimeConfig = {
   sessionId: string;
@@ -14,61 +19,51 @@ export type RuntimeConfig = {
   kokoroVoice: string;
   kokoroDtype: 'fp32' | 'fp16' | 'q8' | 'q4' | 'q4f16';
   router: RouterBackend;
+  routerBaseUrl: string;
   routerModel: string;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   profile: 'm3pro-18gb' | 'm4max-64gb' | 'test';
 };
 
 /**
- * Backend resolution order:
- *   1. Explicit OASIS_BACKEND=anthropic|ollama|openai|mock
- *   2. ANTHROPIC_API_KEY  set → anthropic
+ * Backend resolution order (required — the server errors out if none
+ * of these conditions are met):
+ *   1. Explicit OASIS_BACKEND=anthropic|ollama|openai
+ *   2. ANTHROPIC_API_KEY set → anthropic
  *   3. OPENAI_API_KEY    set → openai
- *   4. otherwise             → mock
- *
- * Both `ollama` and `openai` backends hit local model servers or
- * OpenAI-compatible endpoints (LM Studio, vLLM, OpenRouter, Together,
- * Groq, DeepSeek, Mistral, etc. via OPENAI_BASE_URL).
+ *   4. Fall back to ollama (assuming a local server is running)
  */
 export function loadConfig(): RuntimeConfig {
   const explicit = process.env['OASIS_BACKEND'] as Backend | undefined;
   const backend: Backend =
-    explicit === 'anthropic' ||
-    explicit === 'ollama' ||
-    explicit === 'openai' ||
-    explicit === 'mock'
+    explicit === 'anthropic' || explicit === 'ollama' || explicit === 'openai'
       ? explicit
       : process.env['ANTHROPIC_API_KEY']
       ? 'anthropic'
       : process.env['OPENAI_API_KEY']
       ? 'openai'
-      : 'mock';
+      : 'ollama';
 
   const model =
     backend === 'anthropic'
       ? process.env['OASIS_MODEL'] ?? 'claude-sonnet-4-6'
-      : backend === 'ollama'
-      ? process.env['OLLAMA_MODEL'] ?? 'gemma4:e4b'
       : backend === 'openai'
       ? process.env['OPENAI_MODEL'] ?? 'gpt-4o-mini'
-      : 'mock';
+      : process.env['OLLAMA_MODEL'] ?? 'gemma4:e2b';
 
   const ttsBackend: TtsBackend =
-    (process.env['OASIS_TTS_BACKEND'] as TtsBackend | undefined) === 'kokoro' ? 'kokoro' : 'web-speech';
+    (process.env['OASIS_TTS_BACKEND'] as TtsBackend | undefined) === 'kokoro'
+      ? 'kokoro'
+      : 'web-speech';
 
-  // Router resolution:
-  //   1. Explicit OASIS_ROUTER=slm|passthrough|heuristic
-  //   2. Ollama backend available → slm (uses Ollama for routing too)
-  //   3. mock backend → heuristic (regex)
-  const explicitRouter = process.env['OASIS_ROUTER'] as RouterBackend | undefined;
-  const router: RouterBackend =
-    explicitRouter === 'slm' || explicitRouter === 'passthrough' || explicitRouter === 'heuristic'
-      ? explicitRouter
-      : backend === 'ollama'
-      ? 'slm'
-      : backend === 'anthropic'
-      ? 'passthrough'
-      : 'heuristic';
+  // The SLM router always runs on Ollama (it needs JSON-structured
+  // output and a small-model TTFT). Default to the same Ollama server
+  // the reasoner uses when that's local, else fall back to localhost.
+  const routerBaseUrl =
+    process.env['OASIS_ROUTER_BASE_URL'] ??
+    (backend === 'ollama'
+      ? process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434'
+      : 'http://localhost:11434');
 
   return {
     sessionId: process.env['OASIS_SESSION_ID'] ?? `sess-${Date.now().toString(36)}`,
@@ -79,10 +74,9 @@ export function loadConfig(): RuntimeConfig {
     ttsBackend,
     kokoroVoice: process.env['KOKORO_VOICE'] ?? 'af_heart',
     kokoroDtype: (process.env['KOKORO_DTYPE'] as RuntimeConfig['kokoroDtype']) ?? 'q8',
-    router,
-    routerModel:
-      process.env['OASIS_ROUTER_MODEL'] ??
-      (backend === 'ollama' ? model : 'gemma4:e2b'),
+    router: 'slm',
+    routerBaseUrl,
+    routerModel: process.env['OASIS_ROUTER_MODEL'] ?? (backend === 'ollama' ? model : 'gemma4:e2b'),
     logLevel: (process.env['OASIS_LOG_LEVEL'] as RuntimeConfig['logLevel']) ?? 'info',
     profile: (process.env['OASIS_PROFILE'] as RuntimeConfig['profile']) ?? 'm3pro-18gb',
   };

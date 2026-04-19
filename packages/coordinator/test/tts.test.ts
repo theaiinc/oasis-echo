@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MockTts, SentenceChunker } from '../src/tts.js';
+import { PassthroughTts, SentenceChunker } from '../src/tts.js';
 
 describe('SentenceChunker', () => {
   it('splits on sentence boundaries', () => {
@@ -22,9 +22,9 @@ describe('SentenceChunker', () => {
   });
 });
 
-describe('MockTts', () => {
+describe('PassthroughTts', () => {
   it('emits a chunk per sentence and marks the last as final', async () => {
-    const tts = new MockTts();
+    const tts = new PassthroughTts();
     const chunks = [];
     for await (const c of tts.synthesize('Hi there. How are you?')) chunks.push(c);
     expect(chunks.length).toBe(2);
@@ -35,7 +35,7 @@ describe('MockTts', () => {
   });
 
   it('emits text-only chunks (no real PCM)', async () => {
-    const tts = new MockTts();
+    const tts = new PassthroughTts();
     const chunks = [];
     for await (const c of tts.synthesize('Hello.')) chunks.push(c);
     expect(chunks[0]?.pcm).toBeUndefined();
@@ -43,7 +43,7 @@ describe('MockTts', () => {
   });
 
   it('honors abort signal', async () => {
-    const tts = new MockTts();
+    const tts = new PassthroughTts();
     const ctrl = new AbortController();
     ctrl.abort();
     const chunks = [];
