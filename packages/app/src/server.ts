@@ -4,10 +4,19 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDotenv } from './env.js';
 import {
+  ContextBiasStage,
+  CorrectionStore,
   KokoroTts,
   OllamaRouter,
   PassthroughTts,
+  PhraseMatcherStage,
+  PostProcessPipeline,
+  RuleStage,
+  SemanticCorrectionStage,
   alwaysEscalate,
+  classifyQuestion,
+  makeOllamaCorrector,
+  type AgentContext,
   type Router,
   type StreamingTts,
 } from '@oasis-echo/coordinator';
@@ -29,10 +38,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Short "still listening" acknowledgements played while the user is
 // mid-utterance. Pre-synthesized through Kokoro at startup so the
 // client can trigger them instantly and play at Web-Audio volume.
+//
+// Avoid letter-only onomatopoeia like "mhm" or "Mm" — Kokoro's phonemizer
+// reads those as letter names ("em-ech-em"). Stick to tokens with a vowel
+// spelling the phonemizer can actually sound out.
 const BACKCHANNEL_PHRASES = [
   'uh huh',
   'yeah',
-  'mhm',
   'right',
   'I see',
   'got it',
@@ -203,7 +215,83 @@ async function main(): Promise<void> {
     tracer: new Tracer(),
   });
 
+  // STT post-processing pipeline: cleans the raw transcript before it
+  // hits the dialogue pipeline. Three stages in order:
+  //   1. rules   — strip fillers, collapse repeats, phonetic fixes
+  //   2. phrases — snap noisy text to known canonical phrases
+  //   3. semantic — LLM-based correction, conditional on low confidence
+  //                 or ambiguity markers
+  //
+  // The pipeline is REBUILT on every user correction: when POST
+  // /correction arrives, the CorrectionStore updates its word-rule
+  // and phrase buckets, and we swap in a fresh pipeline so future
+  // turns pick up the new data without restarting the server.
+  const correctionsPath =
+    process.env['OASIS_CORRECTIONS_FILE'] ??
+    join(process.cwd(), '.oasis-corrections.json');
+  const correctionStore = new CorrectionStore(correctionsPath, () => {
+    postprocess = buildPostProcess();
+    logger.info('postprocess rebuilt', {
+      wordRules: Object.keys(correctionStore.wordRules()).length,
+      phrases: correctionStore.phrases().length,
+    });
+  });
+
+  function buildPostProcess(): PostProcessPipeline {
+    return new PostProcessPipeline([
+      new RuleStage({
+        phoneticFixes: {
+          // Baseline common-speech normalizations.
+          gonna: 'going to',
+          wanna: 'want to',
+          gotta: 'got to',
+          cuz: 'because',
+          lemme: 'let me',
+          gimme: 'give me',
+          // User-learned rules from past /correction calls.
+          ...correctionStore.wordRules(),
+        },
+      }),
+      // Context-bias runs AFTER rules (so it sees cleaned text) but
+      // BEFORE phrase matching (a successful context snap can feed a
+      // cleaner phrase match). Skipped automatically when no agent
+      // context exists or the topic-change gate fires.
+      new ContextBiasStage({}),
+      new PhraseMatcherStage({
+        // Seed list + anything the user has taught us.
+        phrases: [...loadPhraseList(), ...correctionStore.phrases()],
+        similarityThreshold: 0.78,
+      }),
+      ...(cfg.backend === 'ollama'
+        ? [
+            new SemanticCorrectionStage({
+              correct: makeOllamaCorrector({
+                baseUrl: cfg.ollamaBaseUrl,
+                model: cfg.routerModel,
+                logger,
+              }),
+              minConfidenceToRun: 0.6,
+              timeoutMs: 2500,
+            }),
+          ]
+        : []),
+    ]);
+  }
+
+  await correctionStore.load();
+  let postprocess = buildPostProcess();
+  logger.info('corrections loaded', {
+    path: correctionsPath,
+    wordRules: Object.keys(correctionStore.wordRules()).length,
+    phrases: correctionStore.phrases().length,
+  });
+
   const hub = new Hub();
+
+  // Rolling agent context, fed into the STT post-processor on every
+  // subsequent user turn. Updated on turn.complete so the NEXT user
+  // utterance sees the assistant's latest reply.
+  let agentContext: AgentContext = {};
 
   // Log high-signal turn events to the server stdout so the live log
   // is actually useful (not just GET /state polling).
@@ -211,13 +299,22 @@ async function main(): Promise<void> {
     logger.info('route', { turnId: e.turnId, kind: e.decision.kind, intent: e.decision.intent });
   });
   pipeline.bus.on('turn.complete', (e) => {
+    const agentText = e.turn.agentText ?? '';
+    if (agentText.trim()) {
+      const pendingQuestion = classifyQuestion(agentText);
+      agentContext = {
+        lastUtterance: agentText,
+        ...(pendingQuestion ? { pendingQuestion } : {}),
+      };
+    }
     logger.info('turn', {
       id: e.turn.id,
       tier: e.turn.tier,
       intent: e.turn.intent,
       interrupted: e.turn.interrupted,
-      userText: e.turn.userText.slice(0, 80),
-      agentText: (e.turn.agentText ?? '').slice(0, 120),
+      userText: e.turn.userText.slice(0, 120),
+      agentText: agentText.slice(0, 300),
+      pendingQ: agentContext.pendingQuestion?.kind ?? 'none',
       latencyMs: (e.turn.endedAtMs ?? 0) - e.turn.startedAtMs,
     });
   });
@@ -366,8 +463,35 @@ async function main(): Promise<void> {
       hub.broadcast('user.input', { turnId, text, atMs: Date.now() });
       void (async () => {
         try {
-          await simulateTranscription(text, turnId);
-          const turn = await pipeline.handleTurn(text, { turnId });
+          // STT post-processing first. If a stage mutates the text,
+          // log the diff and broadcast a trace event so the UI can
+          // show "cleaned from X to Y" for debugging. Agent context
+          // from the previous turn feeds context-bias + semantic.
+          const pp = await postprocess.process({
+            text,
+            ...(agentContext.lastUtterance ? { agentContext } : {}),
+          });
+          if (pp.stagesApplied.length > 0) {
+            logger.info('stt.postprocess', {
+              turnId,
+              original: pp.original,
+              final: pp.text,
+              stages: pp.stagesApplied,
+              latencyMs: pp.latencyMs,
+            });
+            hub.broadcast('stt.postprocess', {
+              turnId,
+              original: pp.original,
+              final: pp.text,
+              stages: pp.stagesApplied,
+              history: pp.history,
+              latencyMs: pp.latencyMs,
+              atMs: Date.now(),
+            });
+          }
+          const cleanText = pp.text;
+          await simulateTranscription(cleanText, turnId);
+          const turn = await pipeline.handleTurn(cleanText, { turnId });
           hub.broadcast('turn.summary', {
             turnId: turn.id,
             tier: turn.tier,
@@ -386,6 +510,59 @@ async function main(): Promise<void> {
       const interrupted = await pipeline.bargeIn();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ interrupted }));
+      return;
+    }
+
+    // Teach the STT pipeline a correction. Body: { original, corrected }.
+    // Single-word diff → word rule (RuleStage.phoneticFixes).
+    // Multi-word corrected → also indexed as a canonical phrase
+    // (PhraseMatcherStage.phrases). The in-memory pipeline is rebuilt
+    // via the onChange callback so subsequent turns pick it up.
+    if (req.method === 'POST' && url.pathname === '/correction') {
+      const body = await readBody(req);
+      let original = '';
+      let corrected = '';
+      try {
+        const parsed = JSON.parse(body) as { original?: unknown; corrected?: unknown };
+        original = String(parsed.original ?? '').trim();
+        corrected = String(parsed.corrected ?? '').trim();
+      } catch {
+        // fall through to validation below
+      }
+      if (!original || !corrected) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'missing original or corrected' }));
+        return;
+      }
+      const analysis = await correctionStore.addCorrection(original, corrected);
+      logger.info('correction', {
+        original,
+        corrected,
+        wordPairs: analysis.wordPairs,
+        addedAsPhrase: analysis.addAsPhrase,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          accepted: true,
+          wordPairs: analysis.wordPairs,
+          addedAsPhrase: analysis.addAsPhrase,
+          wordRules: correctionStore.wordRules(),
+          phrases: correctionStore.phrases(),
+        }),
+      );
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/corrections') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          wordRules: correctionStore.wordRules(),
+          phrases: correctionStore.phrases(),
+          history: correctionStore.history(),
+        }),
+      );
       return;
     }
 
@@ -420,6 +597,38 @@ async function main(): Promise<void> {
         `  session:  ${cfg.sessionId}\n\n`,
     );
   });
+}
+
+/**
+ * Load the canonical-phrase list for the PhraseMatcherStage.
+ * Reads `OASIS_STT_PHRASES_FILE` if set (one phrase per line, `#`
+ * comments allowed); otherwise returns a small illustrative seed list.
+ */
+function loadPhraseList(): string[] {
+  const path = process.env['OASIS_STT_PHRASES_FILE'];
+  if (path) {
+    try {
+      const content = readFileSync(path, 'utf8');
+      return content
+        .split('\n')
+        .map((l) => l.replace(/#.*$/, '').trim())
+        .filter((l) => l.length > 0);
+    } catch {
+      // fall through to defaults
+    }
+  }
+  return [
+    'send an email',
+    'schedule a meeting',
+    'set a timer',
+    'set an alarm',
+    'turn on the lights',
+    'turn off the lights',
+    'play some music',
+    'pause the music',
+    'what time is it',
+    'what is the weather',
+  ];
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

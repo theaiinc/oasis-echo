@@ -3,7 +3,7 @@
 [![CI](https://github.com/theaiinc/oasis-echo/actions/workflows/ci.yml/badge.svg)](https://github.com/theaiinc/oasis-echo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-Tiered hybrid voice AI — reflex / coordinator / reasoning. See [docs/SAD.md](docs/SAD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the design.
+Tiered hybrid voice AI — reflex / coordinator / reasoning. See [docs/SAD.md](docs/SAD.md), [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), and [docs/STT_POSTPROCESS.md](docs/STT_POSTPROCESS.md) for design details.
 
 ## Status
 
@@ -151,12 +151,22 @@ Copy `.env.example` to `.env`. All keys documented there. Key ones:
 - **Tier-1 (coordinator):** SLM router via Ollama with JSON-constrained output, few-shot intent examples, and contextual filler generation. Intent-based escalation policy: smalltalk stays local, real questions/commands escalate.
 - **Tier-2 (reasoning):** three streaming reasoner clients (Anthropic, OpenAI / OpenAI-compatible, Ollama) with token-level streaming. Tool use on the clients that support it.
 
+### STT post-processing
+- Pluggable 4-stage pipeline: deterministic rules → context-biased phonetic snap → fuzzy phrase matching → conditional LLM correction
+- Sub-ms rule stage strips fillers, collapses repeats, applies phonetic fixes
+- **Context-bias stage** uses the assistant's last utterance as a vocabulary hint: Soundex-matched windows of the user's transcript snap to names, code identifiers, and rare words from context ("see tell" → "Seattle", "use state" → "useState"). Gated by a topic-change detector so genuine new topics aren't forced back to old vocabulary
+- Fuzzy matcher uses combined normalized-Levenshtein + token-Jaccard scoring to snap noisy input to canonical phrases
+- Semantic LLM correction gated on STT confidence, ambiguity markers, and context presence; hallucination guardrail rejects length drift. Agent context forwarded into the prompt so the LLM can recover in-context identifiers the cheap stages miss
+- **Correction feedback loop** — `POST /correction { original, corrected }` teaches the pipeline at runtime. Single-word diffs become word rules; multi-word corrections become canonical phrases. Persists to disk, rebuilds the live pipeline via `onChange`
+- `stt.postprocess` SSE event exposes the transformation for debugging
+- See [docs/STT_POSTPROCESS.md](docs/STT_POSTPROCESS.md) for architecture, samples, and extensibility
+
 ### Audio
 - Kokoro-82M local TTS with sentence-boundary chunking
 - Web Audio playback with scheduling to keep chunks back-to-back (`audioQueueEndsAt`)
 - WebRTC loopback: agent audio routed through `MediaStreamDestination → RTCPeerConnection pair → <audio>` so Chrome's `getUserMedia` AEC can cancel against it
-- Pre-synthesized backchannels (8 phrases, ~90KB PCM each) cached in memory at startup
-- Browser `SpeechRecognition` with best-of-N hypothesis picking and confidence surfacing
+- Pre-synthesized backchannels (7 phrases, ~90KB PCM each) cached in memory at startup
+- Browser `SpeechRecognition` with best-of-N hypothesis picking, confidence surfacing, and 1.2s silence-debounced turn commit (doubled to 2.4s when the tail is an incomplete-thought conjunction like "but", "what if", "because")
 - Adaptive volume-monitor barge-in detector with dynamic baseline (no fixed threshold)
 
 ## Where to plug future backends in

@@ -612,6 +612,14 @@
       async function send() {
         const text = input.value.trim();
         if (!text) return;
+        // Flush any pending voice buffer + timer so we don't double-post
+        // once the debounced voice commit fires.
+        turnBuffer = '';
+        if (turnEndTimer) {
+          clearTimeout(turnEndTimer);
+          turnEndTimer = null;
+          turnEndDeadline = 0;
+        }
         input.value = '';
         await fetch('/turn', {
           method: 'POST',
@@ -686,7 +694,7 @@
         } catch (_) { /* fall through to speechSynthesis fallback */ }
         // Cache not primed yet — quieter browser TTS fallback.
         if (synth) {
-          const fallback = ['uh huh', 'yeah', 'right', 'mhm', 'I see', 'okay'];
+          const fallback = ['uh huh', 'yeah', 'right', 'I see', 'okay'];
           const phrase = fallback[Math.floor(Math.random() * fallback.length)];
           const u = new SpeechSynthesisUtterance(phrase);
           if (preferredVoice) u.voice = preferredVoice;
@@ -720,13 +728,55 @@
       const ttsQueue = [];
       let currentUtterance = null;
       // Turn-end debounce state. Browser SpeechRecognition fires
-      // stt.final eagerly on every tiny pause, which was causing a
-      // single spoken sentence to fragment into 3-4 turns. We buffer
-      // the accumulated final text and only commit after a sustained
-      // silence window.
+      // isFinal eagerly on every short pause, which was causing a
+      // single spoken sentence to fragment into 3-4 turns — and the
+      // second fragment would land mid-generation, triggering an
+      // unwanted barge-in against the agent's reply to the FIRST
+      // fragment. We buffer the accumulated final text and only
+      // commit after a sustained silence window. Interim results
+      // cancel any pending commit (user is still speaking).
       let turnBuffer = '';
       let turnEndTimer = null;
-      const TURN_END_SILENCE_MS = 1500;
+      let turnEndDeadline = 0;
+      const TURN_END_SILENCE_MS = 1200;
+      // If the trailing token looks like a mid-thought conjunction or
+      // fragment, double the silence window — a user who just said
+      // "…but what if" almost certainly isn't done talking.
+      const INCOMPLETE_TAIL =
+        /(?:^|\s)(?:but|and|or|if|because|cause|cuz|so|when|while|as|though|although|yet|plus|like|with|for|to|of|at|what if|even if|only if|in case|what about|how about|the|a|an|my|your|his|her|their|our)\s*$/i;
+
+      function scheduleTurnCommit() {
+        const tail = turnBuffer.trim();
+        if (!tail) return;
+        const delay = INCOMPLETE_TAIL.test(tail)
+          ? TURN_END_SILENCE_MS * 2
+          : TURN_END_SILENCE_MS;
+        if (turnEndTimer) clearTimeout(turnEndTimer);
+        turnEndDeadline = performance.now() + delay;
+        turnEndTimer = setTimeout(commitTurn, delay);
+      }
+
+      function cancelTurnCommit() {
+        if (turnEndTimer) {
+          clearTimeout(turnEndTimer);
+          turnEndTimer = null;
+          turnEndDeadline = 0;
+        }
+      }
+
+      function commitTurn() {
+        const text = turnBuffer.trim();
+        turnBuffer = '';
+        turnEndTimer = null;
+        turnEndDeadline = 0;
+        if (!text) return;
+        input.value = text;
+        // Reset backchannel state so the next utterance starts fresh.
+        backchannelStartedAt = 0;
+        lastBackchannelAt = 0;
+        lastInterimAt = 0;
+        send();
+      }
 
       // Separate audio-level monitor that runs even while recognition
       // is paused during agent speech. Gives us true hands-free barge-in
@@ -907,23 +957,24 @@
           }
 
           if (interim.trim()) {
-            input.value = interim.trim();
+            // User is still speaking — cancel any pending commit and
+            // show the live tail (buffer + current interim).
+            cancelTurnCommit();
+            const preview = (turnBuffer + ' ' + interim.trim()).trim();
+            input.value = preview;
             voiceHint.textContent = 'listening…';
           }
           if (finalText.trim()) {
-            input.value = finalText.trim();
+            turnBuffer = (turnBuffer + ' ' + finalText.trim()).trim();
+            input.value = turnBuffer;
             const conf = finalConfidence < 1 ? ` (${Math.round(finalConfidence * 100)}%)` : '';
-            voiceHint.textContent = 'sent' + conf;
+            voiceHint.textContent = 'pausing…' + conf;
             if (finalConfidence > 0 && finalConfidence < 0.55) {
               voiceHint.classList.add('warn');
             } else {
               voiceHint.classList.remove('warn');
             }
-            // Reset backchannel state so the next utterance starts fresh.
-            backchannelStartedAt = 0;
-            lastBackchannelAt = 0;
-            lastInterimAt = 0;
-            send();
+            scheduleTurnCommit();
           }
         };
 
@@ -955,6 +1006,8 @@
       function stopVoice() {
         voiceOn = false;
         shouldListen = false;
+        cancelTurnCommit();
+        turnBuffer = '';
         if (recognition) {
           try { recognition.stop(); } catch (_) {}
           recognition = null;
