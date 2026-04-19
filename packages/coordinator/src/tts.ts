@@ -1,11 +1,26 @@
 export type TtsChunk = {
-  pcm: Int16Array;
+  /** The text being spoken in this chunk — always present so the UI
+   *  can render it regardless of whether audio is present. */
+  text: string;
+  /** Synthesized PCM. Optional — only present when a real audio backend
+   *  (Kokoro, Piper, ElevenLabs…) is active. When absent, the client
+   *  falls back to browser speechSynthesis on the text. */
+  pcm?: Int16Array;
+  /** Sample rate of `pcm` when present, or nominal when absent. */
   sampleRate: number;
   final: boolean;
 };
 
 export interface StreamingTts {
-  synthesize(text: string, opts?: { signal?: AbortSignal; voice?: string }): AsyncIterable<TtsChunk>;
+  synthesize(
+    text: string,
+    opts?: {
+      signal?: AbortSignal;
+      voice?: string;
+      /** Playback rate, 1.0 = natural. Lower = slower/more hesitant. */
+      speed?: number;
+    },
+  ): AsyncIterable<TtsChunk>;
 }
 
 /**
@@ -39,16 +54,17 @@ export class SentenceChunker {
 }
 
 /**
- * Mock TTS that emits one PCM chunk per sentence, with a payload that
- * encodes the rendered text for assertions. Used in tests and the
- * text-mode demo so the full pipeline stays exercised.
+ * Mock TTS that emits one text chunk per sentence — no real audio.
+ * The client is responsible for rendering the text (and optionally
+ * invoking browser speechSynthesis). Used in tests and by default
+ * when no audio backend is wired up.
  */
 export class MockTts implements StreamingTts {
   constructor(private readonly sampleRate = 22_050) {}
 
   async *synthesize(
     text: string,
-    opts: { signal?: AbortSignal; voice?: string } = {},
+    opts: { signal?: AbortSignal; voice?: string; speed?: number } = {},
   ): AsyncIterable<TtsChunk> {
     const chunker = new SentenceChunker();
     const sentences = chunker.feed(text);
@@ -57,9 +73,7 @@ export class MockTts implements StreamingTts {
     const all = sentences.length > 0 ? sentences : [text];
     for (let i = 0; i < all.length; i++) {
       if (opts.signal?.aborted) return;
-      const payload = new TextEncoder().encode(all[i] ?? '');
-      const pcm = new Int16Array(payload.buffer, payload.byteOffset, Math.floor(payload.byteLength / 2));
-      yield { pcm, sampleRate: this.sampleRate, final: i === all.length - 1 };
+      yield { text: all[i] ?? '', sampleRate: this.sampleRate, final: i === all.length - 1 };
       await new Promise((r) => setTimeout(r, 5));
     }
   }

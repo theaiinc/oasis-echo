@@ -24,11 +24,8 @@ export async function runDemo(): Promise<void> {
   });
 
   pipeline.bus.on('tts.chunk', (e) => {
-    const text = new TextDecoder().decode(
-      new Uint8Array(e.pcm.buffer, e.pcm.byteOffset, e.pcm.byteLength),
-    );
     if (e.final) {
-      process.stdout.write(`    agent: ${text}\n`);
+      process.stdout.write(`    agent: ${e.text}\n`);
     }
   });
 

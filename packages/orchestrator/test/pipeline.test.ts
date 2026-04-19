@@ -4,10 +4,6 @@ import { MockReasoner } from '@oasis-echo/reasoning';
 import { Metrics } from '@oasis-echo/telemetry';
 import { Pipeline } from '../src/pipeline.js';
 
-function decode(pcm: Int16Array): string {
-  return new TextDecoder().decode(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
-}
-
 describe('Pipeline', () => {
   it('runs a reflex turn without calling the reasoner', async () => {
     const metrics = new Metrics();
@@ -25,7 +21,7 @@ describe('Pipeline', () => {
       metrics,
     });
     const chunks: string[] = [];
-    p.bus.on('tts.chunk', (e) => void chunks.push(decode(e.pcm)));
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
     const turn = await p.handleTurn('hello');
     expect(turn.tier).toBe('reflex');
     expect(turn.intent).toBe('greeting');
@@ -50,12 +46,49 @@ describe('Pipeline', () => {
       tts: new MockTts(),
     });
     const chunks: string[] = [];
-    p.bus.on('tts.chunk', (e) => void chunks.push(decode(e.pcm)));
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
     const turn = await p.handleTurn('why is the sky blue');
     expect(turn.tier).toBe('escalated');
     const joined = chunks.join('');
-    expect(joined.toLowerCase()).toContain('think');
     expect(joined).toContain('cloud answer');
+  });
+
+  it('plays a filler chunk first when the reasoner is slow', async () => {
+    const slow = new Pipeline({
+      sessionId: 's',
+      reasoner: new MockReasoner({
+        tokens: ['Slow ', 'answer.'],
+        delayMs: 800, // first token at ~800ms, past the 600ms threshold
+      }),
+      tts: new MockTts(),
+    });
+    const events: Array<{ text: string; filler: boolean }> = [];
+    slow.bus.on('tts.chunk', (e) =>
+      void events.push({ text: e.text, filler: e.filler === true }),
+    );
+    await slow.handleTurn('why is gravity a thing');
+    const fillerCount = events.filter((e) => e.filler).length;
+    expect(fillerCount).toBeGreaterThan(0);
+    expect(events.map((e) => e.text).join(' ').toLowerCase()).toContain('slow');
+  });
+
+  it('skips the filler entirely when the reasoner is fast', async () => {
+    const fast = new Pipeline({
+      sessionId: 'f',
+      reasoner: new MockReasoner({
+        tokens: ['Fast ', 'answer.'],
+        delayMs: 10, // first token well before the 600ms threshold
+      }),
+      tts: new MockTts(),
+    });
+    const events: Array<{ text: string; filler: boolean }> = [];
+    fast.bus.on('tts.chunk', (e) =>
+      void events.push({ text: e.text, filler: e.filler === true }),
+    );
+    await fast.handleTurn('why is gravity a thing');
+    const fillerCount = events.filter((e) => e.filler).length;
+    expect(fillerCount).toBe(0);
+    expect(events.map((e) => e.text).join(' ').toLowerCase()).toContain('fast answer');
   });
 
   it('emits route.decision and turn.complete events', async () => {

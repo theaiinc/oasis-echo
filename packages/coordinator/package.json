@@ -16,7 +16,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@oasis-echo/types": "workspace:*",
-    "@oasis-echo/telemetry": "workspace:*"
+    "@huggingface/transformers": "^4.1.0",
+    "@oasis-echo/telemetry": "*",
+    "@oasis-echo/types": "*",
+    "kokoro-js": "^1.2.1",
+    "phonemizer": "^1.2.1"
   }
 }

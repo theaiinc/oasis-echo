@@ -22,18 +22,39 @@ export function buildRouterPrompt(text: string, state: DialogueState): string {
     .map((t) => `  user: ${t.userText}${t.agentText ? `\n  agent: ${t.agentText}` : ''}`)
     .join('\n');
   return [
-    'You are the routing module for a voice assistant. Emit JSON only.',
-    `Phase: ${state.phase}`,
-    `Allowed intents: [${allowed}]`,
-    summary,
-    recent ? `Recent turns:\n${recent}` : '',
-    `User: "${text}"`,
+    'Classify the next voice turn and output ONE JSON object. Nothing else.',
     '',
-    'Respond with JSON matching:',
-    '{"intent": "<one of allowed>", "confidence": 0.0..1.0, "kind": "local"|"escalate", "reply"?: string, "reason"?: string, "filler"?: string}',
-    'Use kind="escalate" for: tool use, multi-step reasoning, RAG, low confidence (<0.7), or unfamiliar topics.',
-    'Use kind="local" for: greetings, confirmations, simple factual answers you are certain about.',
-    'When escalating, include a "filler" <= 6 words the TTS can play immediately.',
+    'Schema: {"intent":"<one-of-allowed>","confidence":0.85,"kind":"local"|"escalate","reply":"..."}',
+    '',
+    'INTENT RULES (very important — pick the right bucket):',
+    '  smalltalk         — social pleasantries ABOUT the speaker/agent: "how are you", "what\'s up", "how\'s it going", "you doing okay", "nice to meet you"',
+    '  greeting          — bare openers: "hi", "hey", "hello"',
+    '  confirm / deny    — "yes" / "no" / "yeah" / "nope" etc',
+    '  cancel / stop / wait — meta commands to interrupt',
+    '  question_simple   — quick factual lookup: "what time is it", "when was X born", "capital of Y"',
+    '  question_complex  — needs reasoning / explanation: "why does X happen", "explain Y", "how does Z work"',
+    '  command_tool      — requires an action/tool: "send an email", "schedule a meeting", "search for…"',
+    '  command_local     — simple app command: "mute", "brighter", "next page"',
+    '',
+    'CRITICAL: "how are you" / "how you doing" / "what\'s up" are smalltalk, NOT question_complex.',
+    '          They are rhetorical check-ins, not questions needing reasoning.',
+    '',
+    'EXAMPLES:',
+    '  user: "hey"                → {"intent":"greeting","confidence":0.98,"kind":"local","reply":"Hey! What\'s up?"}',
+    '  user: "hey how you doing"  → {"intent":"smalltalk","confidence":0.95,"kind":"local","reply":"Doing great — you?"}',
+    '  user: "what\'s up"          → {"intent":"smalltalk","confidence":0.95,"kind":"local","reply":"Not much, you?"}',
+    '  user: "yeah"               → {"intent":"confirm","confidence":0.97,"kind":"local","reply":"Cool."}',
+    '  user: "what time is it"    → {"intent":"question_simple","confidence":0.9,"kind":"escalate"}',
+    '  user: "explain gravity"    → {"intent":"question_complex","confidence":0.9,"kind":"escalate"}',
+    '  user: "email alice the notes" → {"intent":"command_tool","confidence":0.9,"kind":"escalate"}',
+    '',
+    `phase: ${state.phase}`,
+    `allowed intents: [${allowed}]`,
+    summary,
+    recent ? `recent:\n${recent}` : '',
+    `user: "${text}"`,
+    '',
+    'Keep reply under 20 words, casual, conversational. Output JSON only.',
   ]
     .filter((l) => l.length > 0)
     .join('\n');
@@ -104,6 +125,41 @@ export function toRouterOutput(json: RouterJson): RouterOutput {
 }
 
 /**
+ * Always escalates past the reflex tier. Used when a real reasoner
+ * (Anthropic or Ollama) is available and we want most turns to flow
+ * through the model instead of a canned local reply. The reflex tier
+ * still short-circuits greetings/confirms/cancels before this runs.
+ */
+export class PassthroughRouter implements Router {
+  async route(input: { text: string; state: DialogueState }): Promise<RouterOutput> {
+    void input.state;
+    const text = input.text.trim();
+    if (text.length === 0) {
+      return {
+        intent: 'unknown',
+        confidence: 0.4,
+        decision: { kind: 'escalate', intent: 'unknown', reason: 'unclassified' },
+      };
+    }
+    const lower = text.toLowerCase();
+    const isQuestion = /\?$/.test(text) || /^(what|when|where|who|why|how|which|is|are|can|could|would|should|do|does|did)\b/.test(lower);
+    const isCommand = /^(please |hey |)?(search|look\s*up|find|schedule|book|call|email|send|create|delete|update|open|close|remind|play|pause)\b/.test(lower);
+    const intent = isCommand ? 'command_tool' : isQuestion ? 'question_complex' : 'question_complex';
+    return {
+      intent,
+      confidence: 0.8,
+      decision: {
+        kind: 'escalate',
+        intent,
+        reason: isCommand ? 'tool-needed' : 'complex-reasoning',
+        // Leave filler unset so the pipeline rotates through the pool
+        // for this reason — avoids the same word every turn.
+      },
+    };
+  }
+}
+
+/**
  * Heuristic router used in tests and as a fallback when no SLM backend
  * is configured. Covers the decision logic in prod but with regex
  * instead of a model. Good enough to validate the orchestration spine.
@@ -146,7 +202,7 @@ export class HeuristicRouter implements Router {
           kind: 'escalate',
           intent: 'command_tool',
           reason: 'tool-needed',
-          filler: 'One moment, let me check.',
+          // filler left blank — pipeline picks from the pool
         },
       };
     }
@@ -159,7 +215,6 @@ export class HeuristicRouter implements Router {
           kind: 'escalate',
           intent: 'question_complex',
           reason: 'complex-reasoning',
-          filler: 'Let me think about that.',
         },
       };
     }
@@ -172,7 +227,6 @@ export class HeuristicRouter implements Router {
           kind: 'escalate',
           intent: 'question_simple',
           reason: 'factual-lookup',
-          filler: 'Looking that up.',
         },
       };
     }

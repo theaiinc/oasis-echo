@@ -1,6 +1,9 @@
 # Oasis Echo
 
-Tiered hybrid voice AI — reflex / coordinator / reasoning. See [SAD.md](SAD.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the design.
+[![CI](https://github.com/theaiinc/oasis-echo/actions/workflows/ci.yml/badge.svg)](https://github.com/theaiinc/oasis-echo/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+Tiered hybrid voice AI — reflex / coordinator / reasoning. See [docs/SAD.md](docs/SAD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the design.
 
 ## Status
 
@@ -29,19 +32,73 @@ packages/
 ## Quick start
 
 ```bash
-pnpm install
-pnpm build
-pnpm test              # 68 tests across all packages
-pnpm server            # web UI at http://localhost:3000
-pnpm demo              # scripted end-to-end demo
-pnpm dev               # interactive terminal REPL
+npm install
+npm run build
+npm test               # 81 tests across all packages
+npm run server         # web UI at http://localhost:3000
+npm run demo           # scripted end-to-end demo
+npm run dev            # interactive terminal REPL
 ```
 
-Set `ANTHROPIC_API_KEY` in `.env` to use the real Claude Sonnet 4.6 backend; otherwise a deterministic mock reasoner streams canned responses so the full pipeline still runs.
+### Backends
+
+Four reasoner backends, picked in this order of precedence:
+
+1. `OASIS_BACKEND=anthropic|ollama|openai|mock` (explicit override)
+2. `ANTHROPIC_API_KEY` set → `anthropic`
+3. `OPENAI_API_KEY` set → `openai`
+4. otherwise → `mock`
+
+**Anthropic (Claude):** put `ANTHROPIC_API_KEY=sk-ant-…` in `.env` at the repo root. Default model is `claude-sonnet-4-6`; override with `OASIS_MODEL=…`.
+
+**OpenAI and compatible endpoints:** set `OPENAI_API_KEY`. The client speaks the OpenAI Chat Completions streaming format, so it works with any compatible server — LM Studio, vLLM, OpenRouter, Together, Groq, DeepSeek, Mistral, Fireworks, LocalAI — just point `OPENAI_BASE_URL` at the right address:
+
+```bash
+# OpenAI official
+OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-4o-mini npm run server
+
+# Local LM Studio
+OPENAI_API_KEY=lm-studio \
+OPENAI_BASE_URL=http://localhost:1234/v1 \
+OPENAI_MODEL=your-loaded-model \
+npm run server
+
+# Groq, OpenRouter, DeepSeek, Together, … same pattern
+```
+
+**Local (Ollama):** install [Ollama](https://ollama.com), pull a model, point the app at it:
+
+```bash
+ollama pull gemma4:e2b      # or: gemma3n:e4b, llama3.2, phi3.5, qwen2.5:3b
+ollama serve                 # usually already running
+OASIS_BACKEND=ollama npm run server
+```
+
+Override the model/URL with `OLLAMA_MODEL=…` and `OLLAMA_BASE_URL=http://…`.
+
+**Mock:** default when nothing is configured. Canned, shallow replies that reference the last few turns so you can smoke-test the pipeline without hitting the network.
+
+The header in the web UI shows which backend is live; a banner explains how to upgrade from mock to a real model.
+
+### TTS backend (speech quality)
+
+By default the browser's `speechSynthesis` speaks the agent text — decent, but heavily OS-dependent. For near-studio quality, switch to the built-in **Kokoro-82M** local TTS:
+
+```bash
+OASIS_BACKEND=ollama OASIS_TTS_BACKEND=kokoro npm run server
+```
+
+- Downloads an ~80MB ONNX model on first run (cached to `~/.cache/huggingface`).
+- Runs in-process via `kokoro-js` — no Python, no separate server.
+- ~0.8s synth per short sentence on M-series, ~2s for a full reply.
+- Override the voice with `KOKORO_VOICE=af_heart` (other options: `af_nova`, `af_bella`, `am_adam`, `am_echo`, `bf_emma`, `bm_george`, ... 28 total).
+- Override quantization with `KOKORO_DTYPE=q8` (default; also `q4`, `fp16`, `fp32` for more quality at higher memory).
+
+Real PCM is base64-encoded into the SSE `tts.chunk` event and played client-side via the Web Audio API. If the server ever returns a chunk without `audio` (e.g. backend falls back), the client automatically uses `speechSynthesis` on the `text` field.
 
 ### Web UI
 
-`pnpm server` serves a single-page app at `http://localhost:3000`. Type a message, hit Enter, and watch:
+`npm run server` serves a single-page app at `http://localhost:3000`. Type a message, hit Enter, and watch:
 
 - **Live transcript** — user text streams in word-by-word (simulating STT partials), then locks to the final.
 - **Routing decision** — every turn shows whether it went reflex / local / escalated, with the chosen intent.
@@ -77,8 +134,9 @@ Copy `.env.example` to `.env`:
 
 ## Scripts
 
-- `pnpm typecheck` — project-reference typecheck across all workspaces
-- `pnpm build` — emits `packages/*/dist`
-- `pnpm test` — vitest suite
-- `pnpm --filter @oasis-echo/app demo` — scripted end-to-end run
-- `pnpm dev` — interactive REPL
+- `npm run typecheck` — project-reference typecheck across all workspaces
+- `npm run build` — emits `packages/*/dist`
+- `npm test` — vitest suite
+- `npm run demo` — scripted end-to-end run
+- `npm run dev` — interactive REPL
+- `npm run server` — launch the web UI

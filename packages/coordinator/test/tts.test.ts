@@ -30,6 +30,16 @@ describe('MockTts', () => {
     expect(chunks.length).toBe(2);
     expect(chunks.at(-1)?.final).toBe(true);
     expect(chunks[0]?.final).toBe(false);
+    expect(chunks[0]?.text).toBe('Hi there.');
+    expect(chunks[1]?.text).toBe('How are you?');
+  });
+
+  it('emits text-only chunks (no real PCM)', async () => {
+    const tts = new MockTts();
+    const chunks = [];
+    for await (const c of tts.synthesize('Hello.')) chunks.push(c);
+    expect(chunks[0]?.pcm).toBeUndefined();
+    expect(chunks[0]?.text).toBe('Hello.');
   });
 
   it('honors abort signal', async () => {

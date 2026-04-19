@@ -16,10 +16,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@oasis-echo/coordinator": "workspace:*",
-    "@oasis-echo/reasoning": "workspace:*",
-    "@oasis-echo/reflex": "workspace:*",
-    "@oasis-echo/telemetry": "workspace:*",
-    "@oasis-echo/types": "workspace:*"
+    "@oasis-echo/coordinator": "*",
+    "@oasis-echo/reasoning": "*",
+    "@oasis-echo/reflex": "*",
+    "@oasis-echo/telemetry": "*",
+    "@oasis-echo/types": "*"
   }
 }

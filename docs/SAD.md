@@ -4,7 +4,7 @@
 **Date:** 2026-04-17
 **Status:** Proposed
 **Target Platform:** Apple Silicon (M3 Pro 18GB minimum) + Node.js orchestrator
-**Related:** [docs/research.md](docs/research.md)
+**Related:** [research.md](research.md)
 
 ---
 

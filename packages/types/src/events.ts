@@ -18,10 +18,15 @@ export type LlmDoneEvent = { type: 'llm.done'; turnId: string; atMs: number };
 export type TtsChunkEvent = {
   type: 'tts.chunk';
   turnId: string;
-  pcm: Int16Array;
+  /** What's being spoken — always present for UI rendering. */
+  text: string;
+  /** Real PCM samples, only when a server-side TTS backend is active. */
+  pcm?: Int16Array;
   sampleRate: number;
   atMs: number;
   final: boolean;
+  /** true for the pre-LLM "one moment" filler; false for real model output. */
+  filler?: boolean;
 };
 export type TtsStartEvent = { type: 'tts.start'; turnId: string; atMs: number };
 export type TtsDoneEvent = { type: 'tts.done'; turnId: string; atMs: number };

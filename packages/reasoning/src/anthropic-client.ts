@@ -31,8 +31,12 @@ export interface Reasoner {
 }
 
 const DEFAULT_SYSTEM = [
-  'You are the reasoning expert for a tiered voice assistant.',
-  'Respond conversationally in one or two short sentences suitable for TTS.',
+  'You are a curious, warm conversational partner — not a chatbot assistant.',
+  'React with genuine interest. Ask natural follow-up questions when appropriate.',
+  'Use casual, contemporary speech. Match the user\'s energy.',
+  'AVOID these clichés: "That sounds interesting.", "That sounds like…", "How can I assist you today?", "Is there anything else I can help you with?", "That\'s a great question.".',
+  'Instead react with a specific observation, then ask a concrete follow-up when natural.',
+  'Respond in one or two short sentences — this is spoken conversation, not text.',
   'Prefer direct answers; avoid preambles like "Sure" or "Certainly".',
   'When a tool is available and relevant, call it; otherwise answer directly.',
   'PII has been replaced with placeholders like <EMAIL_1>; do not speculate about them.',
@@ -63,7 +67,7 @@ export class AnthropicReasoner implements Reasoner {
     this.client = new Anthropic({ apiKey });
     this.model = opts.model ?? process.env['OASIS_MODEL'] ?? 'claude-sonnet-4-6';
     this.maxTokens = opts.maxTokens ?? 512;
-    this.timeoutMs = opts.timeoutMs ?? 2_000;
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.logger = opts.logger;
     this.tools = opts.tools;
     this.redactor = opts.redactor ?? new PiiRedactor();
@@ -158,8 +162,12 @@ export class AnthropicReasoner implements Reasoner {
         outputTokens: final.usage.output_tokens ?? outputTokens,
       };
     } catch (err) {
-      this.breaker.recordFailure();
-      this.logger?.error('anthropic stream failed', { error: String(err) });
+      // Distinguish user-initiated aborts (barge-in) from real errors.
+      const isAbort = input.signal?.aborted || (err instanceof Error && err.name === 'AbortError');
+      if (!isAbort) {
+        this.breaker.recordFailure();
+        this.logger?.error('anthropic stream failed', { error: String(err) });
+      }
       throw err;
     } finally {
       clearTimeout(timer);

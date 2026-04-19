@@ -2,21 +2,28 @@
   "name": "oasis-echo",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Tiered hybrid voice AI assistant — reflex / coordinator / reasoning",
-  "packageManager": "pnpm@10.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/theaiinc/oasis-echo.git"
+  },
   "engines": {
     "node": ">=20.10.0"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --dry",
-    "test": "pnpm -s build && vitest run",
+    "test": "npm run -s build && vitest run",
     "test:watch": "vitest",
     "lint": "eslint 'packages/*/src/**/*.ts' 'packages/*/test/**/*.ts'",
-    "dev": "pnpm --filter @oasis-echo/app run dev",
-    "demo": "pnpm --filter @oasis-echo/app run demo",
-    "server": "pnpm --filter @oasis-echo/app run server",
-    "clean": "tsc -b --clean && pnpm -r exec rm -rf dist"
+    "dev": "npm run dev -w @oasis-echo/app",
+    "demo": "npm run demo -w @oasis-echo/app",
+    "server": "npm run server -w @oasis-echo/app",
+    "clean": "tsc -b --clean"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

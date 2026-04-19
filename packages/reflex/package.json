@@ -16,6 +16,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@oasis-echo/types": "workspace:*"
+    "@oasis-echo/types": "*"
   }
 }

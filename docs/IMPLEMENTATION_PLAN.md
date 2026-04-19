@@ -2,7 +2,7 @@
 
 **Version:** 0.1 (Draft)
 **Date:** 2026-04-17
-**Companion to:** [SAD.md](SAD.md), [docs/research.md](docs/research.md)
+**Companion to:** [SAD.md](SAD.md), [research.md](research.md)
 **Target first demo:** 6 weeks
 **Target v1 (production candidate):** 14 weeks
 
@@ -32,7 +32,7 @@
 **Goal:** A Node.js app that captures microphone audio and plays back synthesized audio through a minimal event bus.
 
 **Tasks**
-- Initialize Node.js 22 + TypeScript monorepo (`pnpm` workspaces): `packages/orchestrator`, `packages/reflex`, `packages/coordinator`, `packages/reasoning`, `packages/telemetry`.
+- Initialize Node.js 20+ TypeScript monorepo (npm workspaces): `packages/orchestrator`, `packages/reflex`, `packages/coordinator`, `packages/reasoning`, `packages/telemetry`.
 - Pick audio I/O library (candidates: `naudiodon`, `node-speaker`, native addon over CoreAudio). Benchmark round-trip latency.
 - Scaffold typed event bus (`EventEmitter3` or custom `AsyncIterator`-based) with events from [SAD.md §4.4](SAD.md).
 - Wire OpenTelemetry with a local OTLP collector; one span per audio frame burst.
@@ -128,7 +128,7 @@
 
 - Close open questions from [SAD §11](SAD.md) with benchmark data.
 - Finalize YAML hardware profiles (M3 Pro 18GB, M4 Max 64GB).
-- Packaging: `pnpm build` produces a notarized `.app` bundle with weights lazy-fetched on first run.
+- Packaging: `npm run build` produces a notarized `.app` bundle with weights lazy-fetched on first run.
 - Ship v1 with release notes mapping features back to architectural drivers.
 
 ## 9. Team, Workstreams, Parallelism

@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
-    "@oasis-echo/telemetry": "workspace:*",
-    "@oasis-echo/types": "workspace:*"
+    "@oasis-echo/telemetry": "*",
+    "@oasis-echo/types": "*"
   }
 }

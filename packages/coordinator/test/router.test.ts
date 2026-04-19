@@ -22,7 +22,7 @@ describe('HeuristicRouter', () => {
     const out = await router.route({ text: 'schedule a meeting for tomorrow', state });
     expect(out.decision.kind).toBe('escalate');
     if (out.decision.kind === 'escalate') {
-      expect(out.decision.filler).toBeTruthy();
+      expect(out.decision.reason).toBe('tool-needed');
     }
   });
 

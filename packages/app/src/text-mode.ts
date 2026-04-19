@@ -4,6 +4,7 @@ import { Pipeline } from '@oasis-echo/orchestrator';
 import {
   AnthropicReasoner,
   MockReasoner,
+  OllamaReasoner,
   ToolRegistry,
   echoTool,
   timeTool,
@@ -31,12 +32,15 @@ export async function runTextMode(): Promise<void> {
   tools.register(echoTool());
 
   let reasoner: Reasoner;
-  if (cfg.cloudEnabled) {
+  if (cfg.backend === 'anthropic') {
     reasoner = new AnthropicReasoner({ logger, tools, model: cfg.model });
     logger.info('reasoner', { backend: 'anthropic', model: cfg.model });
+  } else if (cfg.backend === 'ollama') {
+    reasoner = new OllamaReasoner({ logger, model: cfg.model, baseUrl: cfg.ollamaBaseUrl });
+    logger.info('reasoner', { backend: 'ollama', model: cfg.model, baseUrl: cfg.ollamaBaseUrl });
   } else {
     reasoner = new MockReasoner();
-    logger.info('reasoner', { backend: 'mock', reason: 'no ANTHROPIC_API_KEY' });
+    logger.info('reasoner', { backend: 'mock' });
   }
 
   const pipeline = new Pipeline({
@@ -51,10 +55,7 @@ export async function runTextMode(): Promise<void> {
   // Render streaming TTS chunks as they arrive
   let pendingLine = '';
   pipeline.bus.on('tts.chunk', (ev) => {
-    const text = new TextDecoder().decode(
-      new Uint8Array(ev.pcm.buffer, ev.pcm.byteOffset, ev.pcm.byteLength),
-    );
-    pendingLine += text;
+    pendingLine += ev.text;
     if (ev.final) {
       process.stdout.write(`\n  agent: ${pendingLine}\n`);
       pendingLine = '';
