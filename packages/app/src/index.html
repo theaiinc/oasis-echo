@@ -587,9 +587,11 @@
             t.agentEl.classList.remove('pending');
           }
         }
-        // Prune the per-turn reply-started flag now that the turn is
-        // finished so the set doesn't grow unbounded over a long session.
+        // Prune per-turn bookkeeping now that the turn is finished so
+        // these sets don't grow unbounded over a long session.
         replyStartedForTurn.delete(p.turn.id);
+        abandonedTurns.delete(p.turn.id);
+        if (currentTurnIdPlaying === p.turn.id) currentTurnIdPlaying = null;
       });
 
       on('turn.summary', (p) => {
@@ -748,8 +750,8 @@
           source.connect(analyser);
           const buf = new Uint8Array(analyser.frequencyBinCount);
           let aboveSince = 0;
-          const THRESH = 14;       // RMS deviation from silence; tune if needed
-          const HOLD_MS = 180;     // sustained-speech window before barging in
+          const THRESH = 9;        // RMS deviation from silence (lower = easier to trigger)
+          const HOLD_MS = 110;     // sustained-speech window before barging in
 
           function tick() {
             if (!voiceOn) {
@@ -797,6 +799,12 @@
       }
 
       function triggerBargeIn() {
+        // Mark the currently-playing turn as abandoned BEFORE firing
+        // /bargein so any chunks already in flight over SSE get
+        // dropped immediately on arrival. Without this we'd wait for
+        // the server's bargein echo to round-trip, and in that window
+        // the next turn's audio can start overlapping the old one.
+        if (currentTurnIdPlaying) abandonedTurns.add(currentTurnIdPlaying);
         stopSpeaking();
         fetch('/bargein', { method: 'POST' }).catch(() => {});
         voiceHint.textContent = 'interrupted — listening…';
@@ -1065,6 +1073,15 @@
       // arriving after the first reply chunk gets dropped instead of
       // playing on top of the reply.
       const replyStartedForTurn = new Set(); // turnIds whose reply is in flight
+      // Turns whose playback has been explicitly abandoned (barge-in).
+      // Any tts.chunk that arrives for one of these is dropped on the
+      // floor — the server's abort is async, so late chunks will
+      // otherwise queue on top of the NEXT turn's audio.
+      const abandonedTurns = new Set();
+      // Most recent turnId whose chunk we've played — so triggerBargeIn()
+      // knows which turn to mark abandoned without waiting for the
+      // server's bargein event to round-trip back.
+      let currentTurnIdPlaying = null;
 
       function playPcm(base64, sampleRate, opts, onEnd) {
         const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
@@ -1140,6 +1157,10 @@
         const p = JSON.parse(raw.data);
         if (!voiceOn) return;
         if (p.filler && !fillerAudio) return; // user disabled audible fillers
+        // Drop any chunk for a turn the user has barged-in out of.
+        // Server abort is async so late PCM keeps arriving for a
+        // beat — letting it through overlaps the next turn's audio.
+        if (abandonedTurns.has(p.turnId)) return;
         // Drop stale filler chunks that arrive AFTER the real reply has
         // already started for this turn. Otherwise they'd schedule at
         // the just-truncated audioQueueEndsAt and overlap the reply.
@@ -1148,6 +1169,7 @@
         if (p.audio) {
           // Server-side TTS (Kokoro). Play real PCM and drive the same
           // speaking-state bookkeeping that speechSynthesis would.
+          currentTurnIdPlaying = p.turnId;
           if (!agentSpeaking) {
             agentSpeaking = true;
             micPausedForTts = true;
@@ -1185,7 +1207,11 @@
           speak(p.text, { filler: p.filler === true });
         }
       });
-      evt.addEventListener('bargein', () => {
+      evt.addEventListener('bargein', (raw) => {
+        try {
+          const p = JSON.parse(raw.data);
+          if (p.interruptedTurnId) abandonedTurns.add(p.interruptedTurnId);
+        } catch (_) {}
         stopSpeaking();
       });
 

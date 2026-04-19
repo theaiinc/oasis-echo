@@ -1,5 +1,10 @@
 import type { Logger } from '@oasis-echo/telemetry';
-import type { DialogueState, Intent, RouterOutput } from '@oasis-echo/types';
+import {
+  PERSONA_RULES,
+  type DialogueState,
+  type Intent,
+  type RouterOutput,
+} from '@oasis-echo/types';
 import {
   alwaysEscalate,
   buildRouterPrompt,
@@ -98,17 +103,11 @@ export class OllamaRouter implements Router {
             {
               role: 'system',
               content: [
-                // Output format — strict.
                 'You output STRICT JSON only — no prose, no markdown fences. Follow the exact schema the user describes.',
                 '',
-                // Personality — applied to the `reply` field when kind=local.
-                'PERSONALITY (shapes the "reply" field when kind="local"):',
-                'You are a curious, warm conversational partner — not a chatbot assistant.',
-                'You react with genuine interest. You ask natural follow-up questions.',
-                'You use casual, contemporary speech. You match the user\'s energy.',
-                'AVOID these clichés: "That sounds interesting.", "That sounds like...", "How can I assist you today?", "Is there anything else I can help you with?", "That\'s a great question.".',
-                'Instead: react with a specific observation, then ask a concrete follow-up.',
-                'Keep replies to one or two short sentences — this is spoken conversation, not text.',
+                'The `reply` field (used when kind="local") must follow the persona below:',
+                '',
+                PERSONA_RULES,
               ].join('\n'),
             },
             { role: 'user', content: prompt },

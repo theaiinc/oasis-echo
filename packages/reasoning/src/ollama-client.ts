@@ -1,5 +1,5 @@
 import type { Logger } from '@oasis-echo/telemetry';
-import type { DialogueState } from '@oasis-echo/types';
+import { PERSONA_RULES, type DialogueState } from '@oasis-echo/types';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { PiiRedactor } from './redaction.js';
 import type { Reasoner, ReasoningStreamEvent } from './anthropic-client.js';
@@ -14,16 +14,7 @@ export type OllamaOpts = {
   temperature?: number;
 };
 
-const DEFAULT_SYSTEM = [
-  'You are a curious, warm conversational partner — not a chatbot assistant.',
-  'React with genuine interest. Ask natural follow-up questions when appropriate.',
-  'Use casual, contemporary speech. Match the user\'s energy.',
-  'AVOID these clichés: "That sounds interesting.", "That sounds like…", "How can I assist you today?", "Is there anything else I can help you with?", "That\'s a great question.".',
-  'Instead react with a specific observation, then ask a concrete follow-up when natural.',
-  'Respond in one or two short sentences — this is spoken conversation, not text.',
-  'Prefer direct answers; avoid preambles like "Sure" or "Certainly".',
-  'PII has been replaced with placeholders like <EMAIL_1>; do not speculate about them.',
-].join(' ');
+const DEFAULT_SYSTEM = PERSONA_RULES;
 
 /**
  * Streaming client for a local Ollama server (http://localhost:11434).
@@ -87,7 +78,12 @@ export class OllamaReasoner implements Reasoner {
           // makes the streamed response look empty. For voice replies
           // we just want the final content.
           think: false,
-          options: { temperature: this.temperature },
+          options: {
+            temperature: this.temperature,
+            // Give the model room to produce 2-4 informative sentences
+            // (~120 tokens) without hitting a premature length cap.
+            num_predict: 400,
+          },
         }),
         signal,
       });
