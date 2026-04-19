@@ -1038,11 +1038,17 @@
       }
 
       function stopSpeaking() {
+        // 1. Kill browser speechSynthesis (used when OASIS_TTS_BACKEND=web-speech)
         if (synth) {
           try { synth.cancel(); } catch (_) {}
         }
         ttsQueue.length = 0;
         currentUtterance = null;
+        // 2. Kill Web Audio sources (used when OASIS_TTS_BACKEND=kokoro).
+        // This was the reason barge-in "showed interrupted but the agent
+        // kept talking" — stopSpeaking only stopped speechSynthesis
+        // before, leaving the Kokoro PCM buffers to finish playing.
+        stopAllAudio();
         agentSpeaking = false;
         micPausedForTts = false;
         micBtn.classList.remove('speaking');
