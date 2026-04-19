@@ -1,6 +1,7 @@
 export * from './stt.js';
 export * from './tts.js';
 export * from './postprocess/index.js';
+export * from './emotion/index.js';
 export * from './tts-kokoro.js';
 export * from './state.js';
 export * from './router.js';

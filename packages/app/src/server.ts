@@ -6,6 +6,7 @@ import { loadDotenv } from './env.js';
 import {
   ContextBiasStage,
   CorrectionStore,
+  EmotionAdaptiveTts,
   KokoroTts,
   OllamaRouter,
   PassthroughTts,
@@ -15,10 +16,16 @@ import {
   SemanticCorrectionStage,
   alwaysEscalate,
   classifyQuestion,
+  detectEmotionFromText,
   makeOllamaCorrector,
+  normalizeSerLabel,
+  type AdaptedReply,
   type AgentContext,
+  type Emotion,
+  type EmotionInput,
   type Router,
   type StreamingTts,
+  type Strategy,
 } from '@oasis-echo/coordinator';
 import { Pipeline } from '@oasis-echo/orchestrator';
 import {
@@ -293,6 +300,17 @@ async function main(): Promise<void> {
   // utterance sees the assistant's latest reply.
   let agentContext: AgentContext = {};
 
+  // Emotion-Adaptive TTS. Client-side SER classifier attaches
+  // `{ emotion, confidence }` to POST /turn; we resolve a strategy,
+  // compute TTS directives, broadcast them on an `emotion.directives`
+  // event, and the client applies them to incoming tts.chunk events.
+  const emotionAdapter = new EmotionAdaptiveTts();
+  const emotionHistory: Emotion[] = [];
+  const EMOTION_HISTORY_MAX = 6;
+  // Active directives per in-flight turn, so chunked tts.chunk events
+  // can be decorated with the same emotion envelope for the whole turn.
+  const activeDirectives = new Map<string, AdaptedReply>();
+
   // Log high-signal turn events to the server stdout so the live log
   // is actually useful (not just GET /state polling).
   pipeline.bus.on('route.decision', (e) => {
@@ -443,24 +461,49 @@ async function main(): Promise<void> {
 
     if (req.method === 'POST' && url.pathname === '/turn') {
       const body = await readBody(req);
-      const text = (() => {
+      const parsed = (() => {
         try {
-          return String((JSON.parse(body) as { text?: unknown }).text ?? '');
+          return JSON.parse(body) as {
+            text?: unknown;
+            emotion?: { label?: unknown; confidence?: unknown; strategy?: unknown };
+          };
         } catch {
-          return '';
+          return {};
         }
       })();
+      const text = String(parsed.text ?? '');
       if (!text.trim()) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'missing text' }));
         return;
+      }
+      // Parse optional emotion payload from the client's SER classifier.
+      let detectedEmotion: Emotion | null = null;
+      let detectedConfidence = 0;
+      let requestedStrategy: Strategy | undefined;
+      if (parsed.emotion && typeof parsed.emotion === 'object') {
+        const raw = parsed.emotion;
+        if (typeof raw.label === 'string') {
+          detectedEmotion = normalizeSerLabel(raw.label);
+        }
+        if (typeof raw.confidence === 'number') {
+          detectedConfidence = Math.max(0, Math.min(1, raw.confidence));
+        }
+        if (raw.strategy === 'mirror' || raw.strategy === 'soften' || raw.strategy === 'counterbalance') {
+          requestedStrategy = raw.strategy;
+        }
       }
       res.writeHead(202, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ accepted: true }));
       // Assign one turnId up front so transcription, routing, and TTS
       // events all share a stable key for the UI.
       const turnId = `t-${Date.now().toString(36)}`;
-      hub.broadcast('user.input', { turnId, text, atMs: Date.now() });
+      hub.broadcast('user.input', {
+        turnId,
+        text,
+        atMs: Date.now(),
+        ...(detectedEmotion ? { emotion: { label: detectedEmotion, confidence: detectedConfidence } } : {}),
+      });
       void (async () => {
         try {
           // STT post-processing first. If a stage mutates the text,
@@ -491,6 +534,102 @@ async function main(): Promise<void> {
           }
           const cleanText = pp.text;
           await simulateTranscription(cleanText, turnId);
+
+          // Complementary emotion signals.
+          //
+          //   acoustic (from client SER): strong on arousal-driven
+          //     emotions (happy / surprise / angry / fear) where
+          //     energy + pitch signatures are clear.
+          //   text (keyword/regex on the cleaned transcript): strong
+          //     on meaning-driven emotions (sad / frustrated /
+          //     confused / urgent) that are usually carried by the
+          //     words themselves rather than tone.
+          //
+          // Fusion policy:
+          //   - If acoustic forwarded a label, trust it (client
+          //     already filtered the unreliable sad/neutral/calm).
+          //   - Otherwise fall back to text if any rule matched.
+          //   - If both fire, prefer acoustic unless text has
+          //     materially higher confidence AND a meaning-driven
+          //     label the acoustic classifier can't see well.
+          const textSignal = detectEmotionFromText(cleanText);
+          let emoSource: 'acoustic' | 'text' | 'none' = 'none';
+          let fusedEmotion: Emotion | null = detectedEmotion;
+          let fusedConfidence = detectedConfidence;
+          if (detectedEmotion) {
+            emoSource = 'acoustic';
+            const meaningDriven =
+              textSignal &&
+              ['sad', 'frustrated', 'confused', 'urgent'].includes(textSignal.emotion);
+            if (meaningDriven && textSignal.confidence > detectedConfidence + 0.1) {
+              fusedEmotion = textSignal.emotion;
+              fusedConfidence = textSignal.confidence;
+              emoSource = 'text';
+            }
+          } else if (textSignal) {
+            fusedEmotion = textSignal.emotion;
+            fusedConfidence = textSignal.confidence;
+            emoSource = 'text';
+          }
+
+          // Emotion adaptation: compute directives BEFORE the reasoner
+          // runs so the first tts.chunk can already carry them. Params
+          // depend on emotion + history, not on the agent text, so we
+          // don't need to wait for the reasoner.
+          if (fusedEmotion) {
+            // Text signal is weaker than acoustic (we're inferring from
+            // words, not tone), so default to `soften` when the emotion
+            // came from text — pulls the parameters toward neutral so
+            // the adaptation is felt as a gentle tint, not a whiplash.
+            // A client-requested strategy always wins.
+            const effectiveStrategy: Strategy | undefined =
+              requestedStrategy ?? (emoSource === 'text' ? 'soften' : undefined);
+            const input: EmotionInput = {
+              text: cleanText,
+              emotion: fusedEmotion,
+              confidence: fusedConfidence,
+              ...(effectiveStrategy ? { strategy: effectiveStrategy } : {}),
+              context: {
+                previousEmotions: emotionHistory.slice(),
+                interactionState: 'ongoing',
+              },
+            };
+            const adapted = emotionAdapter.adapt(input);
+            activeDirectives.set(turnId, adapted);
+            emotionHistory.push(fusedEmotion);
+            if (emotionHistory.length > EMOTION_HISTORY_MAX) emotionHistory.shift();
+            logger.info('emotion.adapted', {
+              turnId,
+              source: emoSource,
+              detected: fusedEmotion,
+              confidence: Number(fusedConfidence.toFixed(2)),
+              ...(textSignal
+                ? { textCue: { emotion: textSignal.emotion, matched: textSignal.matched } }
+                : {}),
+              effective: adapted.output.effectiveEmotion,
+              strategy: adapted.output.strategyApplied,
+              rationale: adapted.output.rationale,
+              directives: {
+                playbackRate: Number(adapted.directives.playbackRate.toFixed(2)),
+                gain: Number(adapted.directives.gain.toFixed(2)),
+                interChunkSilenceMs: adapted.directives.interChunkSilenceMs,
+                pitchSemitones: adapted.directives.pitchSemitones,
+              },
+            });
+            hub.broadcast('emotion.directives', {
+              turnId,
+              source: emoSource,
+              detected: fusedEmotion,
+              confidence: fusedConfidence,
+              effective: adapted.output.effectiveEmotion,
+              strategy: adapted.output.strategyApplied,
+              styleTags: adapted.output.styleTags,
+              rationale: adapted.output.rationale,
+              directives: adapted.directives,
+              atMs: Date.now(),
+            });
+          }
+
           const turn = await pipeline.handleTurn(cleanText, { turnId });
           hub.broadcast('turn.summary', {
             turnId: turn.id,
@@ -499,6 +638,9 @@ async function main(): Promise<void> {
             interrupted: turn.interrupted,
             latencyMs: (turn.endedAtMs ?? 0) - turn.startedAtMs,
           });
+          // Turn finished — drop any held directives for this turnId so
+          // the map doesn't grow unbounded.
+          activeDirectives.delete(turnId);
         } catch (err) {
           hub.broadcast('error', { source: 'turn', error: String(err), atMs: Date.now() });
         }

@@ -169,6 +169,15 @@ Copy `.env.example` to `.env`. All keys documented there. Key ones:
 - Browser `SpeechRecognition` with best-of-N hypothesis picking, confidence surfacing, and 1.2s silence-debounced turn commit (doubled to 2.4s when the tail is an incomplete-thought conjunction like "but", "what if", "because")
 - Adaptive volume-monitor barge-in detector with dynamic baseline (no fixed threshold)
 
+### Emotion-adaptive TTS
+- **Complementary detection**: in-browser Speech Emotion Recognition (`onnx-community/Speech-Emotion-Classification-ONNX`, ~91MB q8 via transformers.js, off-main-thread `AudioWorklet` PCM capture) + server-side keyword/regex text emotion detector. Acoustic wins on arousal (happy/surprise/angry/fear/disgust); text wins on meaning (sad/frustrated/confused/urgent); fused at `/turn` time
+- **Pre-warmed + pre-fetched classifier**: model loads on voice start, inference kicks off during the turn-end debounce — commit caps the wait at 300ms, so there's no visible hang
+- **False-positive guards**: client ignores `sad`/`neutral`/`calm` SER labels (dataset shift against casual speech); text rules require unambiguous cues (bare `right now`, `quickly`, `immediately` don't fire `urgent`)
+- **Empathetic mirroring (not copying)**: mirror-of-negative auto-upgrades to soften; text-source emotions also default to soften (weaker signal → gentler adaptation); angry / frustrated NEVER produce `rate > 1.0`, `volume > 1.0`, or `dynamic` intonation
+- **Engine-neutral directives** (playback rate, gain, inter-chunk silence, pitch semitones) applied in `playPcm` for Kokoro; SSML fragment rendered with `<prosody>` + `<break>` for Azure/Google/ElevenLabs-style engines
+- `?noemotion=1` URL flag disables the entire client-side pipeline for quick A/B
+- See [docs/EMOTION_ADAPTIVE_TTS.md](docs/EMOTION_ADAPTIVE_TTS.md) for architecture, parameter tables, safety properties, and integration examples
+
 ## Where to plug future backends in
 
 | Interface | File | Candidate impls |

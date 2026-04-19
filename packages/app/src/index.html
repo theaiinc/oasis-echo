@@ -591,6 +591,7 @@
         // these sets don't grow unbounded over a long session.
         replyStartedForTurn.delete(p.turn.id);
         abandonedTurns.delete(p.turn.id);
+        directivesByTurn.delete(p.turn.id);
         if (currentTurnIdPlaying === p.turn.id) currentTurnIdPlaying = null;
       });
 
@@ -609,7 +610,30 @@
         addEvent('bargein', p);
       });
 
-      async function send() {
+      // Per-turn TTS directives produced by the server's
+      // EmotionAdaptiveTts. We keyed the map by turnId so chunked tts
+      // audio for the same turn shares one emotion envelope.
+      const directivesByTurn = new Map();
+      on('emotion.directives', (p) => {
+        if (!p || !p.turnId || !p.directives) return;
+        directivesByTurn.set(p.turnId, p.directives);
+        // Surface the detection+strategy in the event stream panel so
+        // users can debug the adaptation live.
+        addEvent('emotion.directives', {
+          turnId: p.turnId,
+          detected: p.detected,
+          effective: p.effective,
+          strategy: p.strategy,
+          styleTags: p.styleTags,
+          rationale: p.rationale,
+          playbackRate: p.directives.playbackRate,
+          gain: p.directives.gain,
+          interChunkSilenceMs: p.directives.interChunkSilenceMs,
+          pitchSemitones: p.directives.pitchSemitones,
+        });
+      });
+
+      async function send(emotion) {
         const text = input.value.trim();
         if (!text) return;
         // Flush any pending voice buffer + timer so we don't double-post
@@ -621,10 +645,17 @@
           turnEndDeadline = 0;
         }
         input.value = '';
+        const payload = { text };
+        if (emotion && typeof emotion.label === 'string') {
+          payload.emotion = {
+            label: emotion.label,
+            confidence: typeof emotion.confidence === 'number' ? emotion.confidence : 1,
+          };
+        }
         await fetch('/turn', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify(payload),
         });
       }
 
@@ -745,6 +776,13 @@
       const INCOMPLETE_TAIL =
         /(?:^|\s)(?:but|and|or|if|because|cause|cuz|so|when|while|as|though|although|yet|plus|like|with|for|to|of|at|what if|even if|only if|in case|what about|how about|the|a|an|my|your|his|her|their|our)\s*$/i;
 
+      // Pre-fetched emotion classification. We kick off inference the
+      // MOMENT we see a final STT fragment, so by the time the debounce
+      // timer fires and commitTurn() runs, the classifier result is
+      // usually already waiting — eliminating the old "speech ends,
+      // UI hangs 500-1200ms while classifying" feel.
+      let pendingEmotionResult = null;
+
       function scheduleTurnCommit() {
         const tail = turnBuffer.trim();
         if (!tail) return;
@@ -754,6 +792,13 @@
         if (turnEndTimer) clearTimeout(turnEndTimer);
         turnEndDeadline = performance.now() + delay;
         turnEndTimer = setTimeout(commitTurn, delay);
+        // Overlap classification with the debounce window. The user is
+        // done speaking for now; if they resume, cancelTurnCommit will
+        // discard this and a fresh detection will fire on the next
+        // final fragment.
+        if (EMOTION_ENABLED) {
+          pendingEmotionResult = detectEmotionFromMic(5).catch(() => null);
+        }
       }
 
       function cancelTurnCommit() {
@@ -762,9 +807,13 @@
           turnEndTimer = null;
           turnEndDeadline = 0;
         }
+        // The user resumed speaking, so any pending emotion result
+        // was computed on a partial utterance — discard it; a fresh
+        // pre-fetch will run once the next final fragment lands.
+        pendingEmotionResult = null;
       }
 
-      function commitTurn() {
+      async function commitTurn() {
         const text = turnBuffer.trim();
         turnBuffer = '';
         turnEndTimer = null;
@@ -775,7 +824,206 @@
         backchannelStartedAt = 0;
         lastBackchannelAt = 0;
         lastInterimAt = 0;
-        send();
+        // Wait VERY briefly for the pre-fetched classifier result.
+        // In the common case it's already resolved (kicked off when
+        // the debounce scheduled). If inference is still in flight
+        // (cold first turn, model still loading), we cap the wait at
+        // EMOTION_COMMIT_WAIT_MS and ship the turn without emotion —
+        // server falls through to neutral mirror. No hang.
+        let emotion = null;
+        if (EMOTION_ENABLED && pendingEmotionResult) {
+          try {
+            const detected = await Promise.race([
+              pendingEmotionResult,
+              new Promise((r) => setTimeout(() => r(null), EMOTION_COMMIT_WAIT_MS)),
+            ]);
+            if (detected) {
+              emotion = { label: detected.label, confidence: detected.confidence };
+              voiceHint.textContent =
+                'sent · ' + detected.label.toLowerCase() +
+                ' ' + Math.round(detected.confidence * 100) + '%';
+            }
+          } catch (_) {}
+        }
+        pendingEmotionResult = null;
+        send(emotion);
+      }
+
+      // ─────────────────────────────────────────────────────────────
+      // Speech Emotion Recognition (SER) — classifies the user's voice
+      // into 8 emotion classes (ANG/CAL/DIS/FEA/HAP/NEU/SAD/SUR) at
+      // turn-commit time. Uses transformers.js and the
+      // `onnx-community/Speech-Emotion-Classification-ONNX` model
+      // (~91MB q8 ONNX). Lazy-loaded on first commit so the page
+      // doesn't pay the cost until the user actually speaks.
+      //
+      // Result is attached to POST /turn, where the server's
+      // EmotionAdaptiveTts resolves a strategy (mirror / soften /
+      // counterbalance with empathetic-mirroring override) and
+      // broadcasts TTS directives (playbackRate, gain, inter-chunk
+      // silence) that we apply in playPcm below.
+      //
+      // Kill switch: `?noemotion=1` disables all of this for quick
+      // A/B comparison when something goes sideways.
+      // ─────────────────────────────────────────────────────────────
+      const EMOTION_ENABLED = !/[?&]noemotion=1/.test(location.search);
+      // How long commitTurn() is willing to WAIT for a classifier
+      // result once the user stops talking. The actual inference runs
+      // OPPORTUNISTICALLY while the user is still in the debounce
+      // window, so by the time commit fires the result is usually
+      // already waiting — this cap only matters when inference is
+      // still in flight. Cold inference on the first turn can exceed
+      // this; that's fine, we just ship without an emotion.
+      const EMOTION_COMMIT_WAIT_MS = 300;
+      // How long we'll let a SINGLE inference run (used both by the
+      // pre-fetch in the debounce window and the commit-time wait).
+      // Longer than COMMIT_WAIT because the pre-fetch isn't on the
+      // critical path.
+      const EMOTION_INFERENCE_TIMEOUT_MS = 2000;
+      // Client-side confidence floor. SER models over-fit to acted /
+      // call-center speech, so casual conversational voice frequently
+      // reads as `sad` at 0.9+. Require a high top-1 AND a margin over
+      // #2 before we forward a label — keeps us from always-softening
+      // everything regardless of how the user actually sounded.
+      const EMOTION_MIN_CONFIDENCE = 0.7;
+      const EMOTION_MIN_MARGIN = 0.15;
+
+      let emotionPipeline = null;
+      let emotionLoadPromise = null;
+      let emotionLoadFailed = false;
+
+      async function ensureEmotionPipeline() {
+        if (emotionPipeline) return emotionPipeline;
+        if (emotionLoadFailed) return null;
+        if (!emotionLoadPromise) {
+          emotionLoadPromise = (async () => {
+            try {
+              const lib = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0');
+              const p = await lib.pipeline(
+                'audio-classification',
+                'onnx-community/Speech-Emotion-Classification-ONNX',
+                { dtype: 'q8' },
+              );
+              return p;
+            } catch (err) {
+              console.warn('[emotion] pipeline load failed', err);
+              emotionLoadFailed = true;
+              return null;
+            }
+          })();
+        }
+        emotionPipeline = await emotionLoadPromise;
+        return emotionPipeline;
+      }
+
+      // Rolling PCM ring buffer fed by the same getUserMedia stream the
+      // volume monitor uses. Holds the last PCM_RING_SECONDS of mic
+      // audio so we can classify emotion over the user's utterance.
+      let pcmRing = null;
+      let pcmRingWrite = 0;
+      let pcmSourceRate = 0;
+      const PCM_RING_SECONDS = 8;
+
+      function writePcmFrame(input) {
+        if (!pcmRing) return;
+        const n = input.length;
+        for (let i = 0; i < n; i++) {
+          pcmRing[pcmRingWrite] = input[i];
+          pcmRingWrite = (pcmRingWrite + 1) % pcmRing.length;
+        }
+      }
+
+      function snapshotLastPcm(seconds) {
+        if (!pcmRing || !pcmSourceRate) return null;
+        const want = Math.min(pcmRing.length, Math.floor(seconds * pcmSourceRate));
+        if (want < pcmSourceRate) return null; // demand ≥ 1s of audio
+        const out = new Float32Array(want);
+        let read = (pcmRingWrite - want + pcmRing.length) % pcmRing.length;
+        for (let i = 0; i < want; i++) {
+          out[i] = pcmRing[read];
+          read = (read + 1) % pcmRing.length;
+        }
+        return out;
+      }
+
+      // Simple linear-interpolation resample to 16kHz mono (SER model's
+      // native input rate). Good enough for phonetic-level features —
+      // low-pass anti-alias filter skipped for simplicity.
+      function resampleTo16k(pcm, sourceRate) {
+        if (sourceRate === 16000) return pcm;
+        const ratio = sourceRate / 16000;
+        const outLen = Math.floor(pcm.length / ratio);
+        const out = new Float32Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const s = i * ratio;
+          const a = Math.floor(s);
+          const b = Math.min(pcm.length - 1, a + 1);
+          const frac = s - a;
+          out[i] = pcm[a] * (1 - frac) + pcm[b] * frac;
+        }
+        return out;
+      }
+
+      // Labels we trust enough to forward. The SER model is trained on
+      // acted emotional speech (RAVDESS-family), where SAD/NEUTRAL/CALM
+      // share acoustic markers — low energy, slow rate, low pitch — with
+      // ORDINARY conversational English. So casual speech consistently
+      // reads as sad 0.95+, and forwarding that would force a soften
+      // strategy on every utterance. We therefore treat sad / neutral /
+      // calm as "no informative signal" regardless of confidence and
+      // only forward the high-arousal labels (happy/surprise/angry/
+      // fear/disgust), where the acoustic distinction is real.
+      const EMOTION_INFORMATIVE = new Set([
+        'HAP', 'happy', 'happiness',
+        'SUR', 'surprise', 'surprised',
+        'ANG', 'angry',
+        'FEA', 'fear', 'fearful',
+        'DIS', 'disgust',
+      ]);
+
+      async function detectEmotionFromMic(durationSec) {
+        if (!EMOTION_ENABLED) return null;
+        const raw = snapshotLastPcm(durationSec);
+        if (!raw) return null;
+        const resampled = resampleTo16k(raw, pcmSourceRate);
+        // If the pipeline isn't loaded yet, kick off the load but don't
+        // block a foreground run — the per-call inference timeout will
+        // bail us out. startVoice() pre-warms the pipeline up front so
+        // by the time the user speaks their first turn it's usually
+        // already loaded.
+        const pipelinePromise = ensureEmotionPipeline();
+        const pipeline = await Promise.race([
+          pipelinePromise,
+          new Promise((r) => setTimeout(() => r(null), EMOTION_INFERENCE_TIMEOUT_MS)),
+        ]);
+        if (!pipeline) return null;
+        try {
+          const preds = await Promise.race([
+            pipeline(resampled, { sampling_rate: 16000 }),
+            new Promise((r) => setTimeout(() => r(null), EMOTION_INFERENCE_TIMEOUT_MS)),
+          ]);
+          if (!Array.isArray(preds) || preds.length === 0) return null;
+          // Dev trace: see what the model considered — very useful
+          // when debugging why a given utterance got its label.
+          try { console.debug('[emotion] top-3:', preds.slice(0, 3)); } catch (_) {}
+          // preds: [{label, score}, ...] sorted descending.
+          const top = preds[0];
+          const second = preds[1] ?? { score: 0 };
+          // Filter 1: ignore the low-arousal classes that routinely
+          // over-fire on casual speech.
+          if (!EMOTION_INFORMATIVE.has(top.label)) return null;
+          // Filter 2: top-1 confidence AND margin over runner-up.
+          if (typeof top.score !== 'number' || top.score < EMOTION_MIN_CONFIDENCE) return null;
+          if (top.score - (second.score || 0) < EMOTION_MIN_MARGIN) return null;
+          return {
+            label: top.label,
+            confidence: top.score,
+            top3: preds.slice(0, 3),
+          };
+        } catch (err) {
+          console.warn('[emotion] classify failed', err);
+          return null;
+        }
       }
 
       // Separate audio-level monitor that runs even while recognition
@@ -798,6 +1046,38 @@
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 512;
           source.connect(analyser);
+          // PCM ring buffer for emotion classification. Shares the same
+          // mic stream so we don't ask for a second permission. Uses an
+          // AudioWorklet so capture runs off the main thread — a
+          // ScriptProcessorNode here was stalling the volume monitor's
+          // requestAnimationFrame loop enough to corrupt the adaptive
+          // barge-in baseline, causing false-positive interruptions
+          // that cut the agent voice mid-reply.
+          if (EMOTION_ENABLED) {
+            pcmSourceRate = ctx.sampleRate;
+            pcmRing = new Float32Array(PCM_RING_SECONDS * pcmSourceRate);
+            pcmRingWrite = 0;
+            const workletSrc =
+              "class PcmCapture extends AudioWorkletProcessor {" +
+              "  process(inputs){const c=inputs[0]&&inputs[0][0];" +
+              "    if(c&&c.length)this.port.postMessage(c.slice(0));" +
+              "    return true;}}" +
+              "registerProcessor('pcm-capture',PcmCapture);";
+            try {
+              const blobUrl = URL.createObjectURL(
+                new Blob([workletSrc], { type: 'text/javascript' }),
+              );
+              await ctx.audioWorklet.addModule(blobUrl);
+              URL.revokeObjectURL(blobUrl);
+              const captureNode = new AudioWorkletNode(ctx, 'pcm-capture');
+              captureNode.port.onmessage = (e) => writePcmFrame(e.data);
+              source.connect(captureNode);
+              // Worklet outputs nothing audible — not connected to destination.
+            } catch (err) {
+              console.warn('[emotion] AudioWorklet capture failed:', err);
+              pcmRing = null;
+            }
+          }
           const buf = new Uint8Array(analyser.frequencyBinCount);
           let aboveSince = 0;
           // Adaptive barge-in: instead of a fixed threshold, track the
@@ -997,6 +1277,14 @@
         voiceOn = true;
         requestListen();
         startVolumeMonitor();
+        // Pre-warm the SER pipeline. Download + initial ONNX load is
+        // the slow part (~5s on fast network); doing it here means by
+        // the time the user finishes their first utterance the
+        // pipeline is already hot, so inference runs in ~100-300ms
+        // instead of "nothing happens for 30 seconds".
+        if (EMOTION_ENABLED) {
+          ensureEmotionPipeline().catch(() => {});
+        }
         micBtn.classList.add('on');
         micLabel.textContent = 'Listening';
         voiceHint.classList.remove('warn');
@@ -1260,20 +1548,43 @@
         buffer.getChannelData(0).set(float);
         const src = ctx.createBufferSource();
         src.buffer = buffer;
-        // Everything routes through masterGain so we can trim agent
-        // output volume in one place. Per-chunk opts.gain (used by
-        // backchannels to sit slightly under reply volume) composes
-        // multiplicatively with the master gain.
+
+        // Emotion-adaptive TTS: pull per-turn directives (from the
+        // server's EmotionAdaptiveTts) and apply them at playback.
+        // Fillers (backchannels, pre-LLM filler) intentionally skip
+        // emotion adaptation — they're acoustic feedback, not content.
+        const dir = EMOTION_ENABLED && opts && opts.turnId && !opts.filler
+          ? directivesByTurn.get(opts.turnId)
+          : null;
+        const rate = dir && typeof dir.playbackRate === 'number' ? dir.playbackRate : 1;
+        if (rate !== 1) src.playbackRate.value = rate;
+
+        // Gain chain: backchannel opts.gain (e.g. 0.9) composes with
+        // emotion-directed gain (e.g. 0.92 for soft delivery). Both
+        // fold into a single GainNode inserted before masterGain so
+        // the signal path stays shallow.
+        let gainProduct = 1;
+        if (opts && typeof opts.gain === 'number' && opts.gain !== 1) gainProduct *= opts.gain;
+        if (dir && typeof dir.gain === 'number' && dir.gain !== 1) gainProduct *= dir.gain;
         let dest = masterGain;
-        if (opts && typeof opts.gain === 'number' && opts.gain !== 1) {
+        if (gainProduct !== 1) {
           const gainNode = ctx.createGain();
-          gainNode.gain.value = opts.gain;
+          gainNode.gain.value = gainProduct;
           gainNode.connect(masterGain);
           dest = gainNode;
         }
         src.connect(dest);
-        const startAt = Math.max(ctx.currentTime, audioQueueEndsAt);
-        const endAt = startAt + buffer.duration;
+
+        // Inter-chunk silence — extended pauses for sad/empathetic
+        // emotions, short gaps for happy/urgent. Applied as schedule
+        // offset; the effective chunk duration scales with playbackRate
+        // so we adjust endAt accordingly.
+        const extraSilenceSec = dir && typeof dir.interChunkSilenceMs === 'number'
+          ? dir.interChunkSilenceMs / 1000
+          : 0;
+        const effectiveDuration = buffer.duration / (rate || 1);
+        const startAt = Math.max(ctx.currentTime, audioQueueEndsAt + extraSilenceSec);
+        const endAt = startAt + effectiveDuration;
         audioQueueEndsAt = endAt;
         src.start(startAt);
         activeAudioSources.add(src);
@@ -1360,7 +1671,7 @@
             replyStartedForTurn.add(p.turnId);
             truncatePendingFillers();
           }
-          playPcm(p.audio, p.sampleRate, { filler: p.filler === true }, () => {
+          playPcm(p.audio, p.sampleRate, { filler: p.filler === true, turnId: p.turnId }, () => {
             if (activeAudioSources.size === 0) {
               agentSpeaking = false;
               micBtn.classList.remove('speaking');
