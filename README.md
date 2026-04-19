@@ -107,8 +107,22 @@ OASIS_TTS_BACKEND=kokoro npm run server
 - Session state: phase, allowed intents, rolling summary
 - Metrics: p50/p95 TTFA per tier, barge-in count
 - Event stream (raw pipeline events for debugging)
-- **Voice** toggle (uses browser `SpeechRecognition`); mid-utterance backchannels ("uh huh", "yeah", "mhm", …) are pre-synthesized via Kokoro and played at full volume while you talk
-- **Barge-in**: click the button, hit Escape, or just talk over the agent — a volume monitor on a separate echo-cancelled mic stream detects intent to interrupt
+- **Voice** toggle — uses browser `SpeechRecognition` for mic input and the Web Audio API for playback
+
+### Voice UX
+
+Everything the assistant does acoustically:
+
+| Feature | How it works |
+|---|---|
+| **Barge-in (just talk over it)** | A volume monitor runs on a separate `getUserMedia({echoCancellation: true})` mic stream. Threshold is adaptive: it tracks an EMA of the ambient RMS *while agent is speaking* (that's agent audio bleeding into the mic), so you need ~1.6× that baseline to fire — no shouting required. ~110ms sustained-speech window. |
+| **Barge-in (explicit)** | Click the Barge-in button or press Escape. |
+| **WebRTC audio loopback** | Agent PCM routes through `AudioContext → MediaStreamDestination → RTCPeerConnection (send) → RTCPeerConnection (recv) → <audio>.srcObject`. This is the playback path Chrome's AEC references, so the mic-side echo cancellation is measurably cleaner than plain `ctx.destination`. |
+| **Recognizer pauses during agent speech** | Even with WebRTC-loopback AEC, Chrome's internal SpeechRecognition mic capture leaked agent audio as fake user turns. The recognizer is paused while the agent talks and resumed when a turn ends (or barge-in fires). Tradeoff: the first word of an interrupt is lost. |
+| **Mid-utterance backchannels** | While you keep talking past ~5s, the agent emits short pre-synthesized Kokoro clips (`uh huh`, `yeah`, `mhm`, `right`, `I see`, …) at full volume. Server caches the PCM on startup so there's no synth latency. |
+| **Contextual fillers** | When the agent escalates, the SLM router produces a topic-referential filler as part of its JSON decision — e.g. user says *"help me plan a Tokyo trip"* → filler is `"Okay, Tokyo trip — pulling this together"` instead of a canned `Hmm…`. Falls back to the context-neutral pool if the SLM omits it. |
+| **Filler rate/pacing** | Scales with the TTFT EMA: fast model → 1 filler at near-normal rate; slow model → up to 5 stretched chained fillers with trailing silences for natural breaths. Cross-turn memory prevents the same phrase repeating. |
+| **Stale-chunk & abandoned-turn guards** | Barge-in marks the interrupted turnId in an `abandonedTurns` set; any late TTS chunks for that turn are dropped so they can't overlap the next turn's audio. `stopSpeaking()` hard-stops every in-flight `AudioBufferSourceNode` and cancels `speechSynthesis`. |
 
 ## Env
 
@@ -123,15 +137,27 @@ Copy `.env.example` to `.env`. All keys documented there. Key ones:
 
 **Everything is real — no mock stubs in the production bundle.**
 
+### Orchestration
 - Typed event bus, dialogue state machine, overlapping-execution pipeline
-- Barge-in arbiter with AbortSignal propagation
+- Barge-in arbiter with AbortSignal propagation, per-turn `abandonedTurns` guard against late-chunk overlap
 - PII redaction + rehydrate across the LLM boundary
-- Circuit breaker (per-backend), TTFT EMA forecaster, rate-stretched fillers with cross-turn no-repeat memory
-- Deterministic reflex-intent classifier (Tier-0)
-- SLM router via Ollama (Tier-1) with intent-based escalation policy and JSON-shaped output
-- Three streaming reasoner clients: Anthropic, OpenAI / OpenAI-compatible, Ollama — all with token-level streaming and tool-use support where available
-- Kokoro-82M local TTS with sentence-boundary chunking and Web Audio playback
-- Browser client: `SpeechRecognition` best-of-N hypothesis picking, pre-synthesized backchannels, volume-based barge-in detection with echo cancellation
+- Circuit breaker (per backend)
+- TTFT EMA forecaster driving filler count and rate
+- Cross-turn filler memory (no phrase repeats for ~12 turns)
+- Single-source `PERSONA_RULES` constant in `@oasis-echo/types`, shared by all reasoners + the router
+
+### Tiered inference
+- **Tier-0 (reflex):** deterministic regex intent classifier for `hi` / `yes` / `no` / `stop` / `cancel` / `wait`
+- **Tier-1 (coordinator):** SLM router via Ollama with JSON-constrained output, few-shot intent examples, and contextual filler generation. Intent-based escalation policy: smalltalk stays local, real questions/commands escalate.
+- **Tier-2 (reasoning):** three streaming reasoner clients (Anthropic, OpenAI / OpenAI-compatible, Ollama) with token-level streaming. Tool use on the clients that support it.
+
+### Audio
+- Kokoro-82M local TTS with sentence-boundary chunking
+- Web Audio playback with scheduling to keep chunks back-to-back (`audioQueueEndsAt`)
+- WebRTC loopback: agent audio routed through `MediaStreamDestination → RTCPeerConnection pair → <audio>` so Chrome's `getUserMedia` AEC can cancel against it
+- Pre-synthesized backchannels (8 phrases, ~90KB PCM each) cached in memory at startup
+- Browser `SpeechRecognition` with best-of-N hypothesis picking and confidence surfacing
+- Adaptive volume-monitor barge-in detector with dynamic baseline (no fixed threshold)
 
 ## Where to plug future backends in
 
