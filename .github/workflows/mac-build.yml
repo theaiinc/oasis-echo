@@ -1,0 +1,54 @@
+name: Mac App – build check
+
+# Validates the Mac app compiles on every PR / push that touches it.
+# Does NOT sign, notarize, or release — that's mac-release.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mac/**'
+      - '.github/workflows/mac-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/mac/**'
+      - '.github/workflows/mac-build.yml'
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/mac/.build/checkouts
+            apps/mac/.build/repositories
+            apps/mac/.build/artifacts
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/mac/Package.resolved', 'apps/mac/Package.swift') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Bundle the .app (ad-hoc signed)
+        working-directory: apps/mac
+        # No OASIS_CODESIGN_IDENTITY → ad-hoc sign; we just want to know
+        # the Swift compile + bundle layout still works.
+        run: ./Scripts/make-app.sh release
+
+      - name: Sanity-check the bundle
+        working-directory: apps/mac
+        run: |
+          test -x OasisEcho.app/Contents/MacOS/OasisEcho
+          test -f OasisEcho.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' OasisEcho.app/Contents/Info.plist
+          codesign -dv OasisEcho.app 2>&1 | head -10 || true

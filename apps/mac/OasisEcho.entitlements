@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened Runtime entitlements. Required for notarization.
+
+    - disable-library-validation lets us dlopen MediaRemote.framework
+      (private system framework) for system-media duck/resume. Without
+      it, dlopen fails under Hardened Runtime.
+    - device.audio-input is the explicit microphone capability under
+      Hardened Runtime; pairs with NSMicrophoneUsageDescription.
+    - automation.apple-events lets the AppleScript paste fallback
+      synthesize ⌘V into the frontmost app; pairs with
+      NSAppleEventsUsageDescription.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

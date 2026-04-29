@@ -1,0 +1,303 @@
+name: Mac App – release
+
+# Builds, signs, optionally notarizes, packages, and publishes a GitHub
+# Release for the Mac app.
+#
+# TRIGGERS
+#   - Push a tag matching `mac-v*` (e.g. `mac-v0.1.0`) — version is taken
+#     from the tag, release is auto-published.
+#   - Manual `workflow_dispatch` with a `version` input (e.g. `0.1.0`) —
+#     creates a draft release with the same `mac-v<version>` tag.
+#
+# REQUIRED SECRETS for "ready to use immediately" releases
+# (when ALL are set, the workflow signs with Developer ID + notarizes +
+# staples, and the resulting bundle launches without Gatekeeper warnings):
+#   MAC_CERT_P12_BASE64      base64 of the exported .p12 of the
+#                            Developer ID Application certificate
+#                            (`base64 -i cert.p12 | pbcopy`)
+#   MAC_CERT_P12_PASSWORD    password for the .p12
+#   MAC_KEYCHAIN_PASSWORD    any string — used to lock the temp keychain
+#                            on the runner. Generate fresh per repo.
+#   MAC_CODESIGN_IDENTITY    the identity string codesign should match,
+#                            e.g. `Developer ID Application: Acme Inc (ABCDE12345)`
+#   MAC_NOTARY_APPLE_ID      Apple ID email for notarization
+#   MAC_NOTARY_PASSWORD      app-specific password (appleid.apple.com →
+#                            Sign-in & Security → App-Specific Passwords)
+#   MAC_NOTARY_TEAM_ID       10-char team ID (developer.apple.com → Membership)
+#
+# If any of those are missing the workflow STILL produces a release —
+# but the bundle is only ad-hoc signed and downloaders will hit a
+# "developer cannot be verified" prompt. The release notes flag this.
+
+on:
+  push:
+    tags:
+      - 'mac-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.1.0). A `mac-v<version>` tag will be created on the release commit.'
+        required: true
+        type: string
+      draft:
+        description: 'Publish as draft'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # needed for creating releases
+
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so we can generate release notes
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+            TAG="mac-v${VERSION}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#mac-v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
+          echo "Building Oasis Echo Mac app v$VERSION (tag: $TAG)"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/mac/.build/checkouts
+            apps/mac/.build/repositories
+            apps/mac/.build/artifacts
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/mac/Package.resolved', 'apps/mac/Package.swift') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      # ─── Signing setup (only if all signing secrets are present) ───
+      - name: Detect signing secrets
+        id: sigcheck
+        env:
+          P12: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          P12_PW: ${{ secrets.MAC_CERT_P12_PASSWORD }}
+          KC_PW: ${{ secrets.MAC_KEYCHAIN_PASSWORD }}
+          IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
+        run: |
+          if [[ -n "$P12" && -n "$P12_PW" && -n "$KC_PW" && -n "$IDENTITY" ]]; then
+            echo "have_signing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_signing=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Developer ID signing secrets not set — producing an ad-hoc-signed bundle. Downloaders will hit Gatekeeper. See mac-release.yml header for the full secret list."
+          fi
+
+      - name: Detect notarization secrets
+        id: notarycheck
+        env:
+          APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
+          APPLE_PW: ${{ secrets.MAC_NOTARY_PASSWORD }}
+          TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
+        run: |
+          if [[ -n "$APPLE_ID" && -n "$APPLE_PW" && -n "$TEAM_ID" ]]; then
+            echo "have_notary=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notary=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.sigcheck.outputs.have_signing == 'true'
+        env:
+          P12_B64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          P12_PW:  ${{ secrets.MAC_CERT_P12_PASSWORD }}
+          KC_PW:   ${{ secrets.MAC_KEYCHAIN_PASSWORD }}
+        run: |
+          set -e
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PW" "$KEYCHAIN"
+          # Add to the search list so codesign can find the identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PW" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      # ─── Build + sign the .app ───
+      - name: Build and sign OasisEcho.app
+        working-directory: apps/mac
+        env:
+          OASIS_VERSION: ${{ steps.ver.outputs.version }}
+          OASIS_BUILD_NUMBER: ${{ github.run_number }}
+          OASIS_CODESIGN_IDENTITY: ${{ steps.sigcheck.outputs.have_signing == 'true' && secrets.MAC_CODESIGN_IDENTITY || '-' }}
+        run: ./Scripts/make-app.sh release
+
+      # ─── Notarize + staple (only if both signing AND notary secrets present) ───
+      - name: Notarize and staple
+        if: steps.sigcheck.outputs.have_signing == 'true' && steps.notarycheck.outputs.have_notary == 'true'
+        working-directory: apps/mac
+        env:
+          APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
+          APPLE_PW: ${{ secrets.MAC_NOTARY_PASSWORD }}
+          TEAM_ID:  ${{ secrets.MAC_NOTARY_TEAM_ID }}
+          VERSION:  ${{ steps.ver.outputs.version }}
+        run: |
+          set -e
+          ZIP="OasisEcho-${VERSION}-macos.zip"
+          # notarytool wants a zip, not a raw .app.
+          /usr/bin/ditto -c -k --keepParent OasisEcho.app "$ZIP"
+
+          xcrun notarytool submit "$ZIP" \
+            --apple-id  "$APPLE_ID" \
+            --password  "$APPLE_PW" \
+            --team-id   "$TEAM_ID"  \
+            --wait
+
+          # Staple the ticket to the .app so it works offline.
+          xcrun stapler staple OasisEcho.app
+          xcrun stapler validate OasisEcho.app
+
+          # Re-zip after stapling so the published archive contains the
+          # ticket (downloaders unzip and run without ever needing a
+          # network round-trip to Apple).
+          rm -f "$ZIP"
+          /usr/bin/ditto -c -k --keepParent OasisEcho.app "$ZIP"
+
+      # ─── Package: ZIP + DMG ───
+      - name: Package artifacts (zip + dmg)
+        working-directory: apps/mac
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -e
+          ZIP="OasisEcho-${VERSION}-macos.zip"
+          DMG="OasisEcho-${VERSION}-macos.dmg"
+
+          # Create the zip if the notarize step didn't (i.e. unsigned path).
+          if [[ ! -f "$ZIP" ]]; then
+            /usr/bin/ditto -c -k --keepParent OasisEcho.app "$ZIP"
+          fi
+
+          # DMG with an /Applications symlink for drag-to-install UX.
+          STAGING="$RUNNER_TEMP/dmg-staging"
+          rm -rf "$STAGING" && mkdir -p "$STAGING"
+          cp -R OasisEcho.app "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create \
+            -srcfolder "$STAGING" \
+            -volname   "Oasis Echo $VERSION" \
+            -fs HFS+ -format UDZO -ov \
+            "$DMG"
+
+          shasum -a 256 "$ZIP" "$DMG" | tee SHA256SUMS.txt
+
+          ls -lh "$ZIP" "$DMG" SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oasis-echo-mac-${{ steps.ver.outputs.version }}
+          path: |
+            apps/mac/OasisEcho-*.zip
+            apps/mac/OasisEcho-*.dmg
+            apps/mac/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # ─── Publish GitHub Release ───
+      - name: Compose release notes
+        id: notes
+        env:
+          VERSION:    ${{ steps.ver.outputs.version }}
+          TAG:        ${{ steps.ver.outputs.tag }}
+          HAVE_SIGN:  ${{ steps.sigcheck.outputs.have_signing }}
+          HAVE_NOTAR: ${{ steps.notarycheck.outputs.have_notary }}
+        run: |
+          set -e
+          NOTES="$RUNNER_TEMP/notes.md"
+          {
+            echo "## Oasis Echo for macOS — v${VERSION}"
+            echo
+            if [[ "$HAVE_SIGN" == "true" && "$HAVE_NOTAR" == "true" ]]; then
+              echo "**Ready to use.** Signed with Developer ID and notarized by Apple — double-click and run."
+            elif [[ "$HAVE_SIGN" == "true" ]]; then
+              echo "_Signed with Developer ID but **not notarized** — first launch will require **right-click → Open** to bypass Gatekeeper._"
+            else
+              echo "_Ad-hoc signed (CI does not yet have Developer ID secrets configured). First launch will require **right-click → Open** and an unquarantine step:_"
+              echo
+              echo '```bash'
+              echo "xattr -dr com.apple.quarantine /Applications/OasisEcho.app"
+              echo '```'
+            fi
+            echo
+            echo "### Install"
+            echo
+            echo "1. Download \`OasisEcho-${VERSION}-macos.dmg\` (or \`.zip\`)."
+            echo "2. Open the DMG, drag **OasisEcho** into **Applications**."
+            echo "3. Launch from Spotlight — grant Microphone, Speech Recognition, and Accessibility on first launch."
+            echo "4. Start the Oasis Echo server (\`npm run server\` from the repo root) so the app has somewhere to send STT and Echo turns."
+            echo
+            echo "### What's in this release"
+            echo
+            # Range: previous mac-v tag (if any) → current.
+            PREV=$(git tag --list 'mac-v*' --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || true)
+            if [[ -n "$PREV" ]]; then
+              echo "Changes since \`${PREV}\` that touched \`apps/mac\`:"
+              echo
+              git log --pretty=format:'- %s (%h)' "${PREV}..HEAD" -- apps/mac/ | head -40
+            else
+              echo "Initial Mac release."
+            fi
+            echo
+            echo
+            echo "### Verify"
+            echo
+            echo '```bash'
+            echo "shasum -a 256 -c SHA256SUMS.txt"
+            echo '```'
+          } > "$NOTES"
+          cat "$NOTES"
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG:      ${{ steps.ver.outputs.tag }}
+          VERSION:  ${{ steps.ver.outputs.version }}
+          IS_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft == true }}
+        working-directory: apps/mac
+        run: |
+          set -e
+          DRAFT_FLAG=""
+          if [[ "$IS_DRAFT" == "true" ]]; then
+            DRAFT_FLAG="--draft"
+          fi
+
+          # If the tag doesn't exist yet (workflow_dispatch path),
+          # `gh release create` creates it pointing at HEAD.
+          gh release create "$TAG" \
+            --title "Oasis Echo for macOS v${VERSION}" \
+            --notes-file "${{ steps.notes.outputs.path }}" \
+            $DRAFT_FLAG \
+            "OasisEcho-${VERSION}-macos.zip" \
+            "OasisEcho-${VERSION}-macos.dmg" \
+            "SHA256SUMS.txt"
+
+      - name: Cleanup keychain
+        if: always() && steps.sigcheck.outputs.have_signing == 'true'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain" || true

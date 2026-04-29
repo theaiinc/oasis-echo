@@ -87,6 +87,58 @@ The dialog lives in its own panel — instead of growing the orb panel under Swi
 | HTTP / SSE / WS | `Sources/OasisEcho/Network/OasisClient.swift`, `Network/SSEClient.swift`, `Network/Events.swift` |
 | Orchestration | `Sources/OasisEcho/Pipeline/TurnController.swift` |
 
+## Releases
+
+Releases are built and published by [`.github/workflows/mac-release.yml`](../../.github/workflows/mac-release.yml).
+
+### Cutting a release
+
+```bash
+# from main, with apps/mac/ in the state you want to ship
+git tag mac-v0.1.0
+git push origin mac-v0.1.0
+```
+
+The workflow then:
+
+1. Builds `OasisEcho.app` from a clean checkout (`./Scripts/make-app.sh release`) with `OASIS_VERSION` set from the tag and `OASIS_BUILD_NUMBER` set from the workflow run number.
+2. Code-signs with the Developer ID identity from secrets (or ad-hoc if signing secrets are absent).
+3. Submits to Apple notarization via `xcrun notarytool --wait`, then `xcrun stapler staple`s the ticket onto the .app so it works offline.
+4. Packages the result as both `OasisEcho-<version>-macos.zip` and `OasisEcho-<version>-macos.dmg` (the DMG includes an `/Applications` symlink for drag-to-install).
+5. Computes `SHA256SUMS.txt` and creates a GitHub Release with all three files attached.
+
+You can also run it manually from the **Actions** tab via "Mac App – release" → **Run workflow**, supplying a version like `0.1.0`. That path defaults to a draft release so you can review before publishing.
+
+A second workflow, [`.github/workflows/mac-build.yml`](../../.github/workflows/mac-build.yml), runs a release-config build on every PR / push that touches `apps/mac/**` to catch breakages early. It does not sign or release.
+
+### Secrets required for ready-to-use releases
+
+The release workflow runs even with no secrets set, but the resulting bundle is only ad-hoc signed and downloaders will hit Gatekeeper. To produce a bundle that launches with a normal double-click on any Mac, configure all of these in **Settings → Secrets and variables → Actions** on the GitHub repo:
+
+| Secret | Where to get it |
+|---|---|
+| `MAC_CERT_P12_BASE64` | In Keychain Access, export your **Developer ID Application** identity as `.p12`, then `base64 -i cert.p12 \| pbcopy`. Paste as the secret value. |
+| `MAC_CERT_P12_PASSWORD` | The password you set when exporting the .p12. |
+| `MAC_KEYCHAIN_PASSWORD` | Any random string — the workflow uses it to lock a temporary keychain on the runner. Generate fresh per repo. |
+| `MAC_CODESIGN_IDENTITY` | The exact identity string codesign should match, e.g. `Developer ID Application: Acme Inc (ABCDE12345)`. Find it locally with `security find-identity -v -p codesigning`. |
+| `MAC_NOTARY_APPLE_ID` | The Apple ID email tied to your Developer account. |
+| `MAC_NOTARY_PASSWORD` | An **app-specific password** generated at [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords. Do NOT use your regular Apple ID password. |
+| `MAC_NOTARY_TEAM_ID` | The 10-character Team ID from [developer.apple.com](https://developer.apple.com/account) → Membership Details. |
+
+> Don't have a Developer ID Application certificate yet? In Xcode → Settings → Accounts → select your Apple ID → Manage Certificates → **+** → **Developer ID Application**. Then export it from Keychain Access as a `.p12`.
+
+### Local Developer ID build (optional)
+
+If you want to test signing locally without going through CI:
+
+```bash
+export OASIS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export OASIS_VERSION=0.1.0
+./Scripts/make-app.sh release
+```
+
+The script applies Hardened Runtime, the entitlements at [`OasisEcho.entitlements`](OasisEcho.entitlements), a secure timestamp, then verifies the signature with `codesign --verify --strict`. Without `OASIS_CODESIGN_IDENTITY` it falls back to ad-hoc signing — fine for everyday dev, just not distributable.
+
 ## Server requirements
 
 The app talks to the same Node server the web UI uses (`packages/app`). The endpoints it depends on:
