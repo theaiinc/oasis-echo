@@ -27,6 +27,10 @@ packages/
                  tool registry, circuit breaker
   orchestrator/  typed event bus, overlapping-execution pipeline, barge-in arbiter
   app/           Node HTTP + SSE server, web UI
+  sdk/           reusable client SDK (browser + Node)
+
+apps/
+  mac/           native SwiftUI menu-bar app (issue #2)
 ```
 
 ## Quick start
@@ -97,6 +101,19 @@ OASIS_TTS_BACKEND=kokoro npm run server
 - ~0.8s synth per short sentence on M-series; base64 PCM flies over SSE and plays via Web Audio.
 - `KOKORO_VOICE=af_heart` (default). Other voices: `af_nova`, `af_bella`, `am_adam`, `am_echo`, `bf_emma`, `bm_george`, … 28 total.
 - `KOKORO_DTYPE=q8` (default). Also `q4`, `fp16`, `fp32` for quality/memory trade-offs.
+
+### macOS app
+
+A native SwiftUI menu-bar app — dictate into any text field, or talk back-and-forth with the Echo voice agent — lives under [`apps/mac`](apps/mac/README.md). Tracking issue: [#2](https://github.com/theaiinc/oasis-echo/issues/2).
+
+```bash
+# Server must be running (npm run server)
+cd apps/mac
+./Scripts/make-app.sh release        # builds OasisEcho.app
+open OasisEcho.app
+```
+
+Hold `⌃⌥O` (or the Fn / 🌐 key) anywhere in macOS to dictate; press `⌘⇧M` to flip Transcribe ⇄ Echo. STT defaults to the server's streaming Whisper endpoint (`/audio` WS); SFSpeechRecognizer is the offline fallback. Full setup, hotkey reference, and architecture in [apps/mac/README.md](apps/mac/README.md).
 
 ### Web UI
 

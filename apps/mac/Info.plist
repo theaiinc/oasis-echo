@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.oasis.echo.mac</string>
+  <key>CFBundleName</key>
+  <string>Oasis Echo</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Oasis Echo needs the microphone to transcribe your voice and talk with the voice agent. Audio stays on your Mac for transcription.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Oasis Echo uses Apple Speech to transcribe your voice on-device.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Oasis Echo pastes transcribed text into the frontmost app.</string>
+</dict>
+</plist>

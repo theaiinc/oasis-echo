@@ -10,3 +10,12 @@ coverage/
 .vscode/
 .idea/
 .claude/
+
+# Swift / SwiftPM (apps/mac)
+.build/
+.swiftpm/
+DerivedData/
+# Built app bundle — produced by apps/mac/Scripts/make-app.sh
+apps/mac/OasisEcho.app/
+*.xcuserstate
+.mcp.json
