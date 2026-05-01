@@ -26,13 +26,26 @@ final class TurnController: ObservableObject {
     private var persistentServerSTT: ServerSTTEngine?
     private var pill: PillWindowController?
     private var eventsOpen = false
-    private var rawTranscript: String = ""
+    // Streaming STT (server Whisper) emits one `stt.final` per VAD
+    // segment, not one per turn. A long sentence with a natural breath
+    // in the middle arrives as TWO finals; the user releasing the
+    // hotkey is what actually ends the turn. So we accumulate segment
+    // finals into `committedTranscript` and keep the in-flight
+    // partial in `pendingPartial`; the live caption shows their join.
+    private var committedTranscript: String = ""
+    private var pendingPartial: String = ""
     private var committedForEcho: Bool = false
-    // Set the moment finishAfterSTT runs (whether through the real
-    // server final or the safety-net fallback). Prevents double-paste
-    // when both fire — e.g. fallback marks "no speech", real final
-    // arrives later with the transcript and tries to paste again.
+    // Set the moment finishAfterSTT runs (whether through the user's
+    // release-driven grace, the safety net, or an explicit
+    // cancellation). Prevents double-paste when multiple paths fire —
+    // e.g. fallback marks "no speech", real final arrives later with
+    // the transcript and tries to paste again.
     private var finishCommitted: Bool = false
+    // True between commitCapture (user release) and finishAfterSTT.
+    // Used to know whether late-arriving STT finals should EXTEND the
+    // grace window (we're past commit and waiting for the trailing
+    // segment) vs simply update the live caption (still mid-utterance).
+    private var commitInProgress: Bool = false
     private var handsFreeActive: Bool = false
     private var lastStartMs: Int64 = 0
     private var pillCancellable: AnyCancellable?
@@ -40,10 +53,16 @@ final class TurnController: ObservableObject {
     // The 8 s "STT never came back" guard scheduled in commitCapture.
     // Stored so beginCapture/cancelCapture can cancel it — otherwise an
     // earlier capture's safety net fires during the next capture, sees
-    // finishCommitted == false (just reset) and rawTranscript == ""
+    // finishCommitted == false (just reset) and the transcript empty
     // (also just reset), and flashes "No speech detected" in the
     // middle of the user still talking.
     private var safetyNetTask: Task<Void, Never>?
+    // Short post-release grace window. After the user releases the
+    // hotkey we send `end` to the STT engine and wait this long for the
+    // trailing segment final to arrive before finalising. Each new
+    // partial / final landing during the grace bumps it forward, so a
+    // server that flushes multiple segments still gets fully captured.
+    private var graceTask: Task<Void, Never>?
     private var firstRealTtsChunkReceived: Bool = false
     private var lastSSEEventAt: Date = .distantPast
     // Echo finalisation needs BOTH signals before we can drop pill state
@@ -215,13 +234,16 @@ final class TurnController: ObservableObject {
 
     private func beginCapture() {
         guard case .idle = state.pill else { return }
-        // Kill any in-flight safety net from the previous capture before
-        // its 8 s timer fires under the new capture's reset state.
-        safetyNetTask?.cancel()
-        safetyNetTask = nil
-        rawTranscript = ""
+        // Kill any in-flight safety net / grace task from the previous
+        // capture before their timers fire under the new capture's
+        // reset state.
+        safetyNetTask?.cancel(); safetyNetTask = nil
+        graceTask?.cancel();     graceTask = nil
+        committedTranscript = ""
+        pendingPartial = ""
         committedForEcho = false
         finishCommitted = false
+        commitInProgress = false
         lastStartMs = Self.nowMs()
         state.liveTranscript = ""
         state.pill = .listening(level: 0)
@@ -237,16 +259,37 @@ final class TurnController: ObservableObject {
                 onPartial: { [weak self] text in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.rawTranscript = text
-                        self.state.liveTranscript = text
+                        self.pendingPartial = text
+                        self.state.liveTranscript = self.fullTranscript()
+                        // A late partial landing in the grace window
+                        // means the STT engine isn't done yet — give it
+                        // a bit more time before we finalise.
+                        if self.commitInProgress { self.scheduleFinalize() }
                     }
                 },
                 onFinal: { [weak self] text in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.rawTranscript = text
-                        self.state.liveTranscript = text
-                        self.finishAfterSTT(finalText: text)
+                        // Accumulate, don't overwrite. Streaming Whisper
+                        // emits one final per VAD segment — a long
+                        // utterance with a natural breath shows up as
+                        // multiple finals and we want them all.
+                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            if self.committedTranscript.isEmpty {
+                                self.committedTranscript = trimmed
+                            } else {
+                                self.committedTranscript += " " + trimmed
+                            }
+                        }
+                        self.pendingPartial = ""
+                        self.state.liveTranscript = self.committedTranscript
+                        // The user hasn't released yet — keep the turn
+                        // open, more segments may follow. If the user
+                        // HAS released and we're in the grace window,
+                        // bump it so a trailing segment-final still
+                        // makes it in.
+                        if self.commitInProgress { self.scheduleFinalize() }
                     }
                 },
                 onError: { [weak self] err in
@@ -277,6 +320,12 @@ final class TurnController: ObservableObject {
         state.pill = .processing
         mic.stop()
         stt?.finish()
+        commitInProgress = true
+        // Wait briefly for the trailing segment final to arrive after
+        // we sent `end` to the STT engine. The grace task gets bumped
+        // every time a new partial / final lands, so a server that
+        // flushes multiple pending segments still gets fully captured.
+        scheduleFinalize()
         // Safety net for catastrophic STT failure (WS dropped after
         // `end`, server stuck, no final ever delivered). 8 s is well
         // beyond a normal Whisper inference for any reasonable
@@ -289,16 +338,15 @@ final class TurnController: ObservableObject {
             try? await Task.sleep(nanoseconds: 8_000_000_000)
             guard let self, !Task.isCancelled else { return }
             if !self.finishCommitted {
-                // Use the latest rawTranscript (may have grown via
-                // partials), not a stale snapshot from 8 s ago.
-                self.finishAfterSTT(finalText: self.rawTranscript)
+                self.finishAfterSTT(finalText: self.fullTranscript())
             }
         }
     }
 
     private func cancelCapture() {
-        safetyNetTask?.cancel()
-        safetyNetTask = nil
+        safetyNetTask?.cancel(); safetyNetTask = nil
+        graceTask?.cancel();     graceTask = nil
+        commitInProgress = false
         mic.stop()
         stt?.cancel()
         stt = nil
@@ -306,13 +354,35 @@ final class TurnController: ObservableObject {
         state.pill = .idle
     }
 
+    // Combined committed segments + the in-flight partial. This is what
+    // gets handed to handleTranscribe / handleEcho when the turn ends.
+    private func fullTranscript() -> String {
+        if pendingPartial.isEmpty { return committedTranscript }
+        if committedTranscript.isEmpty { return pendingPartial }
+        return committedTranscript + " " + pendingPartial
+    }
+
+    // Schedule (or bump) the post-release grace timer that finalises
+    // the turn with whatever's accumulated. Cancelled by beginCapture /
+    // cancelCapture so a stale grace doesn't preempt the next capture.
+    private func scheduleFinalize() {
+        graceTask?.cancel()
+        graceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.finishAfterSTT(finalText: self.fullTranscript())
+        }
+    }
+
     private func finishAfterSTT(finalText: String) {
-        // Idempotent — if a real final and the 8 s safety net both
-        // fire, the second call is a no-op. Without this guard you
-        // could get the dreaded "No speech detected" flash followed
-        // moments later by the real text pasting.
+        // Idempotent — if the grace task and the 8 s safety net both
+        // fire (or grace + a late onFinal), the second call is a no-op.
+        // Without this guard you could get the dreaded "No speech
+        // detected" flash followed moments later by the real text pasting.
         guard !finishCommitted else { return }
         finishCommitted = true
+        commitInProgress = false
+        graceTask?.cancel(); graceTask = nil
         let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         stt = nil
         guard !text.isEmpty else {
