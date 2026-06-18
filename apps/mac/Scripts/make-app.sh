@@ -80,3 +80,10 @@ fi
 
 echo "Built $APP"
 echo "Open with:  open $APP"
+
+# Ad-hoc build changes CDHash → AX TCC grant is invalidated.
+# Reset so the user can re-grant cleanly on next launch.
+if [[ "$SIGN_IDENTITY" == "-" || -z "$SIGN_IDENTITY" ]]; then
+  echo "→ tccutil reset Accessibility (ad-hoc rebuild invalidated the grant)"
+  tccutil reset Accessibility 2>/dev/null || true
+fi
