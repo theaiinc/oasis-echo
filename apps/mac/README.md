@@ -1,5 +1,12 @@
 # Oasis Echo — macOS app
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../logo.svg">
+    <img alt="Oasis Echo" src="../../logo.svg" width="120">
+  </picture>
+</p>
+
 Native SwiftUI menu-bar app. Dictate voice into any text field, or talk back-and-forth with the Oasis Echo voice agent. Floating pill HUD, global hotkeys (including the Fn / 🌐 key), default streaming-Whisper STT with on-device fallback.
 
 Tracking issue: [#2 — macOS menu-bar app: dictate into anything, talk with Echo](https://github.com/theaiinc/oasis-echo/issues/2).

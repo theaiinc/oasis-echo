@@ -79,6 +79,9 @@ export class WhisperStreamingStt {
   private buffer = new Float32Array(0);
   private lastPartialAt = 0;
   private lastPartialText = '';
+  /** Text from audio dropped off the rolling buffer (speech > maxBufferSeconds). */
+  private committedSegments = '';
+  private headCommitPromise: Promise<void> | null = null;
 
   private pipelinePromise: Promise<AsrFn | null> | null = null;
   private pipeline: AsrFn | null = null;
@@ -131,27 +134,26 @@ export class WhisperStreamingStt {
   /** Append PCM (Float32, 16kHz mono, range [-1, 1]) to the rolling buffer. */
   feed(samples: Float32Array): void {
     if (!samples.length) return;
-    // Concatenate and cap at maxBufferSamples.
     const needed = this.buffer.length + samples.length;
     if (needed <= this.maxBufferSamples) {
       const merged = new Float32Array(needed);
       merged.set(this.buffer, 0);
       merged.set(samples, this.buffer.length);
       this.buffer = merged;
-    } else {
-      // Overflow — drop head. Helps cap worst-case memory without an
-      // explicit ring buffer.
-      const keepFromExisting = Math.max(
-        0,
-        this.maxBufferSamples - samples.length,
-      );
-      const merged = new Float32Array(keepFromExisting + samples.length);
-      if (keepFromExisting > 0) {
-        merged.set(this.buffer.subarray(this.buffer.length - keepFromExisting), 0);
-      }
-      merged.set(samples, keepFromExisting);
-      this.buffer = merged;
+      return;
     }
+
+    // Overflow — transcribe the head we're about to drop, then keep the tail.
+    const dropCount = needed - this.maxBufferSamples;
+    const droppedHead = this.buffer.subarray(0, dropCount);
+    const keepFromExisting = Math.max(0, this.maxBufferSamples - samples.length);
+    const merged = new Float32Array(keepFromExisting + samples.length);
+    if (keepFromExisting > 0) {
+      merged.set(this.buffer.subarray(this.buffer.length - keepFromExisting), 0);
+    }
+    merged.set(samples, keepFromExisting);
+    this.buffer = merged;
+    this.commitDroppedHead(droppedHead);
   }
 
   /** Duration of buffered audio in seconds. */
@@ -176,19 +178,20 @@ export class WhisperStreamingStt {
     this.lastPartialAt = now;
     const text = await this.runOnce(pipe, this.buffer);
     this.lastPartialText = text;
-    return text;
+    return this.joinCommitted(text);
   }
 
   /** Best available transcript of the entire buffer. Always runs a fresh inference. */
   async transcribeAll(): Promise<string> {
+    await this.awaitHeadCommits();
     if (this.buffer.length < this.minBufferSamples) {
-      return this.lastPartialText;
+      return this.joinCommitted(this.lastPartialText);
     }
     const pipe = await this.preload();
-    if (!pipe) return this.lastPartialText;
+    if (!pipe) return this.joinCommitted(this.lastPartialText);
     const text = await this.runOnce(pipe, this.buffer);
     this.lastPartialText = text;
-    return text;
+    return this.joinCommitted(text);
   }
 
   /** Drop the rolling buffer — start fresh for a new utterance. */
@@ -196,6 +199,36 @@ export class WhisperStreamingStt {
     this.buffer = new Float32Array(0);
     this.lastPartialAt = 0;
     this.lastPartialText = '';
+    this.committedSegments = '';
+    this.headCommitPromise = null;
+  }
+
+  private joinCommitted(tail: string): string {
+    const t = tail.trim();
+    if (!this.committedSegments) return t;
+    if (!t) return this.committedSegments;
+    return `${this.committedSegments} ${t}`.trim();
+  }
+
+  private async awaitHeadCommits(): Promise<void> {
+    if (this.headCommitPromise) {
+      await this.headCommitPromise;
+    }
+  }
+
+  private commitDroppedHead(head: Float32Array): void {
+    if (head.length < this.minBufferSamples) return;
+    const prev = this.headCommitPromise;
+    this.headCommitPromise = (async () => {
+      if (prev) await prev;
+      const pipe = await this.preload();
+      if (!pipe) return;
+      const text = (await this.runOnce(pipe, head)).trim();
+      if (!text) return;
+      this.committedSegments = this.committedSegments
+        ? `${this.committedSegments} ${text}`
+        : text;
+    })();
   }
 
   private async runOnce(pipe: AsrFn, samples: Float32Array): Promise<string> {

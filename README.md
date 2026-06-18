@@ -1,5 +1,12 @@
 # Oasis Echo
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo.svg">
+    <img alt="Oasis Echo" src="logo.svg" width="120">
+  </picture>
+</p>
+
 [![CI](https://github.com/theaiinc/oasis-echo/actions/workflows/ci.yml/badge.svg)](https://github.com/theaiinc/oasis-echo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
