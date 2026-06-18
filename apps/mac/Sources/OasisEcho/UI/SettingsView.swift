@@ -104,7 +104,7 @@ struct ShortcutsTab: View {
     var body: some View {
         Form {
             Section("Dictation") {
-                KeyboardShortcuts.Recorder("Push-to-talk (hold)", name: .pushToTalk)
+                KeyboardShortcuts.Recorder("Push-to-talk (hold, default ⌥ Space)", name: .pushToTalk)
                 KeyboardShortcuts.Recorder("Hands-free (toggle)", name: .handsFree)
                 Toggle("Also use Fn / 🌐 key (hold)", isOn: Binding(
                     get: { state.useFnKey },

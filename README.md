@@ -120,7 +120,7 @@ cd apps/mac
 open OasisEcho.app
 ```
 
-Hold `⌃⌥O` (or the Fn / 🌐 key) anywhere in macOS to dictate; press `⌘⇧M` to flip Transcribe ⇄ Echo. STT defaults to the server's streaming Whisper endpoint (`/audio` WS); SFSpeechRecognizer is the offline fallback. Full setup, hotkey reference, and architecture in [apps/mac/README.md](apps/mac/README.md).
+Hold `⌥ Space` (or the Fn / 🌐 key) anywhere in macOS to dictate; press `⌘⇧M` to flip Transcribe ⇄ Echo. STT defaults to the server's streaming Whisper endpoint (`/audio` WS); SFSpeechRecognizer is the offline fallback. Full setup, hotkey reference, and architecture in [apps/mac/README.md](apps/mac/README.md).
 
 ### Web UI
 

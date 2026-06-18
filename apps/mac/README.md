@@ -34,9 +34,9 @@ First launch asks for **Microphone**, **Speech Recognition**, and **Accessibilit
 ## Modes
 
 | Mode | Hotkey | Behavior |
-|---|---|---|
-| **Transcribe** | hold `⌃⌥O` (or hold **Fn / 🌐**) | mic → Whisper WS → POST `/transcribe` (rule + context-bias + phrase-match + LLM correction) → ⌘V paste at cursor |
-| **Echo** (voice agent) | hold `⌃⌥O` (or hold **Fn / 🌐**) | mic → STT → POST `/turn` → server streams `tts.chunk` (Kokoro PCM) + emotion directives → playback through the system audio graph |
+|---|---|---|---|
+| **Transcribe** | hold `⌥ Space` (or **Fn / 🌐**) | mic → Whisper WS → POST `/transcribe` (rule + context-bias + phrase-match + LLM correction) → ⌘V paste at cursor |
+| **Echo** (voice agent) | hold `⌥ Space` (or **Fn / 🌐**) | mic → STT → POST `/turn` → server streams `tts.chunk` (Kokoro PCM) + emotion directives → playback through the system audio graph |
 | **Switch mode** | `⌘⇧M` | flip Transcribe ⇄ Echo anywhere — surfaces a toast above the orb |
 | **Hands-free** | `⌃⌥⇧O` | toggle (press to start, press to stop) — useful when you don't want to hold a key for a long Echo turn |
 

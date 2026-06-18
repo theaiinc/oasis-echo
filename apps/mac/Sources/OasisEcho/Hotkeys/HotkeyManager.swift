@@ -2,7 +2,7 @@ import AppKit
 import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
-    static let pushToTalk = Self("pushToTalk", default: .init(.o, modifiers: [.control, .option]))
+    static let pushToTalk = Self("pushToTalk", default: .init(.space, modifiers: [.option]))
     static let handsFree  = Self("handsFree",  default: .init(.o, modifiers: [.control, .option, .shift]))
     static let toggleMode = Self("toggleMode", default: .init(.m, modifiers: [.command, .shift]))
 }
