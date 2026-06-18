@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import AVFoundation
 import Combine
@@ -24,6 +25,7 @@ final class TurnController: ObservableObject {
     private let player = AudioPlayer()
     private var stt: STTEngine?
     private var persistentServerSTT: ServerSTTEngine?
+    private let wakeWord = WakeWordDetector()
     private var pill: PillWindowController?
     private var eventsOpen = false
     // Streaming STT (server Whisper) emits one `stt.final` per VAD
@@ -46,9 +48,13 @@ final class TurnController: ObservableObject {
     // grace window (we're past commit and waiting for the trailing
     // segment) vs simply update the live caption (still mid-utterance).
     private var commitInProgress: Bool = false
+    // Server Whisper sends one `stt.final` after `{type:"end"}`; we must
+    // not paste on the 700 ms grace timer while that inference runs.
+    private var awaitingServerFinal: Bool = false
     private var handsFreeActive: Bool = false
     private var lastStartMs: Int64 = 0
     private var pillCancellable: AnyCancellable?
+    private var wakeWordCancellable: AnyCancellable?
     private var hudCloseTask: Task<Void, Never>?
     // The 8 s "STT never came back" guard scheduled in commitCapture.
     // Stored so beginCapture/cancelCapture can cancel it — otherwise an
@@ -76,16 +82,50 @@ final class TurnController: ObservableObject {
     private var bcListeningStartedAt: Date?
     private var bcLastPlayedAt: Date = .distantPast
     private var bcPauseStartedAt: Date?
+    // App that had keyboard focus when dictation started — restored
+    // before auto-paste so text lands in the right field.
+    private var pasteTargetPID: pid_t?
+
+    // Long-capture detection: if a single push-to-talk capture runs
+    // longer than `longCaptureThresholdSec`, we surface the meeting
+    // toast (Granola pattern). Fires at most once per capture.
+    private var longCaptureTimer: Task<Void, Never>?
+    private var longCaptureFired = false
+    let longCaptureThresholdSec: TimeInterval = 30
+    /// Fired on the main actor when a single capture has been held past
+    /// `longCaptureThresholdSec`. Wired by AppDelegate to the meeting
+    /// toast.
+    var onLongCaptureDetected: (() -> Void)?
 
     init(state: AppState) {
         self.state = state
         self.client = OasisClient(baseURL: URL(string: state.serverBaseURL) ?? URL(string: "http://127.0.0.1:3000")!)
 
+        // When "Hey Echo" is detected, switch to echo mode and start capture.
+        wakeWord.onWakeWordDetected = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard case .idle = state.pill else { return }
+                state.setMode(.echo)
+                beginCapture()
+            }
+        }
+
+        wakeWordCancellable = UserDefaults.standard
+            .publisher(for: \.wakeWordEnabled)
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.toggleWakeWord() }
+            }
+
         pillCancellable = state.$pill
             .dropFirst()
-            .sink { new in
+            .sink { [weak self] new in
                 if case .idle = new {
-                    Task { @MainActor in MediaControl.resumeIfPaused() }
+                    Task { @MainActor in
+                        MediaControl.resumeIfPaused()
+                        self?.wakeWord.resume()
+                    }
                 }
             }
 
@@ -110,7 +150,12 @@ final class TurnController: ObservableObject {
         // NSSpeechRecognitionUsageDescription, the WHOLE PROCESS gets
         // SIGABRT'd. We only request Speech when the Apple engine is
         // actually selected AND the user triggers a capture.
-        _ = Paster.ensureAccessibilityAuthorized()
+        //
+        // Also do NOT prompt for Accessibility here — the paste flow
+        // handles that gracefully (falls through to AppleScript, then
+        // shows a one-shot alert linking to Settings). Proactive AX
+        // prompts on every launch are especially annoying when ad-hoc
+        // signing changes the app identity, making macOS forget grants.
 
         // Warm up the audio graph on launch so the first backchannel
         // plays with no perceptible gap. Logs to Console.app on
@@ -119,6 +164,29 @@ final class TurnController: ObservableObject {
 
         await reconnect()
         startHeartbeat()
+        toggleWakeWord()
+    }
+
+    /// Start or stop the wake-word detector based on the user's preference.
+    func toggleWakeWord() {
+        if state.wakeWordEnabled, !wakeWord.isRunning {
+            Task {
+                let ok = await WakeWordDetector.requestAuthorization()
+                guard ok else {
+                    state.statusLine = "Wake word: speech auth denied"
+                    return
+                }
+                do {
+                    try wakeWord.start()
+                    state.statusLine = "Wake word active"
+                } catch {
+                    state.flashPill(.error("Wake word: \(error.localizedDescription)"))
+                }
+            }
+        } else if !state.wakeWordEnabled, wakeWord.isRunning {
+            wakeWord.stop()
+            state.statusLine = "Wake word off"
+        }
     }
 
     // Poll /config every few seconds while offline; when it returns,
@@ -169,6 +237,7 @@ final class TurnController: ObservableObject {
 
     func shutdown() {
         heartbeat?.cancel()
+        wakeWord.stop()
         mic.stop()
         stt?.cancel()
         persistentServerSTT?.shutdown()
@@ -177,13 +246,32 @@ final class TurnController: ObservableObject {
     }
 
     private func refreshServer() async {
-        if let url = URL(string: state.serverBaseURL) { await client.updateBase(url) }
-        if let cfg = await client.ping() {
+        guard ServerAutoLauncher.shared.beginRefreshServerSection() else { return }
+        defer { ServerAutoLauncher.shared.endRefreshServerSection() }
+
+        if await connectToFirstReachableServer() { return }
+
+        if state.autoStartServer {
+            await ServerAutoLauncher.shared.ensureServerRunning(client: client, state: state)
+            if state.serverReachable { return }
+        }
+
+        state.serverReachable = false
+    }
+
+    /// Probes saved URL, listen-port (IPv4 + IPv6). Updates client + STT on success.
+    @discardableResult
+    private func connectToFirstReachableServer() async -> Bool {
+        for url in state.localServerURLCandidates() {
+            await client.updateBase(url)
+            guard let cfg = await client.ping() else { continue }
+            state.serverBaseURL = url.absoluteString
             state.serverReachable = true
             state.serverModel = [cfg.backend, cfg.model].compactMap { $0 }.joined(separator: " · ")
-        } else {
-            state.serverReachable = false
+            persistentServerSTT?.updateServerBase(url)
+            return true
         }
+        return false
     }
 
     private func openEventStream() async {
@@ -232,18 +320,33 @@ final class TurnController: ObservableObject {
 
     // MARK: - Capture lifecycle
 
+    /// Public helper for the meeting toast: if a capture is currently
+    /// in flight, abandon it so the mic is free for the meeting
+    /// controller. No-op when idle.
+    func cancelInFlightCaptureIfAny() {
+        if case .listening = state.pill { cancelCapture() }
+        if case .processing = state.pill { cancelCapture() }
+    }
+
     private func beginCapture() {
         guard case .idle = state.pill else { return }
+        // Pause the wake-word detector so it doesn't compete for the mic.
+        wakeWord.pause()
+
         // Kill any in-flight safety net / grace task from the previous
         // capture before their timers fire under the new capture's
         // reset state.
         safetyNetTask?.cancel(); safetyNetTask = nil
         graceTask?.cancel();     graceTask = nil
+        longCaptureTimer?.cancel(); longCaptureTimer = nil
+        longCaptureFired = false
+        savePasteTarget()
         committedTranscript = ""
         pendingPartial = ""
         committedForEcho = false
         finishCommitted = false
         commitInProgress = false
+        awaitingServerFinal = false
         lastStartMs = Self.nowMs()
         state.liveTranscript = ""
         state.pill = .listening(level: 0)
@@ -259,37 +362,23 @@ final class TurnController: ObservableObject {
                 onPartial: { [weak self] text in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.pendingPartial = text
-                        self.state.liveTranscript = self.fullTranscript()
-                        // A late partial landing in the grace window
-                        // means the STT engine isn't done yet — give it
-                        // a bit more time before we finalise.
-                        if self.commitInProgress { self.scheduleFinalize() }
+                        self.ingestPartialText(text)
+                        // Apple Speech: bump the grace timer. Server
+                        // Whisper: wait for `stt.final` after `{type:"end"}`.
+                        if self.commitInProgress, !self.usesServerWhisperSTT {
+                            self.scheduleFinalize()
+                        }
                     }
                 },
                 onFinal: { [weak self] text in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        // Accumulate, don't overwrite. Streaming Whisper
-                        // emits one final per VAD segment — a long
-                        // utterance with a natural breath shows up as
-                        // multiple finals and we want them all.
-                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            if self.committedTranscript.isEmpty {
-                                self.committedTranscript = trimmed
-                            } else {
-                                self.committedTranscript += " " + trimmed
-                            }
+                        self.ingestFinalText(text)
+                        if self.commitInProgress {
+                            self.awaitingServerFinal = false
+                            self.graceTask?.cancel()
+                            self.tryFinalizeAfterSTT()
                         }
-                        self.pendingPartial = ""
-                        self.state.liveTranscript = self.committedTranscript
-                        // The user hasn't released yet — keep the turn
-                        // open, more segments may follow. If the user
-                        // HAS released and we're in the grace window,
-                        // bump it so a trailing segment-final still
-                        // makes it in.
-                        if self.commitInProgress { self.scheduleFinalize() }
                     }
                 },
                 onError: { [weak self] err in
@@ -310,13 +399,40 @@ final class TurnController: ObservableObject {
                     }
                 }
             )
+
+            // Arm the long-capture detector. Fires once if the user is
+            // still holding the hotkey past the threshold — TurnController
+            // never cares about the result itself, AppDelegate decides
+            // what to do (currently: show the meeting toast).
+            armLongCaptureTimer()
         } catch {
             fail(error.localizedDescription)
         }
     }
 
+    private func armLongCaptureTimer() {
+        longCaptureTimer?.cancel()
+        longCaptureFired = false
+        let threshold = longCaptureThresholdSec
+        longCaptureTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(threshold * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            // Only fire if we're STILL listening — committing or
+            // cancelling between arming and firing voids the detection.
+            if case .listening = self.state.pill, !self.longCaptureFired {
+                self.longCaptureFired = true
+                self.onLongCaptureDetected?()
+            }
+        }
+    }
+
+    private func disarmLongCaptureTimer() {
+        longCaptureTimer?.cancel(); longCaptureTimer = nil
+    }
+
     private func commitCapture() {
         guard case .listening = state.pill else { return }
+        disarmLongCaptureTimer()
         state.pill = .processing
         mic.stop()
         stt?.finish()
@@ -346,12 +462,20 @@ final class TurnController: ObservableObject {
     private func cancelCapture() {
         safetyNetTask?.cancel(); safetyNetTask = nil
         graceTask?.cancel();     graceTask = nil
+        disarmLongCaptureTimer()
         commitInProgress = false
+        awaitingServerFinal = false
         mic.stop()
         stt?.cancel()
         stt = nil
         state.liveTranscript = ""
         state.pill = .idle
+        wakeWord.resume()
+        NotificationCenter.default.post(name: .init("OasisCaptureCancelled"), object: nil)
+    }
+
+    private var usesServerWhisperSTT: Bool {
+        state.sttEngine == .serverWhisper && persistentServerSTT != nil
     }
 
     // Combined committed segments + the in-flight partial. This is what
@@ -362,15 +486,79 @@ final class TurnController: ObservableObject {
         return committedTranscript + " " + pendingPartial
     }
 
+    private func refreshLiveTranscript() {
+        state.liveTranscript = fullTranscript()
+    }
+
+    /// Merge a streaming partial without discarding earlier speech when
+    /// Whisper re-infers the rolling buffer and drops leading words.
+    private func ingestPartialText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if pendingPartial.isEmpty {
+            pendingPartial = trimmed
+            refreshLiveTranscript()
+            return
+        }
+
+        if trimmed.hasPrefix(pendingPartial)
+            || (trimmed.count >= pendingPartial.count
+                && trimmed.localizedCaseInsensitiveContains(pendingPartial)) {
+            pendingPartial = trimmed
+            refreshLiveTranscript()
+            return
+        }
+
+        if pendingPartial.hasPrefix(trimmed) {
+            refreshLiveTranscript()
+            return
+        }
+
+        commitPendingToCommitted()
+        pendingPartial = trimmed
+        refreshLiveTranscript()
+    }
+
+    private func ingestFinalText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Final from Apple Speech is always authoritative — replace
+        // all the partial accumulation garbage with the clean result.
+        committedTranscript = trimmed
+        pendingPartial = ""
+        refreshLiveTranscript()
+    }
+
+    private func commitPendingToCommitted() {
+        let part = pendingPartial.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !part.isEmpty else { return }
+        if committedTranscript.isEmpty {
+            committedTranscript = part
+        } else if !committedTranscript.localizedCaseInsensitiveContains(part) {
+            committedTranscript += " " + part
+        }
+        pendingPartial = ""
+    }
+
+    private func tryFinalizeAfterSTT() {
+        guard commitInProgress, !finishCommitted else { return }
+        finishAfterSTT(finalText: fullTranscript())
+    }
+
     // Schedule (or bump) the post-release grace timer that finalises
     // the turn with whatever's accumulated. Cancelled by beginCapture /
     // cancelCapture so a stale grace doesn't preempt the next capture.
     private func scheduleFinalize() {
         graceTask?.cancel()
+        if usesServerWhisperSTT {
+            awaitingServerFinal = true
+            return
+        }
         graceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 700_000_000)
             guard let self, !Task.isCancelled else { return }
-            self.finishAfterSTT(finalText: self.fullTranscript())
+            self.tryFinalizeAfterSTT()
         }
     }
 
@@ -382,6 +570,7 @@ final class TurnController: ObservableObject {
         guard !finishCommitted else { return }
         finishCommitted = true
         commitInProgress = false
+        awaitingServerFinal = false
         graceTask?.cancel(); graceTask = nil
         let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         stt = nil
@@ -414,18 +603,17 @@ final class TurnController: ObservableObject {
                 let words = cleaned.split(whereSeparator: { $0.isWhitespace }).count
                 let totalMs = Int(Self.nowMs() - startMs)
                 if self.state.autoPaste {
-                    switch Paster.paste(cleaned) {
+                    switch Paster.paste(cleaned, activateTarget: self.pasteTargetApp()) {
                     case .pasted:
                         self.state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
                     case .copiedOnly:
-                        // Text is on the clipboard. macOS blocked the
-                        // synthetic keystroke (no Accessibility grant).
-                        // Show the pill state AND, on first occurrence
-                        // this session, an alert that opens System
-                        // Settings directly. After that, every paste
-                        // just shows the pill (no nag-loop).
+                        // Text is on the clipboard. Paste via AppleScript
+                        // (System Events) or CGEvent (AX) didn't work.
+                        // Show a one-shot guide to grant Automation
+                        // permission for System Events — this survives
+                        // ad-hoc rebuilds because it's tied to bundle ID.
                         self.state.flashPill(.copiedOnly(words: words), after: 2.4)
-                        Paster.showAccessibilityFailureAlert()
+                        Paster.showPermissionGate()
                     case .empty:
                         break
                     }
@@ -617,6 +805,20 @@ final class TurnController: ObservableObject {
 
     private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
+    private func savePasteTarget() {
+        if let app = NSWorkspace.shared.frontmostApplication,
+           app.bundleIdentifier != Bundle.main.bundleIdentifier {
+            pasteTargetPID = app.processIdentifier
+        } else {
+            pasteTargetPID = nil
+        }
+    }
+
+    private func pasteTargetApp() -> NSRunningApplication? {
+        guard let pid = pasteTargetPID else { return nil }
+        return NSRunningApplication(processIdentifier: pid)
+    }
+
     // Picks the engine the user selected in Settings. Server engine falls
     // back to Apple Speech if the base URL is malformed — we don't want
     // a bad URL to brick dictation entirely.
@@ -631,6 +833,7 @@ final class TurnController: ObservableObject {
             // SIGABRT.
             if let url = URL(string: state.serverBaseURL) {
                 if let existing = persistentServerSTT {
+                    existing.updateServerBase(url)
                     return existing
                 }
                 let e = ServerSTTEngine(serverBaseURL: url)

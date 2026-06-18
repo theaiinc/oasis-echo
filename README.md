@@ -39,10 +39,10 @@ apps/
 npm install
 npm run build
 npm test               # 77 tests across all packages
-npm run server         # web UI at http://localhost:3000
+npm run server         # web UI — URL printed (ephemeral port by default; ~/.oasis-echo/listen-port)
 ```
 
-Copy `.env.example` to `.env` and configure a backend (see below), then `npm run server`.
+Copy `.env.example` to `.env` and configure a backend (see below), then `npm run server`. With no `PORT` in `.env`, the server picks a free port; open the printed `http://127.0.0.1:…` URL or set `PORT=3000` for a fixed port.
 
 ### Reasoner backends
 

@@ -79,6 +79,20 @@ export type BargeInEvent = {
   atMs: number;
 };
 
+export type ToolUseEvent = BaseEvent & {
+  toolCallId: string;
+  name: string;
+  input: unknown;
+};
+
+export type ToolResultEvent = BaseEvent & {
+  toolCallId: string;
+  name: string;
+  ok: boolean;
+  preview: string;
+  latencyMs: number;
+};
+
 export type EmotionDirectivesEvent = BaseEvent & {
   source: 'acoustic' | 'text';
   detected: Emotion;
@@ -107,6 +121,8 @@ export interface EventMap {
   'turn.complete': TurnCompleteEvent;
   'turn.summary': TurnSummaryEvent;
   'bargein': BargeInEvent;
+  'tool.use': ToolUseEvent;
+  'tool.result': ToolResultEvent;
   'emotion.directives': EmotionDirectivesEvent;
   'error': ErrorEvent;
 }

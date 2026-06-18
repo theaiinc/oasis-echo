@@ -87,3 +87,43 @@ struct ConfigResponse: Decodable {
     let model: String?
     let session: String?
 }
+
+// MARK: - Meeting notes
+
+struct MeetingSegment: Codable, Equatable {
+    let elapsedSec: Int
+    let speaker: String
+    let text: String
+}
+
+struct MeetingNotesRequestBody: Encodable {
+    let transcript: [MeetingSegment]
+    let userNotes: String
+    let startedAt: Int64
+}
+
+struct MeetingNotesResponse: Decodable {
+    let id: String
+    let notes: String
+}
+
+struct MeetingListItem: Decodable, Identifiable {
+    let id: String
+    let startedAt: Int64
+    let endedAt: Int64
+    let durationSec: Int
+}
+
+struct MeetingListResponse: Decodable {
+    let meetings: [MeetingListItem]
+}
+
+struct MeetingDetail: Decodable {
+    let id: String
+    let startedAt: Int64
+    let endedAt: Int64
+    let durationSec: Int
+    let transcript: [MeetingSegment]
+    let notes: String
+    let userNotes: String
+}

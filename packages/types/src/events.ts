@@ -15,6 +15,32 @@ export type RouteDecisionEvent = {
 };
 export type LlmTokenEvent = { type: 'llm.token'; turnId: string; token: string; atMs: number };
 export type LlmDoneEvent = { type: 'llm.done'; turnId: string; atMs: number };
+/**
+ * Emitted when the reasoner dispatches an MCP (or native) tool call.
+ * UI uses this to show "calling web_search..." and gate backchannel
+ * timing so the user knows the agent is doing work rather than idle.
+ */
+export type ToolUseEvent = {
+  type: 'tool.use';
+  turnId: string;
+  toolCallId: string;
+  name: string;
+  /** JSON-serialisable arguments the reasoner sent in. */
+  input: unknown;
+  atMs: number;
+};
+/** Emitted when the tool returns (success OR error). `ok` splits them. */
+export type ToolResultEvent = {
+  type: 'tool.result';
+  turnId: string;
+  toolCallId: string;
+  name: string;
+  ok: boolean;
+  /** Truncated preview of the output, safe for logging + display. */
+  preview: string;
+  latencyMs: number;
+  atMs: number;
+};
 export type TtsChunkEvent = {
   type: 'tts.chunk';
   turnId: string;
@@ -43,6 +69,8 @@ export type PipelineEvent =
   | RouteDecisionEvent
   | LlmTokenEvent
   | LlmDoneEvent
+  | ToolUseEvent
+  | ToolResultEvent
   | TtsChunkEvent
   | TtsStartEvent
   | TtsDoneEvent

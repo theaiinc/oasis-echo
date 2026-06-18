@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -33,6 +34,7 @@ import {
 import { Pipeline } from '@oasis-echo/orchestrator';
 import {
   AnthropicReasoner,
+  McpRegistry,
   OllamaReasoner,
   OpenAIReasoner,
   ToolRegistry,
@@ -82,7 +84,28 @@ async function primeBackchannelCache(kokoro: KokoroTts): Promise<void> {
 // switches the reasoner on without any export ceremony.
 loadDotenv(join(__dirname, '..', '..', '..', '.env'));
 loadDotenv(join(process.cwd(), '.env'));
-const PORT = Number(process.env['PORT'] ?? 3000);
+
+/** `PORT` unset → OS picks a free port (no collisions). Set `PORT=3000` to pin. */
+function resolveListenPort(): number {
+  const raw = process.env['PORT']?.trim();
+  if (raw === undefined || raw === '') return 0;
+  if (raw.toLowerCase() === 'auto') return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 65535) return 0;
+  return Math.trunc(n);
+}
+
+function persistListenPort(port: number): void {
+  try {
+    const dir = join(homedir(), '.oasis-echo');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'listen-port'), `${port}\n`, 'utf8');
+  } catch {
+    /* ignore */
+  }
+}
+
+const requestedListenPort = resolveListenPort();
 const HTML = readFileSync(join(__dirname, '..', 'src', 'index.html'), 'utf8');
 
 type SseClient = {
@@ -145,6 +168,131 @@ class Hub {
   }
 }
 
+/**
+ * Compose the reasoner's system-prompt suffix that enumerates MCP
+ * tools plus the emission format the Ollama reasoner parses out of
+ * the model's stream. The instructions here are intentionally written
+ * so even a non-function-calling model (Gemma, vanilla Llama) can
+ * comply — it's plain text pattern, no tools-API required.
+ *
+ * Only surfaces tools likely to be useful inside a voice turn
+ * (web_search, browse_url, memory_*, artifact_*) — the 70-ish
+ * infrastructure tools (workflow_*, trigger_*, cu_*, agent_*) would
+ * blow out the prompt and confuse short replies with long catalogues.
+ */
+/**
+ * Keyword sniff for utterances whose correct answer depends on live
+ * data — weather, news, prices, sports scores, schedules, or any
+ * "latest/current/today" phrasing. When this returns true the server
+ * skips the speculation/smalltalk short-circuits and forces the turn
+ * through `handleTurn`, where the reasoner has tools and fillers are
+ * played while we wait on the tool call.
+ *
+ * Tuned conservatively — false positives just add tool latency, false
+ * negatives hallucinate. Update this list freely as new query shapes
+ * land in telemetry.
+ */
+function needsFreshData(text: string): boolean {
+  const t = text.toLowerCase();
+  if (!t.trim()) return false;
+  const patterns: RegExp[] = [
+    /\b(?:weather|temperature|forecast|rain(?:ing)?|snow(?:ing)?|humidity)\b/,
+    /\b(?:news|headline|breaking|update[sd]?\s+on)\b/,
+    /\b(?:price|stock|market|exchange rate|btc|bitcoin|crypto)\b/,
+    /\b(?:score|match|game|result)\b.{0,30}\b(?:today|tonight|yesterday|live)\b/,
+    /\b(?:latest|current|today'?s|tonight'?s|this (?:week|month|morning|afternoon|evening))\b/,
+    /\b(?:flight|train|bus|schedule|arriv(?:e|al)|depart(?:ure)?)\b/,
+    /\b(?:who (?:won|is winning|scored)|what happened)\b/,
+    /\bnow\s*$/,  // ends with the word "now" — often a time-sensitive Q
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+function buildSystemPromptSuffix(mcp: McpRegistry): string | undefined {
+  const connected = mcp.describe();
+  if (connected.length === 0) return undefined;
+
+  const VOICE_RELEVANT =
+    /(?:web_search|browse_url|memory_query|memory_list_rules|artifact_search|artifact_get|artifact_summarize|oasis_ask|code_search_symbols)$/;
+  type Picked = { qualifiedName: string; description: string | undefined; schema: unknown };
+  const picks: Picked[] = [];
+  for (const server of connected) {
+    for (const toolName of server.tools) {
+      if (!VOICE_RELEVANT.test(toolName)) continue;
+      const def = mcp.getToolDefinition(toolName);
+      picks.push({
+        qualifiedName: toolName,
+        description: def?.description,
+        schema: def?.input_schema,
+      });
+    }
+  }
+  if (picks.length === 0) return undefined;
+
+  const lines: string[] = [
+    'TOOLS AVAILABLE:',
+    'You have live tools for real-time information. PREFER them over your own memory any',
+    'time the answer could be time-sensitive, factual, or user-specific.',
+    '',
+    'WHEN TO CALL A TOOL (default to YES unless the answer is a stable, universal fact):',
+    '  - News, weather, prices, schedules, sports, scores, releases → web_search.',
+    '  - Any "latest", "current", "today", "this week/month/year" phrasing → web_search.',
+    '  - Specific companies, people, products, projects, policies → web_search.',
+    '  - Reading a page the user mentions → browse_url.',
+    '  - The user\'s own notes / artifacts / memory → the corresponding *_search/*_get tool.',
+    '',
+    'DO NOT answer from memory and then offer to "check" or "verify" — if a tool can check,',
+    'CALL IT NOW and answer from the result. Saying "check the official website" is a bug.',
+    '',
+    'Use the tools via the standard function-calling protocol. Do NOT describe the call in',
+    'prose or emit angle-bracket tags — just call the function. After the result arrives,',
+    'speak a natural 1-3 sentence reply grounded in it; do not chain another tool call.',
+    '',
+    'TOOLS:',
+  ];
+  for (const p of picks) {
+    const argsHint = summarizeSchemaForPrompt(p.schema);
+    const desc = p.description ? p.description.replace(/\s+/g, ' ').slice(0, 160) : '';
+    lines.push(`- ${p.qualifiedName}${argsHint} — ${desc}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Produces a compact `{q:str,limit?:int}` argument hint for the prompt
+ * from a JSON Schema. Keeps the model focused on the field names it's
+ * allowed to pass without dumping the full schema JSON into the prompt.
+ */
+function summarizeSchemaForPrompt(schema: unknown): string {
+  if (!schema || typeof schema !== 'object') return '';
+  const s = schema as { properties?: Record<string, unknown>; required?: string[] };
+  const props = s.properties;
+  if (!props || typeof props !== 'object') return '';
+  const required = new Set(s.required ?? []);
+  const entries: string[] = [];
+  for (const [k, raw] of Object.entries(props)) {
+    const prop = raw as { type?: string | string[]; enum?: unknown };
+    const type = Array.isArray(prop.type) ? prop.type[0] : prop.type;
+    const t = (typeof type === 'string' ? type : 'any').replace(/^integer$/, 'int');
+    const optional = required.has(k) ? '' : '?';
+    entries.push(`${k}${optional}:${t}`);
+  }
+  if (entries.length === 0) return '';
+  return `  { ${entries.join(', ')} }`;
+}
+
+type MeetingSegment = { elapsedSec: number; speaker: string; text: string };
+
+type MeetingRecord = {
+  id: string;
+  startedAt: number;
+  endedAt: number;
+  durationSec: number;
+  transcript: MeetingSegment[];
+  notes: string;
+  userNotes: string;
+};
+
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const logger = createLogger({ level: cfg.logLevel, bindings: { session: cfg.sessionId } });
@@ -153,15 +301,49 @@ async function main(): Promise<void> {
   tools.register(timeTool());
   tools.register(echoTool());
 
+  // Connect to every MCP server declared in `.mcp.json` (same format
+  // Claude Code / Claude Desktop use). Discovered tools are namespaced
+  // `<serverKey>__<toolName>` and registered alongside the built-ins
+  // so the reasoner's model sees them via the normal tools array.
+  const mcp = new McpRegistry({ logger });
+  const mcpTools = await mcp.loadFromFile().catch((err) => {
+    logger.warn('mcp registry failed to load', { error: String(err) });
+    return [];
+  });
+  for (const t of mcpTools) {
+    try { tools.register(t); }
+    catch (err) { logger.warn('mcp tool register failed', { name: t.name, error: String(err) }); }
+  }
+  if (mcpTools.length > 0) {
+    logger.info('mcp tools registered', {
+      count: mcpTools.length,
+      servers: mcp.describe(),
+    });
+  }
+
+  // Build a system-prompt suffix that enumerates connected MCP tools so
+  // the reasoner model is explicitly told what it has access to.
+  // `AnthropicReasoner` already carries tool definitions in its API
+  // request, but a brief system-prompt hint meaningfully improves tool
+  // selection on smaller Claude models.
+  const systemPromptSuffix = buildSystemPromptSuffix(mcp);
+
   let reasoner: Reasoner;
   if (cfg.backend === 'anthropic') {
-    reasoner = new AnthropicReasoner({ logger, tools, model: cfg.model });
+    reasoner = new AnthropicReasoner({
+      logger,
+      tools,
+      model: cfg.model,
+      ...(systemPromptSuffix ? { systemPromptSuffix } : {}),
+    });
     logger.info('reasoner', { backend: 'anthropic', model: cfg.model });
   } else if (cfg.backend === 'ollama') {
     reasoner = new OllamaReasoner({
       logger,
       model: cfg.model,
       baseUrl: cfg.ollamaBaseUrl,
+      tools,
+      ...(systemPromptSuffix ? { systemPromptSuffix } : {}),
     });
     logger.info('reasoner', { backend: 'ollama', model: cfg.model, baseUrl: cfg.ollamaBaseUrl });
   } else {
@@ -580,53 +762,69 @@ async function main(): Promise<void> {
           //      as before. That path runs the reasoner from scratch
           //      anyway so an extra 1-2s of postprocess doesn't hurt
           //      (and `escalate`'s filler bridges the gap).
+          // Always run STT postprocess — phrase-match, context-bias,
+          // phonetic correction take <10ms each and the speculation-hit
+          // path used to skip them, which left STT errors like
+          // "Popeye Place" in the transcript.
+          const pp = await postprocess.process({
+            text,
+            ...(agentContext.lastUtterance ? { agentContext } : {}),
+          });
+          if (pp.stagesApplied.length > 0) {
+            logger.info('stt.postprocess', {
+              turnId,
+              original: pp.original,
+              final: pp.text,
+              stages: pp.stagesApplied,
+              latencyMs: pp.latencyMs,
+            });
+            hub.broadcast('stt.postprocess', {
+              turnId,
+              original: pp.original,
+              final: pp.text,
+              stages: pp.stagesApplied,
+              history: pp.history,
+              latencyMs: pp.latencyMs,
+              atMs: Date.now(),
+            });
+          }
+          const cleanText = pp.text;
+          emitFinalTranscript(cleanText, turnId);
+
+          // Queries whose answer changes over time (weather, news,
+          // prices, anything with "today/latest/current") MUST reach
+          // the full reasoner path so tools can fire. Speculation on
+          // partial text often produces hallucinated answers because
+          // the SLM router collapses these into "smalltalk" or gemma
+          // skips the tool call on a truncated prompt.
+          const forceEscalate = needsFreshData(cleanText);
+
           let specResult: Awaited<ReturnType<typeof speculation.commit>> | null = null;
-          if (speculationId) {
-            specResult = await speculation.commit(speculationId, text);
+          if (speculationId && !forceEscalate) {
+            specResult = await speculation.commit(speculationId, cleanText);
+          } else if (speculationId && forceEscalate) {
+            // Drop any buffered speculation so the /partial work from
+            // this utterance doesn't linger waiting for a commit that
+            // isn't coming.
+            speculation.abort(speculationId);
+            logger.info('speculation.bypassed', {
+              turnId,
+              reason: 'needs-fresh-data',
+              text: cleanText.slice(0, 80),
+            });
           }
 
-          let cleanText: string;
           if (specResult?.kind === 'hit') {
-            cleanText = text;
-            emitFinalTranscript(cleanText, turnId);
             logger.info('speculation.promoted', {
               turnId,
               decision: specResult.routerOutput.decision.kind,
               intent: specResult.routerOutput.intent,
             });
-          } else {
-            if (specResult) {
-              logger.info('speculation.missed', {
-                turnId,
-                reason: specResult.reason,
-              });
-            }
-            // STT post-processing (semantic LLM, rules, context-bias).
-            // Only runs on miss so the hit path doesn't pay its cost.
-            const pp = await postprocess.process({
-              text,
-              ...(agentContext.lastUtterance ? { agentContext } : {}),
+          } else if (specResult) {
+            logger.info('speculation.missed', {
+              turnId,
+              reason: specResult.reason,
             });
-            if (pp.stagesApplied.length > 0) {
-              logger.info('stt.postprocess', {
-                turnId,
-                original: pp.original,
-                final: pp.text,
-                stages: pp.stagesApplied,
-                latencyMs: pp.latencyMs,
-              });
-              hub.broadcast('stt.postprocess', {
-                turnId,
-                original: pp.original,
-                final: pp.text,
-                stages: pp.stagesApplied,
-                history: pp.history,
-                latencyMs: pp.latencyMs,
-                atMs: Date.now(),
-              });
-            }
-            cleanText = pp.text;
-            emitFinalTranscript(cleanText, turnId);
           }
 
           // Complementary emotion signals.
@@ -811,6 +1009,46 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Transcribe-only path. Used by the Mac desktop app's Transcribe
+    // mode: on-device STT produces raw text, server runs the same
+    // post-process pipeline that /turn uses (rules, phrase match,
+    // context bias, optional semantic correction) and returns the
+    // cleaned text. No router, no reasoner, no TTS — just the same
+    // vocabulary/correction quality the voice agent gets, exposed as
+    // a fast HTTP round-trip so the client can paste immediately.
+    if (req.method === 'POST' && url.pathname === '/transcribe') {
+      const body = await readBody(req);
+      let rawText = '';
+      try {
+        const parsed = JSON.parse(body) as { text?: unknown };
+        rawText = String(parsed.text ?? '').trim();
+      } catch {
+        // fall through
+      }
+      if (!rawText) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'missing text' }));
+        return;
+      }
+      const started = Date.now();
+      const pp = await postprocess.process({
+        text: rawText,
+        ...(agentContext.lastUtterance ? { agentContext } : {}),
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          text: pp.text,
+          original: pp.original,
+          stages: pp.stagesApplied,
+          history: pp.history,
+          latencyMs: pp.latencyMs,
+          totalMs: Date.now() - started,
+        }),
+      );
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/corrections') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
@@ -820,6 +1058,119 @@ async function main(): Promise<void> {
           history: correctionStore.history(),
         }),
       );
+      return;
+    }
+
+    // ──────────────────────── Meeting Notes ────────────────────────
+
+    if (req.method === 'GET' && url.pathname === '/meetings') {
+      const dir = join(process.cwd(), '.oasis-meetings');
+      let meetings: Pick<MeetingRecord, 'id' | 'startedAt' | 'endedAt' | 'durationSec'>[] = [];
+      if (existsSync(dir)) {
+        meetings = readdirSync(dir)
+          .filter((f) => f.endsWith('.json'))
+          .map((f) => {
+            try {
+              const m = JSON.parse(readFileSync(join(dir, f), 'utf8')) as MeetingRecord;
+              return { id: m.id, startedAt: m.startedAt, endedAt: m.endedAt, durationSec: m.durationSec };
+            } catch {
+              return null;
+            }
+          })
+          .filter((m): m is NonNullable<typeof m> => m !== null)
+          .sort((a, b) => b.startedAt - a.startedAt);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ meetings }));
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname.startsWith('/meeting/')) {
+      const id = url.pathname.replace('/meeting/', '');
+      if (!id || id.includes('..') || id.includes('/')) {
+        res.writeHead(400);
+        res.end('bad id');
+        return;
+      }
+      const path = join(process.cwd(), '.oasis-meetings', `${id}.json`);
+      if (!existsSync(path)) {
+        res.writeHead(404);
+        res.end('not found');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(readFileSync(path, 'utf8'));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/meeting/notes') {
+      const body = await readBody(req);
+      let transcript: MeetingSegment[] = [];
+      let userNotes = '';
+      let startedAt = Date.now();
+      try {
+        const parsed = JSON.parse(body) as {
+          transcript?: unknown;
+          userNotes?: unknown;
+          startedAt?: unknown;
+        };
+        if (Array.isArray(parsed.transcript)) {
+          transcript = parsed.transcript as MeetingSegment[];
+        }
+        userNotes = String(parsed.userNotes ?? '').trim();
+        if (typeof parsed.startedAt === 'number') startedAt = parsed.startedAt;
+      } catch { /* ignore */ }
+
+      const fmt = (sec: number) =>
+        `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      const transcriptText = transcript
+        .map((s) => `[${fmt(s.elapsedSec)}] ${s.speaker}: ${s.text}`)
+        .join('\n');
+
+      const prompt = [
+        'Generate structured meeting notes from this conversation transcript.',
+        userNotes ? `\nNotes taken during the meeting:\n${userNotes}` : '',
+        '\nTRANSCRIPT:\n' + transcriptText,
+        '\n\nRespond with concise markdown meeting notes using only the relevant sections below.',
+        'Do not include a section if it has no content.\n',
+        '## Summary',
+        '## Key Points',
+        '## Action Items',
+        '## Decisions Made',
+        '## Next Steps',
+      ].join('\n');
+
+      let notes = '';
+      try {
+        const state = { ...pipeline.state.snapshot(), turns: [] as never[] };
+        for await (const event of reasoner.stream({ userText: prompt, state, allowTools: false })) {
+          if (event.type === 'token') notes += event.text;
+        }
+      } catch (err) {
+        logger.error('meeting notes generation failed', { error: String(err) });
+        notes = `## Summary\n\nMeeting transcript recorded (${transcript.length} segments).\n\n`;
+        if (transcriptText) notes += `## Transcript\n\n${transcriptText}`;
+      }
+      notes = notes.trim();
+
+      const endedAt = Date.now();
+      const id = `m-${startedAt.toString(36)}`;
+      const durationSec = transcript.length > 0
+        ? (transcript[transcript.length - 1]!.elapsedSec)
+        : Math.round((endedAt - startedAt) / 1000);
+      const meeting: MeetingRecord = { id, startedAt, endedAt, durationSec, transcript, notes, userNotes };
+
+      try {
+        const dir = join(process.cwd(), '.oasis-meetings');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, `${id}.json`), JSON.stringify(meeting, null, 2));
+        logger.info('meeting saved', { id, segments: transcript.length, durationSec });
+      } catch (err) {
+        logger.error('meeting save failed', { error: String(err) });
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id, notes }));
       return;
     }
 
@@ -860,11 +1211,21 @@ async function main(): Promise<void> {
   // load; transformers.js caches the weights so subsequent connections
   // are fast.
 
+  // Single process-wide Whisper instance. Creating a fresh
+  // WhisperStreamingStt per WebSocket connection spawns an independent
+  // ONNX Runtime session; when two clients connect (the web app and
+  // the Mac native app, or a reconnect racing an old connection) the
+  // simultaneous ONNX initializations would SIGABRT the whole process.
+  // The wrapper's own `reset()` is called on every `start` message so
+  // sharing it between sequential callers is safe.
+  let sharedStt: WhisperStreamingStt | null = null;
+
   wss.on('connection', (ws: WebSocket) => {
-    const stt = new WhisperStreamingStt({ logger });
-    // Fire-and-forget: download the model in the background so the
-    // first partial doesn't pay the full cold-start cost.
-    stt.preload().catch(() => {});
+    if (!sharedStt) {
+      sharedStt = new WhisperStreamingStt({ logger });
+      sharedStt.preload().catch(() => {});
+    }
+    const stt = sharedStt;
     let sessionSpeculationId: string | null = null;
     let partialLoopTimer: ReturnType<typeof setInterval> | null = null;
     let lastEmittedPartial = '';
@@ -986,7 +1347,14 @@ async function main(): Promise<void> {
     });
   });
 
-  server.listen(PORT, () => {
+  // Bind loopback IPv4 explicitly so clients using http://127.0.0.1:PORT
+  // always reach us (Node's default can be IPv6-only when the port is free
+  // on v4 but taken on v6, or vice versa).
+  server.listen(requestedListenPort, '127.0.0.1', () => {
+    const addr = server.address();
+    const actualPort =
+      typeof addr === 'object' && addr !== null ? addr.port : requestedListenPort;
+    persistListenPort(actualPort);
     const reasonerLabel =
       cfg.backend === 'anthropic'
         ? `anthropic (${cfg.model})`
@@ -999,13 +1367,24 @@ async function main(): Promise<void> {
         : 'web-speech (browser)';
     const routerLabel = `slm (${cfg.routerModel})`;
     process.stdout.write(
-      `\n  oasis-echo web is live at http://localhost:${PORT}\n` +
+      `\n  oasis-echo web is live at http://127.0.0.1:${actualPort}\n` +
         `  router:   ${routerLabel}\n` +
         `  reasoner: ${reasonerLabel}\n` +
         `  tts:      ${ttsLabel}\n` +
         `  session:  ${cfg.sessionId}\n\n`,
     );
   });
+
+  // Close MCP subprocesses / HTTP sessions on shutdown so they don't
+  // linger as orphans when the server is stopped under watch-mode.
+  const shutdown = async (signal: string): Promise<void> => {
+    logger.info('shutting down', { signal });
+    try { await mcp.close(); } catch { /* ignore */ }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 2000).unref();
+  };
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
 /**

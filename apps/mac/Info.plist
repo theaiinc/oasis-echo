@@ -18,5 +18,24 @@
   <string>Oasis Echo uses Apple Speech to transcribe your voice on-device.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Oasis Echo pastes transcribed text into the frontmost app.</string>
+  <!-- Echo server is local HTTP (Node on loopback). URLSession is ATS-gated without this. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+    <key>NSExceptionDomains</key>
+    <dict>
+      <key>localhost</key>
+      <dict>
+        <key>NSExceptionAllowsInsecureHTTPLoads</key>
+        <true/>
+      </dict>
+      <key>127.0.0.1</key>
+      <dict>
+        <key>NSExceptionAllowsInsecureHTTPLoads</key>
+        <true/>
+      </dict>
+    </dict>
+  </dict>
 </dict>
 </plist>

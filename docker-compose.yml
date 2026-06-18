@@ -1,0 +1,44 @@
+services:
+  oasis-echo:
+    build: .
+    container_name: oasis-echo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9187:9187"
+    environment:
+      - NODE_ENV=production
+      - PORT=9187
+      - OASIS_LOG_LEVEL=info
+      - OASIS_BACKEND=${OASIS_BACKEND:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:e2b}
+      - OASIS_ROUTER_BASE_URL=${OASIS_ROUTER_BASE_URL:-http://host.docker.internal:11434}
+      - OASIS_ROUTER_MODEL=${OASIS_ROUTER_MODEL:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OASIS_MODEL=${OASIS_MODEL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OASIS_TTS_BACKEND=${OASIS_TTS_BACKEND:-kokoro}
+      - KOKORO_VOICE=${KOKORO_VOICE:-af_heart}
+      - KOKORO_DTYPE=${KOKORO_DTYPE:-q8}
+      - OASIS_STT_PHRASES_FILE=${OASIS_STT_PHRASES_FILE:-}
+      - OASIS_CORRECTIONS_FILE=/data/.oasis-corrections.json
+      - OASIS_PROFILE=${OASIS_PROFILE:-m3pro-18gb}
+    volumes:
+      - oasis-echo-data:/data
+    networks:
+      oasis-net:
+        ipv4_address: 10.89.87.10
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  oasis-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.87.0/24
+
+volumes:
+  oasis-echo-data:

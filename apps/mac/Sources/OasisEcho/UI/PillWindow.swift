@@ -98,26 +98,29 @@ final class PillWindowController {
     }
 
     private func resize(to target: CGSize, isShrinking: Bool) {
-        let setIt = { [weak self] in
-            guard let self else { return }
-            let screen = NSScreen.main?.visibleFrame ?? .zero
-            let x = screen.midX - target.width / 2
-            let bottomY: CGFloat = self.state.pillAtBottom
-                ? screen.minY + 18
-                : screen.maxY - target.height - 24
-            self.panel.setFrame(
-                NSRect(x: x, y: bottomY, width: target.width, height: target.height),
-                display: true,
-                animate: false
-            )
-            self.panel.contentView?.setFrameSize(target)
-            self.onGeometryChanged?()
-        }
         if isShrinking {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: setIt)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                self?.applyResizeFrame(target)
+            }
         } else {
-            setIt()
+            applyResizeFrame(target)
         }
+    }
+
+    private func applyResizeFrame(_ target: CGSize) {
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let x = screen.midX - target.width / 2
+        let bottomY: CGFloat = state.pillAtBottom
+            ? screen.minY + 18
+            : screen.maxY - target.height - 24
+        panel.setFrame(
+            NSRect(x: x, y: bottomY, width: target.width, height: target.height),
+            display: true,
+            animate: false
+        )
+        panel.contentView?.setFrameSize(target)
+        onGeometryChanged?()
     }
 
     func show() {

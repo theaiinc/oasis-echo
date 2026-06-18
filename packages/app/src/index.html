@@ -283,15 +283,253 @@
         margin-right: 12px;
       }
       .voice-hint.warn { color: var(--local); }
+
+      /* ── Meeting toast ── */
+      .meeting-toast {
+        position: fixed;
+        top: 0;
+        left: 50%;
+        transform: translateX(-50%) translateY(-120%);
+        transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-top: none;
+        border-radius: 0 0 14px 14px;
+        padding: 14px 18px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        min-width: 400px;
+      }
+      .meeting-toast.visible { transform: translateX(-50%) translateY(0); }
+      .meeting-toast-icon { font-size: 20px; flex-shrink: 0; }
+      .meeting-toast-text { flex: 1; }
+      .meeting-toast-text strong { display: block; font-size: 13px; color: var(--fg); }
+      .meeting-toast-text span { font-size: 12px; color: var(--muted); }
+      .meeting-toast-ring {
+        width: 26px; height: 26px;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 11px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        flex-shrink: 0;
+        transition: border-color 0.3s;
+      }
+      .meeting-toast-ring.urgent { border-color: var(--escalated); color: var(--escalated); }
+      .meeting-toast button {
+        font-size: 12px;
+        padding: 6px 14px;
+        flex-shrink: 0;
+      }
+
+      /* ── Meeting recording bar ── */
+      .meeting-bar {
+        grid-column: 1 / -1;
+        background: rgba(255, 59, 48, 0.07);
+        border-bottom: 1px solid rgba(255, 59, 48, 0.18);
+        padding: 9px 20px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .meeting-rec-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #ff3b30;
+        flex-shrink: 0;
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      .meeting-timer {
+        font-variant-numeric: tabular-nums;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--fg);
+        min-width: 44px;
+      }
+      .meeting-bar-label {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .meeting-bar-end {
+        margin-left: auto;
+        background: #ff3b30;
+        font-size: 12px;
+        padding: 6px 14px;
+        border-radius: 6px;
+      }
+      .meeting-bar-end:hover { opacity: 0.85; }
+      .meeting-bar-notes-btn {
+        font-size: 12px;
+        padding: 6px 12px;
+      }
+
+      /* ── Meeting side panel ── */
+      .meeting-tabs {
+        display: flex;
+        margin: -16px -20px 14px;
+        border-bottom: 1px solid var(--border);
+        padding: 0 20px;
+      }
+      .meeting-tab {
+        padding: 9px 14px;
+        font-size: 12px;
+        color: var(--muted);
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+        user-select: none;
+        transition: color 0.15s;
+      }
+      .meeting-tab:hover { color: var(--fg); }
+      .meeting-tab.active { color: var(--fg); border-bottom-color: var(--accent); }
+      .meeting-tab-content { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+      .meeting-tab-content.active { display: flex; }
+
+      /* Transcript feed */
+      .meeting-transcript-feed {
+        flex: 1;
+        overflow-y: auto;
+        padding-bottom: 8px;
+      }
+      .meeting-entry {
+        display: flex;
+        gap: 8px;
+        padding: 5px 0;
+        border-bottom: 1px solid rgba(255,255,255,0.03);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .meeting-entry .ts {
+        color: var(--muted);
+        font-size: 10px;
+        min-width: 34px;
+        flex-shrink: 0;
+        padding-top: 2px;
+        font-variant-numeric: tabular-nums;
+      }
+      .meeting-entry .speaker {
+        font-weight: 600;
+        min-width: 28px;
+        flex-shrink: 0;
+        padding-top: 2px;
+      }
+      .meeting-entry.you .speaker { color: #1f6feb; }
+      .meeting-entry.echo .speaker { color: var(--escalated); }
+      .meeting-entry .text { color: var(--fg); flex: 1; }
+      .meeting-empty {
+        color: var(--muted);
+        font-size: 12px;
+        font-style: italic;
+        padding: 20px 0;
+        text-align: center;
+      }
+
+      /* Notes editor */
+      .meeting-notes-editor {
+        flex: 1;
+        width: 100%;
+        background: transparent;
+        border: none;
+        color: var(--fg);
+        font-family: inherit;
+        font-size: 13px;
+        line-height: 1.65;
+        resize: none;
+        outline: none;
+        padding: 4px 0;
+      }
+      .meeting-notes-editor::placeholder { color: var(--muted); }
+
+      /* Generated notes display */
+      .meeting-notes-display {
+        flex: 1;
+        overflow-y: auto;
+        font-size: 13px;
+        line-height: 1.6;
+        padding-bottom: 12px;
+      }
+      .meeting-notes-display h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--accent);
+        margin: 18px 0 6px;
+        font-weight: 600;
+      }
+      .meeting-notes-display h2:first-child { margin-top: 0; }
+      .meeting-notes-display ul {
+        margin: 4px 0 8px;
+        padding-left: 18px;
+      }
+      .meeting-notes-display li { margin-bottom: 3px; color: var(--fg); }
+      .meeting-notes-display p { margin: 4px 0 8px; color: var(--fg); }
+      .meeting-notes-display input[type=checkbox] { margin-right: 6px; accent-color: var(--accent); }
+      .meeting-notes-actions {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+      }
+      .meeting-notes-actions button {
+        font-size: 11px;
+        padding: 5px 12px;
+      }
+      .meeting-generating {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 13px;
+        padding: 20px 0;
+      }
+
+      /* Meeting history panel */
+      .meeting-history-list { padding-bottom: 12px; }
+      .meeting-history-item {
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+      }
+      .meeting-history-item:hover { opacity: 0.8; }
+      .meeting-history-title { font-size: 13px; color: var(--fg); font-weight: 500; }
+      .meeting-history-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+      .meeting-history-empty { font-size: 12px; color: var(--muted); font-style: italic; padding: 20px 0; text-align: center; }
     </style>
   </head>
   <body>
+    <!-- Meeting detection toast -->
+    <div id="meeting-toast" class="meeting-toast">
+      <div class="meeting-toast-icon">📋</div>
+      <div class="meeting-toast-text">
+        <strong>Starting a meeting?</strong>
+        <span>Echo can record and summarize your conversation.</span>
+      </div>
+      <button id="toast-record-btn">Record</button>
+      <button id="toast-dismiss-btn" class="secondary" style="padding:6px 12px;font-size:12px;">Later</button>
+      <div id="toast-ring" class="meeting-toast-ring">8</div>
+    </div>
+
     <main>
       <header>
         <h1><span class="status-dot" id="status"></span>oasis-echo</h1>
         <span class="session" id="session-label">connecting…</span>
+        <button id="header-record-btn" class="secondary" style="font-size:11px;padding:4px 10px;margin-left:12px;" title="Record meeting notes">⏺ Record</button>
         <span class="backend" id="backend"></span>
       </header>
+      <!-- Meeting recording bar (shown only in meeting mode) -->
+      <div id="meeting-bar" class="meeting-bar" style="display:none">
+        <div class="meeting-rec-dot"></div>
+        <span class="meeting-timer" id="meeting-timer">0:00</span>
+        <span class="meeting-bar-label">Recording</span>
+        <button id="meeting-notes-toggle" class="secondary meeting-bar-notes-btn">Notes</button>
+        <button id="meeting-end-btn" class="meeting-bar-end">End Meeting</button>
+      </div>
+
       <div id="mock-banner" class="mock-banner" style="display:none">
         <strong>Mock reasoner.</strong>
         Responses are shallow stubs. To get real Claude replies, stop the server, add
@@ -305,15 +543,59 @@
         </div>
       </section>
 
-      <section class="col" id="side">
-        <h2>Session state</h2>
-        <div class="state" id="state"></div>
+      <section class="col" id="side" style="display:flex;flex-direction:column;">
 
-        <h2 style="margin-top: 20px;">Metrics</h2>
-        <div class="metrics" id="metrics"></div>
+        <!-- View: default (session state / metrics / events) -->
+        <div id="side-default">
+          <h2>Session state</h2>
+          <div class="state" id="state"></div>
+          <h2 style="margin-top:20px;">Metrics</h2>
+          <div class="metrics" id="metrics"></div>
+          <h2 style="margin-top:20px;">Event stream</h2>
+          <div id="events"></div>
+        </div>
 
-        <h2 style="margin-top: 20px;">Event stream</h2>
-        <div id="events"></div>
+        <!-- View: active meeting (transcript + notes editor tabs) -->
+        <div id="side-meeting" style="display:none;flex-direction:column;flex:1;">
+          <div class="meeting-tabs">
+            <div class="meeting-tab active" data-tab="transcript">Transcript</div>
+            <div class="meeting-tab" data-tab="notes">My Notes</div>
+          </div>
+          <div id="mtab-transcript" class="meeting-tab-content active" style="flex:1;overflow:hidden;">
+            <div class="meeting-transcript-feed" id="meeting-transcript-feed">
+              <div class="meeting-empty" id="meeting-transcript-empty">Conversation will appear here…</div>
+            </div>
+          </div>
+          <div id="mtab-notes" class="meeting-tab-content">
+            <textarea id="meeting-notes-input" class="meeting-notes-editor"
+              placeholder="Take notes here during the meeting…&#10;&#10;(These will be included when generating the summary)"></textarea>
+          </div>
+        </div>
+
+        <!-- View: generated meeting notes (after ending) -->
+        <div id="side-notes" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+          <h2 style="margin-bottom:10px;">Meeting Notes
+            <button id="notes-history-btn" class="secondary" style="float:right;font-size:11px;padding:3px 10px;margin-top:-2px;">History</button>
+          </h2>
+          <div class="meeting-notes-actions">
+            <button id="notes-copy-btn" class="secondary">Copy</button>
+            <button id="notes-new-meeting-btn" class="secondary">New Meeting</button>
+          </div>
+          <div id="notes-generating" class="meeting-generating" style="display:none;">
+            <span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+            Generating notes…
+          </div>
+          <div id="meeting-notes-display" class="meeting-notes-display"></div>
+        </div>
+
+        <!-- View: meeting history -->
+        <div id="side-history" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+          <h2 style="margin-bottom:10px;">Past Meetings
+            <button id="history-back-btn" class="secondary" style="float:right;font-size:11px;padding:3px 10px;margin-top:-2px;">Back</button>
+          </h2>
+          <div class="meeting-history-list" id="meeting-history-list"></div>
+        </div>
+
       </section>
 
       <footer>
@@ -336,14 +618,8 @@
     </script>
 
     <script type="module">
-      import { OasisClient, TurnDebouncer } from '@oasis-echo/sdk';
-      import {
-        AudioPlayer,
-        AudioStreamUpload,
-        BargeInMonitor,
-        EmotionDetector,
-        MicCapture,
-      } from '@oasis-echo/sdk/browser';
+      import { OasisClient } from '@oasis-echo/sdk';
+      import { VoiceSession } from '@oasis-echo/sdk/browser';
 
       /* ─────────────────────── UI refs + helpers ─────────────────────── */
       const turnsEl = document.getElementById('turns');
@@ -412,6 +688,14 @@
         if (type === 'turn.complete') return `${p.turn.tier} · ${p.turn.intent}`;
         if (type === 'turn.summary') return `${p.tier} · ${p.intent} · ${p.latencyMs}ms${p.interrupted ? ' · interrupted' : ''}`;
         if (type === 'bargein') return p.interruptedTurnId ? `interrupted ${p.interruptedTurnId}` : 'interrupted';
+        if (type === 'tool.use') {
+          const args = p.input ? ` ${JSON.stringify(p.input).slice(0, 60)}` : '';
+          return `${p.name}${args}`;
+        }
+        if (type === 'tool.result') {
+          const status = p.ok ? 'ok' : 'ERR';
+          return `${p.name} ${status} ${p.latencyMs}ms · ${p.preview.slice(0, 60)}`;
+        }
         if (type === 'emotion.directives') return `${p.source}=${p.detected}→${p.effective} ${p.strategy} rate=${p.directives.playbackRate.toFixed(2)}`;
         if (type === 'user.input') return `"${p.text}"${p.emotion ? ` · ${p.emotion.label}` : ''}`;
         return '';
@@ -485,25 +769,21 @@
 
       /* ─────────────────── SDK client + SSE event wiring ─────────────────── */
       const client = new OasisClient({ baseUrl: '' });
-
-      // Track abandoned turns so late-arriving tts.chunk events get dropped
-      // rather than overlapping the NEXT turn's audio.
-      const abandonedTurns = new Set();
-      let currentTurnIdPlaying = null;
-      let agentSpeaking = false;
-      let replyStartedForTurn = new Set();
-      // Turns the server has marked complete. audioPlayer.onEnd only
-      // restarts the mic when the currently-playing turn is in this
-      // set — otherwise brief gaps between sentence chunks would
-      // prematurely resume the mic, let ambient noise trigger a new
-      // /turn, and the arbiter aborts the in-flight reply.
-      const completedTurns = new Set();
+      // Voice orchestration lives in the SDK now — mic/TTS arbitration,
+      // speculation triggers, backchannel, interim-stability, etc.
+      // This file's job is just to wire DOM updates to its events.
+      const voiceSession = new VoiceSession({
+        client,
+        emotion: !/[?&]noemotion=1/.test(location.search),
+        serverStt: /[?&]serverstt=1/.test(location.search),
+      });
 
       client.on('user.input', (p) => {
         addEvent('user.input', p);
         const t = ensureTurn(p.turnId);
         t.transcriptEl.textContent = p.text;
         scheduleScroll(t);
+        if (meetingMode) addMeetingEntry('You', p.text);
       });
 
       client.on('stt.partial', (p) => {
@@ -543,7 +823,9 @@
 
       client.on('tts.chunk', (p) => {
         addEvent('tts.chunk', p);
-        // Text bubble updates for all chunks except the pre-LLM filler.
+        // Text bubble updates only — audio playback is driven by
+        // VoiceSession. When voice is off, fall back to speechSynthesis
+        // for accessibility-style readback of local replies.
         if (!p.filler) {
           const t = ensureTurn(p.turnId);
           t.agentEl.style.display = 'block';
@@ -555,44 +837,28 @@
           } else if (!t.agentEl.textContent.includes(p.text)) {
             // `includes`, not `endsWith`: `route.decision` for a
             // local turn sets the FULL reply in the bubble up front,
-            // then per-sentence `tts.chunk` events arrive with
-            // portions of that reply. Those portions appear earlier
-            // in the existing text (not at the end), so `endsWith`
-            // fails and the portion gets APPENDED — duplicating the
-            // reply. Substring check dedupes that cleanly.
+            // then per-sentence tts.chunk events arrive with portions
+            // of that reply that appear earlier (not at the end),
+            // so endsWith fails and the portion gets APPENDED —
+            // duplicating. Substring check dedupes cleanly.
             t.agentText = (t.agentText ? t.agentText + ' ' : '') + p.text;
             t.agentEl.textContent = t.agentText;
           }
           scheduleScroll(t);
         }
-
-        // Audio playback. In voice mode audioPlayer owns all audio for
-        // the turn — skipping chunks without PCM rather than falling
-        // through to synth, otherwise synth starts speaking a chunk
-        // while audioPlayer is still playing the PREVIOUS chunk and
-        // we get two voices overlapping. Text mode (no voice) still
-        // uses synth as before.
-        if (abandonedTurns.has(p.turnId)) return;
-        if (audioPlayer) {
-          if (!p.audio) return;
-          currentTurnIdPlaying = p.turnId;
-          if (!agentSpeaking) {
-            agentSpeaking = true;
-            if (micPausedForTts === false && voiceOn) {
-              micPausedForTts = true;
-              pauseListen();
-              micBtn.classList.add('speaking');
-              voiceHint.textContent = 'agent speaking — mic paused';
-            }
-          }
-          audioPlayer.playPcm(p.audio, p.sampleRate, { turnId: p.turnId, filler: p.filler === true });
-        } else if (synth && p.text) {
+        if (!voiceSession.isRunning && synth && p.text && !p.audio) {
           speak(p.text, { filler: p.filler === true });
         }
       });
 
       client.on('turn.complete', (p) => {
         addEvent('turn.complete', p);
+        // Agent engaged → not a meeting; cancel the detection timer.
+        // (If the user keeps talking *without* engaging the assistant,
+        // the timer fires and the toast offers to record.)
+        if (p.turn.agentText) disarmMeetingDetection();
+        // Capture agent reply in meeting transcript
+        if (meetingMode && p.turn.agentText) addMeetingEntry('Echo', p.turn.agentText);
         const t = turnsById.get(p.turn.id);
         if (t) {
           if (!t.agentEl.className.match(/reflex|local|escalated/)) {
@@ -616,28 +882,6 @@
             t.agentEl.style.display = 'none';
           }
         }
-        replyStartedForTurn.delete(p.turn.id);
-        abandonedTurns.delete(p.turn.id);
-        audioPlayer?.forgetDirectives(p.turn.id);
-        completedTurns.add(p.turn.id);
-        // Cap growth — only the currently-playing turnId matters, older
-        // ids are dead weight.
-        if (completedTurns.size > 32) {
-          const iter = completedTurns.values();
-          for (let i = 0; i < 16; i++) completedTurns.delete(iter.next().value);
-        }
-        // If the turn's last chunk already finished playing before
-        // turn.complete arrived (unusual but possible), resume mic now.
-        if (currentTurnIdPlaying === p.turn.id) currentTurnIdPlaying = null;
-        if (audioPlayer && audioPlayer.activeCount === 0 && agentSpeaking) {
-          agentSpeaking = false;
-          micBtn.classList.remove('speaking');
-          micPausedForTts = false;
-          if (voiceOn) {
-            voiceHint.textContent = 'listening…';
-            requestListen();
-          }
-        }
       });
 
       client.on('turn.summary', (p) => {
@@ -651,22 +895,10 @@
         refreshState();
       });
 
-      client.on('bargein', (p) => {
-        addEvent('bargein', p);
-        if (p.interruptedTurnId) {
-          abandonedTurns.add(p.interruptedTurnId);
-          // Treat an interrupted turn as "complete" for mic-resume
-          // purposes so any remaining queued chunks that still play
-          // can hand control back to the mic once they drain.
-          completedTurns.add(p.interruptedTurnId);
-        }
-        stopSpeaking();
-      });
-
-      client.on('emotion.directives', (p) => {
-        addEvent('emotion.directives', p);
-        audioPlayer?.setDirectives(p.turnId, p.directives);
-      });
+      client.on('bargein', (p) => addEvent('bargein', p));
+      client.on('tool.use', (p) => addEvent('tool.use', p));
+      client.on('tool.result', (p) => addEvent('tool.result', p));
+      client.on('emotion.directives', (p) => addEvent('emotion.directives', p));
 
       client.on('error', (p) => {
         statusDot.classList.remove('live');
@@ -680,93 +912,9 @@
       statusDot.classList.add('live');
       sessionLabel.textContent = 'live';
 
-      /* ───────────────── Text-input submission ───────────────── */
-      // Speculation id generated fresh per utterance. Passed on every
-      // `sendPartial` + the final `sendTurn` so the server can stitch
-      // pre-computed work to the commit.
-      let speculationId = null;
-      let speculationFiredForBuffer = '';
-      // Interim-stability tracking: when the browser's `interim`
-      // text stops changing for INTERIM_STABLE_MS, treat it as a
-      // good speculation seed and fire sendPartial BEFORE the
-      // browser fires its first `isFinal`. Saves the 300-600ms
-      // between "user stops talking" and "browser emits isFinal",
-      // giving the server that much more time to pre-compute
-      // router + reasoner.
-      let lastInterim = '';
-      let interimStableTimer = null;
-      // Lowered from 400 → 300: each stable-interim plateau fires
-      // speculation 100ms earlier, giving the server's router +
-      // reasoner that much more runway before commit. The trade-off
-      // is slightly more restarts on volatile speech, but the
-      // restart threshold (0.78) tolerates STT tail wiggles cleanly.
-      const INTERIM_STABLE_MS = 300;
-      function clearInterimStability() {
-        if (interimStableTimer) {
-          clearTimeout(interimStableTimer);
-          interimStableTimer = null;
-        }
-        lastInterim = '';
-      }
-
-      // Mid-utterance backchannel ("mm hmm", "uh huh", "right") —
-      // fired ONLY when the user has clearly paused mid-thought, not
-      // after they've actually finished. Triggered from the
-      // interim-stability timer when the tail looks like an
-      // incomplete-thought fragment (conjunction, article, filler
-      // word). Never fires after commit — the agent responds cleanly,
-      // no "let me think" beats.
-      const INCOMPLETE_TAIL =
-        /(?:^|\s)(?:but|and|or|if|because|cause|cuz|so|when|while|as|though|although|yet|plus|like|with|for|to|of|at|what if|even if|only if|in case|what about|how about|the|a|an|my|your|his|her|their|our)\s*$/i;
-      const BACKCHANNEL_COOLDOWN_MS = 4500;
-      let lastBackchannelAt = 0;
-      async function maybeFireBackchannel(tail) {
-        if (!voiceOn || agentSpeaking || micPausedForTts) return;
-        if (!tail || !INCOMPLETE_TAIL.test(tail.trim())) return;
-        const now = performance.now();
-        if (now - lastBackchannelAt < BACKCHANNEL_COOLDOWN_MS) return;
-        lastBackchannelAt = now;
-        try {
-          const res = await fetch('/backchannel').then((r) => r.json());
-          if (!res?.ready || !res.audio || !audioPlayer) return;
-          // Play at 0.8× gain — backchannel should sit under the
-          // user's voice, not compete with it.
-          audioPlayer.playPcm(res.audio, res.sampleRate, {
-            filler: true,
-            gain: 0.8,
-          });
-        } catch (_) { /* non-fatal */ }
-      }
-      function newSpeculationId() {
-        return 'sp-' + Math.random().toString(36).slice(2, 10);
-      }
-
-      async function sendText(text, emotion) {
-        const t = (text ?? input.value ?? '').trim();
-        if (!t) return;
-        input.value = '';
-        turnDebouncer?.cancel(); // flush any stale voice buffer
-        clearInterimStability();
-        const body = emotion ? { text: t, emotion } : { text: t };
-        if (speculationId) body.speculationId = speculationId;
-        speculationId = null;
-        speculationFiredForBuffer = '';
-        await client.sendTurn(body);
-      }
-
-      sendBtn.addEventListener('click', () => sendText());
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') sendText();
-      });
-      bargeBtn.addEventListener('click', () => triggerBargeIn());
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && agentSpeaking) {
-          e.preventDefault();
-          triggerBargeIn();
-        }
-      });
-
-      /* ─────────────── speechSynthesis fallback (used when Kokoro is OFF) ─────────────── */
+      /* ───────────────── speechSynthesis fallback (voice OFF) ─────────────── */
+      // Used only when the user hasn't clicked the mic — purely a
+      // text-mode convenience so local replies are readable aloud.
       const synth = window.speechSynthesis;
       let preferredVoice = null;
       function pickVoice() {
@@ -788,408 +936,331 @@
         u.rate = 1.05;
         u.pitch = 1.0;
         u.volume = opts?.filler ? 0.75 : 1.0;
-        u.onstart = () => {
-          agentSpeaking = true;
-          micBtn.classList.add('speaking');
-          if (voiceOn && !micPausedForTts) {
-            micPausedForTts = true;
-            pauseListen();
-          }
-        };
-        u.onend = () => {
-          if (!synth.speaking) {
-            agentSpeaking = false;
-            micBtn.classList.remove('speaking');
-            setTimeout(() => {
-              if (!synth.speaking) {
-                micPausedForTts = false;
-                if (voiceOn) {
-                  voiceHint.textContent = 'listening…';
-                  requestListen();
-                }
-              }
-            }, 350);
-          }
-        };
         synth.speak(u);
       }
-      function stopSpeaking() {
-        try { synth?.cancel(); } catch (_) {}
-        try { audioPlayer?.stopAll(); } catch (_) {}
-        agentSpeaking = false;
-        micBtn.classList.remove('speaking');
-        if (voiceOn) {
-          micPausedForTts = false;
-          voiceHint.textContent = 'listening…';
-          requestListen();
+
+      /* ───────────────── VoiceSession: event → DOM wiring ─────────────── */
+      voiceSession.on('hint', (p) => {
+        voiceHint.textContent = p.text;
+        voiceHint.classList.toggle('warn', p.warn === true);
+      });
+      voiceSession.on('speakingChange', (speaking) => {
+        micBtn.classList.toggle('speaking', speaking);
+      });
+      voiceSession.on('error', (p) => {
+        if (p.kind === 'mic') {
+          voiceHint.textContent = 'mic error: ' + p.message;
+          voiceHint.classList.add('warn');
+        } else if (p.kind === 'recognition') {
+          voiceHint.textContent = 'mic error: ' + p.message;
+          voiceHint.classList.add('warn');
+        } else if (p.kind === 'server-stt') {
+          console.warn('[voice] audioStream error — falling back to browser STT', p.message);
         }
+      });
+      voiceSession.on('started', () => {
+        micBtn.classList.add('on');
+        micLabel.textContent = 'Listening';
+        voiceHint.classList.remove('warn');
+        detectShownThisSession = false;
+        armMeetingDetection();
+      });
+      voiceSession.on('stopped', () => {
+        micBtn.classList.remove('on', 'speaking');
+        micLabel.textContent = 'Voice';
+        disarmMeetingDetection();
+      });
+
+      /* ───────────────── Text-input submission ───────────────── */
+      async function submitTypedInput() {
+        const t = input.value.trim();
+        if (!t) return;
+        input.value = '';
+        await voiceSession.sendText(t);
       }
+      sendBtn.addEventListener('click', submitTypedInput);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitTypedInput();
+      });
+      bargeBtn.addEventListener('click', () => voiceSession.bargeIn());
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && voiceSession.isAgentSpeaking) {
+          e.preventDefault();
+          voiceSession.bargeIn();
+        }
+      });
 
-      /* ─────────────── Voice stack (SDK-driven) ─────────────── */
-      // Kill-switch for emotion detection.
-      const EMOTION_ENABLED = !/[?&]noemotion=1/.test(location.search);
-
-      let voiceOn = false;
-      let shouldListen = false;
-      let micPausedForTts = false;
-      let recognition = null;
-      let audioCtx = null;
-      let micStream = null;
-      let audioPlayer = null;
-      let micCapture = null;
-      let emotionDetector = null;
-      let bargeInMonitor = null;
-      let turnDebouncer = null;
-      let pendingEmotionResult = null;
-      // Server-side streaming STT over WebSocket. When connected, it
-      // replaces the browser SpeechRecognition as the source-of-truth
-      // transcript and drives speculation from server-side partials
-      // instead of the client debouncer.
-      let audioStream = null;
-      let audioStreamReady = false;
-      let serverPartialBuffer = '';
-
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) {
+      if (!VoiceSession.isSupported()) {
         micBtn.disabled = true;
         voiceHint.textContent = 'Voice requires Chrome or Safari';
         voiceHint.classList.add('warn');
       } else {
         micBtn.addEventListener('click', () => {
-          voiceOn ? stopVoice() : startVoice();
+          if (voiceSession.isRunning) voiceSession.stop();
+          else voiceSession.start();
         });
       }
 
-      function requestListen() {
-        shouldListen = true;
-        if (!recognition) return;
-        try { recognition.start(); } catch (_) {}
-      }
-      function pauseListen() {
-        shouldListen = false;
-        if (!recognition) return;
-        try { recognition.stop(); } catch (_) {}
-      }
+      /* ══════════════════════ Meeting Notes ══════════════════════ */
 
-      function triggerBargeIn() {
-        if (currentTurnIdPlaying) abandonedTurns.add(currentTurnIdPlaying);
-        stopSpeaking();
-        // Forward any in-flight speculationId so the server can drop
-        // the pre-computation for the abandoned turn instead of
-        // keeping it sitting around waiting for a commit that won't come.
-        const abortedSpec = speculationId;
-        speculationId = null;
-        speculationFiredForBuffer = '';
-        serverPartialBuffer = '';
-        clearInterimStability();
-        // Tell the audio-stream WebSocket to flush server-side STT
-        // state too; otherwise the abandoned utterance's PCM keeps
-        // accumulating in the Whisper buffer and pollutes the next turn.
-        audioStream?.abortUtterance();
-        fetch('/bargein', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(abortedSpec ? { speculationId: abortedSpec } : {}),
-        }).catch(() => {});
-        voiceHint.textContent = 'interrupted — listening…';
-        micPausedForTts = false;
-        if (voiceOn) requestListen();
+      let meetingMode = false;
+      let meetingStartMs = 0;
+      let meetingTranscript = []; // { elapsedSec, speaker, text }
+      let meetingTimerInterval = null;
+      let detectArmTimer = null;   // fires after sustained mic-on with no agent reply
+      let detectShownThisSession = false;
+      const DETECT_ARM_MS = 20_000;
+      let toastTimer = null;
+      let toastCountdown = 8;
+      let currentSideView = 'default';
+
+      function armMeetingDetection() {
+        if (detectShownThisSession || meetingMode) return;
+        if (detectArmTimer) clearTimeout(detectArmTimer);
+        detectArmTimer = setTimeout(() => {
+          detectArmTimer = null;
+          if (!meetingMode && voiceSession.isRunning) {
+            detectShownThisSession = true;
+            showMeetingToast();
+          }
+        }, DETECT_ARM_MS);
+      }
+      function disarmMeetingDetection() {
+        if (detectArmTimer) { clearTimeout(detectArmTimer); detectArmTimer = null; }
       }
 
-      async function startVoice() {
-        if (voiceOn) return;
-        voiceOn = true;
-        try {
-          micStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
-        } catch (err) {
-          voiceOn = false;
-          voiceHint.textContent = 'mic error: ' + err.name;
-          voiceHint.classList.add('warn');
-          return;
-        }
+      const meetingToast    = document.getElementById('meeting-toast');
+      const toastRecordBtn  = document.getElementById('toast-record-btn');
+      const toastDismissBtn = document.getElementById('toast-dismiss-btn');
+      const toastRing       = document.getElementById('toast-ring');
+      const meetingBar      = document.getElementById('meeting-bar');
+      const meetingTimerEl  = document.getElementById('meeting-timer');
+      const meetingEndBtn   = document.getElementById('meeting-end-btn');
+      const meetingNotesTgl = document.getElementById('meeting-notes-toggle');
+      const sideDefault     = document.getElementById('side-default');
+      const sideMeeting     = document.getElementById('side-meeting');
+      const sideNotesView   = document.getElementById('side-notes');
+      const sideHistory     = document.getElementById('side-history');
+      const meetingFeed     = document.getElementById('meeting-transcript-feed');
+      const meetingEmpty    = document.getElementById('meeting-transcript-empty');
+      const meetingNotesIn  = document.getElementById('meeting-notes-input');
+      const meetingNotesOut = document.getElementById('meeting-notes-display');
+      const notesGenerating = document.getElementById('notes-generating');
 
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const source = audioCtx.createMediaStreamSource(micStream);
+      function fmtSec(sec) {
+        return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      }
 
-        audioPlayer = new AudioPlayer({
-          audioContext: audioCtx,
-          onEnd: () => {
-            // Only resume mic if the SERVER has already marked this
-            // turn complete — otherwise a brief gap between sentence
-            // chunks (Kokoro synth pause) would restart mic capture,
-            // ambient audio could trigger recognition.onresult, and
-            // the turn-debouncer would fire a second /turn that
-            // aborts the in-flight reply via the arbiter.
-            const finishedTurnId = currentTurnIdPlaying;
-            if (!finishedTurnId || !completedTurns.has(finishedTurnId)) return;
-            agentSpeaking = false;
-            micBtn.classList.remove('speaking');
-            setTimeout(() => {
-              if (audioPlayer && audioPlayer.activeCount === 0) {
-                micPausedForTts = false;
-                if (voiceOn) {
-                  voiceHint.textContent = 'listening…';
-                  requestListen();
-                }
-              }
-            }, 350);
-          },
-        });
+      function switchSideView(view) {
+        currentSideView = view;
+        sideDefault.style.display   = view === 'default'  ? '' : 'none';
+        sideMeeting.style.display   = view === 'meeting'  ? 'flex' : 'none';
+        sideNotesView.style.display = view === 'notes'    ? 'flex' : 'none';
+        sideHistory.style.display   = view === 'history'  ? 'flex' : 'none';
+        meetingNotesTgl.textContent = view === 'meeting'  ? 'Hide' : 'Notes';
+      }
 
-        micCapture = new MicCapture();
-        try {
-          await micCapture.start({ audioContext: audioCtx, source });
-        } catch (err) {
-          console.warn('[voice] MicCapture failed:', err);
-          micCapture = null;
-        }
+      function switchMeetingTab(tab) {
+        document.querySelectorAll('.meeting-tab').forEach((el) =>
+          el.classList.toggle('active', el.dataset.tab === tab));
+        document.querySelectorAll('.meeting-tab-content').forEach((el) =>
+          el.classList.remove('active'));
+        const panel = document.getElementById(`mtab-${tab}`);
+        if (panel) panel.classList.add('active');
+      }
 
-        // Server-side streaming STT over WebSocket is OFF by default —
-        // browser SpeechRecognition (Google's engine in Chrome) is
-        // faster, more accurate, and already on the client's critical
-        // path via `recognition.onresult`. Opt in with `?serverstt=1`
-        // if you want to experiment with the Whisper path.
-        if (/[?&]serverstt=1/.test(location.search)) {
-          audioStream = new AudioStreamUpload({ audioContext: audioCtx, source });
-          audioStream.on('partial', (text) => {
-            serverPartialBuffer = text;
-            input.value = text;
-            voiceHint.textContent = 'listening…';
-          });
-          audioStream.on('final', (payload) => {
-            const t = (payload.text ?? '').trim();
-            if (!t) return;
-            const commitSpecId = payload.speculationId ?? speculationId ?? null;
-            speculationId = null;
-            speculationFiredForBuffer = '';
-            serverPartialBuffer = '';
-            input.value = t;
-            const body = { text: t };
-            if (commitSpecId) body.speculationId = commitSpecId;
-            client.sendTurn(body).catch(() => {});
-          });
-          audioStream.on('error', (err) => {
-            console.warn('[voice] audioStream error — falling back to browser STT', err);
-            audioStreamReady = false;
-          });
-          audioStream.on('close', () => {
-            audioStreamReady = false;
-          });
-          try {
-            await audioStream.connect();
-            audioStreamReady = true;
-          } catch (err) {
-            console.warn('[voice] WebSocket /audio connect failed, falling back:', err);
-            audioStream = null;
-            audioStreamReady = false;
+      function showMeetingToast() {
+        toastCountdown = 8;
+        toastRing.textContent = toastCountdown;
+        toastRing.classList.remove('urgent');
+        meetingToast.classList.add('visible');
+        if (toastTimer) clearInterval(toastTimer);
+        toastTimer = setInterval(() => {
+          toastCountdown--;
+          toastRing.textContent = toastCountdown;
+          if (toastCountdown <= 3) toastRing.classList.add('urgent');
+          if (toastCountdown <= 0) dismissMeetingToast();
+        }, 1000);
+      }
+
+      function dismissMeetingToast() {
+        if (toastTimer) { clearInterval(toastTimer); toastTimer = null; }
+        meetingToast.classList.remove('visible');
+      }
+
+      function startMeeting() {
+        dismissMeetingToast();
+        meetingMode = true;
+        meetingStartMs = Date.now();
+        meetingTranscript = [];
+        meetingNotesIn.value = '';
+        meetingFeed.innerHTML = '';
+        meetingFeed.appendChild(meetingEmpty);
+        meetingEmpty.style.display = 'block';
+        meetingBar.style.display = 'flex';
+        meetingTimerEl.textContent = '0:00';
+        const hdr = document.getElementById('header-record-btn');
+        hdr.textContent = '⏹ Stop';
+        hdr.style.color = '#ff3b30';
+        hdr.style.borderColor = 'rgba(255,59,48,0.4)';
+        switchSideView('meeting');
+        switchMeetingTab('transcript');
+        if (meetingTimerInterval) clearInterval(meetingTimerInterval);
+        meetingTimerInterval = setInterval(() => {
+          meetingTimerEl.textContent = fmtSec(Math.round((Date.now() - meetingStartMs) / 1000));
+        }, 1000);
+      }
+
+      function addMeetingEntry(speaker, text) {
+        if (!text || !text.trim()) return;
+        const elapsedSec = Math.round((Date.now() - meetingStartMs) / 1000);
+        meetingTranscript.push({ elapsedSec, speaker, text: text.trim() });
+        meetingEmpty.style.display = 'none';
+        const entry = document.createElement('div');
+        entry.className = `meeting-entry ${speaker === 'You' ? 'you' : 'echo'}`;
+        entry.innerHTML =
+          `<span class="ts">${fmtSec(elapsedSec)}</span>` +
+          `<span class="speaker">${escape(speaker)}</span>` +
+          `<span class="text">${escape(text.trim())}</span>`;
+        meetingFeed.appendChild(entry);
+        meetingFeed.scrollTop = meetingFeed.scrollHeight;
+      }
+
+      function renderMeetingNotes(markdown) {
+        const lines = markdown.split('\n');
+        let html = '';
+        let inList = false;
+        for (const raw of lines) {
+          const line = raw.trimEnd();
+          if (line.startsWith('## ')) {
+            if (inList) { html += '</ul>'; inList = false; }
+            html += `<h2>${escape(line.slice(3))}</h2>`;
+          } else if (/^- \[[ x]\]/.test(line)) {
+            if (!inList) { html += '<ul>'; inList = true; }
+            const checked = line[3] === 'x';
+            html += `<li><input type="checkbox"${checked ? ' checked' : ''}> ${escape(line.slice(6))}</li>`;
+          } else if (line.startsWith('- ')) {
+            if (!inList) { html += '<ul>'; inList = true; }
+            html += `<li>${escape(line.slice(2))}</li>`;
+          } else if (line.trim() === '') {
+            if (inList) { html += '</ul>'; inList = false; }
+          } else {
+            if (inList) { html += '</ul>'; inList = false; }
+            html += `<p>${escape(line)}</p>`;
           }
         }
+        if (inList) html += '</ul>';
+        return html;
+      }
 
-        if (EMOTION_ENABLED) {
-          emotionDetector = new EmotionDetector();
-          emotionDetector.preload().catch(() => {});
+      async function endMeeting() {
+        if (!meetingMode) return;
+        meetingMode = false;
+        if (meetingTimerInterval) { clearInterval(meetingTimerInterval); meetingTimerInterval = null; }
+        meetingBar.style.display = 'none';
+        meetingDetectCount = 0;
+        const hdr = document.getElementById('header-record-btn');
+        hdr.textContent = '⏺ Record';
+        hdr.style.color = '';
+        hdr.style.borderColor = '';
+        const transcript = [...meetingTranscript];
+        const userNotes = meetingNotesIn.value.trim();
+        const startedAt = meetingStartMs;
+        switchSideView('notes');
+        meetingNotesOut.innerHTML = '';
+        notesGenerating.style.display = 'flex';
+        try {
+          const res = await fetch('/meeting/notes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transcript, userNotes, startedAt }),
+          });
+          const data = await res.json();
+          notesGenerating.style.display = 'none';
+          meetingNotesOut.innerHTML = renderMeetingNotes(data.notes ?? '');
+        } catch {
+          notesGenerating.style.display = 'none';
+          meetingNotesOut.innerHTML = '<p style="color:var(--muted)">Failed to generate notes.</p>';
         }
+      }
 
-        bargeInMonitor = new BargeInMonitor({
-          isActive: () => agentSpeaking,
-          onBargeIn: triggerBargeIn,
-        });
-        bargeInMonitor.start(source);
-
-        turnDebouncer = new TurnDebouncer({
-          silenceMs: 1200,
-          onCommit: async (text) => {
-            // Classify the last ~5s of mic audio. Pre-fetched during
-            // scheduling, so the wait here is usually ~0ms.
-            let emotion = null;
-            try {
-              const detected = await (pendingEmotionResult ??
-                Promise.resolve(null));
-              pendingEmotionResult = null;
-              if (detected) {
-                emotion = { label: detected.label, confidence: detected.confidence };
-                voiceHint.textContent =
-                  'sent · ' + detected.label.toLowerCase() +
-                  ' ' + Math.round(detected.confidence * 100) + '%';
-              }
-            } catch (_) {}
-            input.value = text;
-            await sendText(text, emotion);
-          },
-          onStateChange: (s) => {
-            if (s.kind === 'listening') {
-              input.value = s.preview;
-              voiceHint.textContent = 'listening…';
-              // User is speaking more — any in-flight speculation on
-              // the previous buffer is now potentially stale. Next
-              // 'pausing' will decide whether to re-speculate.
-              return;
-            }
-            if (s.kind === 'pausing') {
-              input.value = s.buffer;
-              voiceHint.textContent = 'pausing…';
-              // Kick off server-side speculation on this stable partial
-              // so by the time the commit timer fires, router + reasoner
-              // are already warming up. Only fire ONCE per distinct
-              // buffer so we don't hammer the server on rapid transitions.
-              if (s.buffer && s.buffer !== speculationFiredForBuffer && s.buffer.split(/\s+/).length >= 3) {
-                speculationFiredForBuffer = s.buffer;
-                if (!speculationId) speculationId = newSpeculationId();
-                client.sendPartial({ speculationId, text: s.buffer }).catch(() => {});
-              }
-            }
-          },
-        });
-
-        recognition = new SR();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = navigator.language || 'en-US';
-        recognition.maxAlternatives = 4;
-        recognition.onresult = (ev) => {
-          if (micPausedForTts || agentSpeaking) return;
-          let interim = '';
-          let finalText = '';
-          let finalConf = 1;
-          for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const r = ev.results[i];
-            if (r.isFinal) {
-              let best = r[0];
-              for (let j = 1; j < r.length; j++) {
-                if ((r[j].confidence || 0) > (best.confidence || 0)) best = r[j];
-              }
-              finalText += best.transcript;
-              finalConf = Math.min(finalConf, best.confidence || 0);
-            } else {
-              interim += r[0].transcript;
-            }
-          }
-
-          // Server-STT path: browser recognition drives VAD only
-          // (when did the user start + stop). We use the server's
-          // streaming Whisper as the authoritative transcript, so we
-          // do NOT funnel text into the client debouncer.
-          if (audioStreamReady && audioStream) {
-            if ((interim.trim() || finalText.trim()) && !speculationId) {
-              speculationId = newSpeculationId();
-              audioStream.startUtterance(speculationId);
-            }
-            if (finalText.trim()) {
-              // Browser thinks the utterance is over — trigger the
-              // server's final transcription. Server will reply via
-              // the 'final' handler which commits the turn.
-              audioStream.endUtterance();
-            }
+      async function loadMeetingHistory() {
+        switchSideView('history');
+        const listEl = document.getElementById('meeting-history-list');
+        listEl.innerHTML = '<div class="meeting-history-empty">Loading…</div>';
+        try {
+          const data = await fetch('/meetings').then((r) => r.json());
+          if (!data.meetings || data.meetings.length === 0) {
+            listEl.innerHTML = '<div class="meeting-history-empty">No past meetings yet.</div>';
             return;
           }
-
-          // Fallback path (no WebSocket): original browser-STT +
-          // debouncer flow, preserved for graceful degradation when
-          // the /audio endpoint is unreachable.
-          if (interim.trim()) {
-            turnDebouncer.onInterim(interim);
-            // Two separate triggers:
-            //   1. sendPartial — fires on EVERY interim change (≥3
-            //      words, deduped). No stability wait. Server's
-            //      `speculation.update` has a prefix-extension
-            //      short-circuit so 30 interim updates on one
-            //      continuously-spoken sentence only cost ONE
-            //      reasoner run — and that reasoner gets the full
-            //      duration of the utterance to pre-compute.
-            //   2. backchannel — fires on the stability timer
-            //      (`INTERIM_STABLE_MS` of no change) when the tail
-            //      looks mid-thought. That's the "user paused mid-
-            //      utterance" signal.
-            if (interim !== lastInterim) {
-              lastInterim = interim;
-              const trimmed = interim.trim();
-              if (trimmed.split(/\s+/).length >= 3 && trimmed !== speculationFiredForBuffer) {
-                speculationFiredForBuffer = trimmed;
-                if (!speculationId) speculationId = newSpeculationId();
-                client.sendPartial({ speculationId, text: trimmed }).catch(() => {});
-              }
-              // Restart the stability timer — used ONLY for
-              // mid-utterance backchannel acknowledgements.
-              if (interimStableTimer) clearTimeout(interimStableTimer);
-              interimStableTimer = setTimeout(() => {
-                interimStableTimer = null;
-                const stable = lastInterim.trim();
-                if (!stable || stable.split(/\s+/).length < 3) return;
-                maybeFireBackchannel(stable);
-              }, INTERIM_STABLE_MS);
-            }
+          listEl.innerHTML = '';
+          for (const m of data.meetings) {
+            const d = new Date(m.startedAt);
+            const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+            const timeStr = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+            const item = document.createElement('div');
+            item.className = 'meeting-history-item';
+            item.innerHTML =
+              `<div class="meeting-history-title">${dateStr} at ${timeStr}</div>` +
+              `<div class="meeting-history-meta">${fmtSec(m.durationSec)} duration</div>`;
+            item.addEventListener('click', async () => {
+              try {
+                const detail = await fetch(`/meeting/${m.id}`).then((r) => r.json());
+                notesGenerating.style.display = 'none';
+                meetingNotesOut.innerHTML = renderMeetingNotes(detail.notes ?? '');
+                switchSideView('notes');
+              } catch { /* ignore */ }
+            });
+            listEl.appendChild(item);
           }
-          if (finalText.trim()) {
-            // A final segment landed — the next onresult may start a
-            // fresh interim, so kill any pending stable-interim timer
-            // so it doesn't fire with stale text from the just-ended
-            // segment.
-            clearInterimStability();
-            turnDebouncer.onFinal(finalText);
-            if (finalConf > 0 && finalConf < 0.55) voiceHint.classList.add('warn');
-            else voiceHint.classList.remove('warn');
-            if (EMOTION_ENABLED && emotionDetector && micCapture) {
-              const pcm = micCapture.snapshot(5);
-              if (pcm) {
-                pendingEmotionResult = emotionDetector
-                  .classify(pcm, micCapture.sampleRate, { timeoutMs: 1500 })
-                  .catch(() => null);
-              }
-            }
-          }
-        };
-        recognition.onerror = (ev) => {
-          voiceHint.textContent = 'mic error: ' + ev.error;
-          voiceHint.classList.add('warn');
-        };
-        recognition.onend = () => {
-          if (voiceOn && shouldListen) {
-            try { recognition.start(); } catch (_) {}
-          }
-        };
-
-        requestListen();
-        micBtn.classList.add('on');
-        micLabel.textContent = 'Listening';
-        voiceHint.classList.remove('warn');
-        voiceHint.textContent = 'say hello…';
+        } catch {
+          listEl.innerHTML = '<div class="meeting-history-empty">Failed to load history.</div>';
+        }
       }
 
-      function stopVoice() {
-        voiceOn = false;
-        shouldListen = false;
-        turnDebouncer?.cancel();
-        turnDebouncer = null;
-        clearInterimStability();
-        speculationId = null;
-        speculationFiredForBuffer = '';
-        try { recognition?.stop(); } catch (_) {}
-        recognition = null;
-        bargeInMonitor?.stop();
-        bargeInMonitor = null;
-        micCapture?.stop();
-        micCapture = null;
-        emotionDetector = null;
-        audioPlayer?.stopAll();
-        audioPlayer = null;
-        audioStream?.close();
-        audioStream = null;
-        audioStreamReady = false;
-        try { micStream?.getTracks().forEach((t) => t.stop()); } catch (_) {}
-        micStream = null;
-        try { audioCtx?.close(); } catch (_) {}
-        audioCtx = null;
-        micBtn.classList.remove('on', 'speaking');
-        micLabel.textContent = 'Voice';
-        voiceHint.textContent = '';
-        stopSpeaking();
+      /* ── Header record button ── */
+      document.getElementById('header-record-btn').addEventListener('click', () => {
+        if (meetingMode) endMeeting();
+        else startMeeting();
+      });
+
+      /* ── Deep-link via URL hash (used by Mac menu-bar app) ── */
+      function applyHashDeepLink() {
+        const h = location.hash.slice(1);
+        if (!h) return;
+        if (h === 'meetings') loadMeetingHistory();
+        else if (h === 'meeting=record' && !meetingMode) startMeeting();
       }
+      applyHashDeepLink();
+      window.addEventListener('hashchange', applyHashDeepLink);
+
+      /* ── Toast buttons ── */
+      toastRecordBtn.addEventListener('click', () => startMeeting());
+      toastDismissBtn.addEventListener('click', () => dismissMeetingToast());
+
+      /* ── Meeting bar buttons ── */
+      meetingEndBtn.addEventListener('click', () => endMeeting());
+      meetingNotesTgl.addEventListener('click', () => {
+        switchSideView(currentSideView === 'meeting' ? 'default' : 'meeting');
+      });
+
+      /* ── Meeting tab switching ── */
+      document.querySelectorAll('.meeting-tab').forEach((tab) =>
+        tab.addEventListener('click', () => switchMeetingTab(tab.dataset.tab)));
+
+      /* ── Notes view buttons ── */
+      document.getElementById('notes-copy-btn').addEventListener('click', () => {
+        navigator.clipboard.writeText(meetingNotesOut.innerText).catch(() => {});
+      });
+      document.getElementById('notes-new-meeting-btn').addEventListener('click', () => {
+        meetingDetectCount = 0;
+        switchSideView('default');
+      });
+      document.getElementById('notes-history-btn').addEventListener('click', loadMeetingHistory);
+      document.getElementById('history-back-btn').addEventListener('click', () => {
+        switchSideView(meetingMode ? 'meeting' : currentSideView === 'history' ? 'notes' : 'default');
+      });
     </script>
   </body>
 </html>

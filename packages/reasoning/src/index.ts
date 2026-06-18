@@ -1,6 +1,7 @@
 export * from './redaction.js';
 export * from './circuit-breaker.js';
 export * from './tools.js';
+export * from './mcp-registry.js';
 export * from './anthropic-client.js';
 export * from './ollama-client.js';
 export * from './openai-client.js';

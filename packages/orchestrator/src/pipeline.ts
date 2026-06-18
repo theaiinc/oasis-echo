@@ -230,14 +230,48 @@ export class Pipeline {
         drainDone = true;
       })();
 
-      // NB: we deliberately DO NOT play a thinking filler here, even
-      // if the reasoner is still mid-stream at commit time. Fillers
-      // AFTER commit feel artificial to the user — the speedup should
-      // come from speculation landing ahead of commit, not from
-      // bridging silence with "Let me think…" beats. The `escalate()`
-      // miss-path still plays fillers because that path is running
-      // the reasoner from scratch and needs to fill the >3s wait.
-      //
+      // Previously we skipped fillers here unconditionally, but that
+      // left the user in dead silence when the speculation buffer was
+      // empty at commit time — typically when the reasoner was
+      // mid-tool-call and hadn't produced round-2 tokens yet. Race
+      // first-sentence vs a short threshold; if the queue is still
+      // empty, play short chained fillers until a sentence lands.
+      const FILLER_THRESHOLD_MS = 500;
+      await Promise.race([
+        (async () => {
+          while (sentenceQueue.length === 0 && !signal.aborted && !drainDone) {
+            await sleep(20);
+          }
+        })(),
+        sleep(FILLER_THRESHOLD_MS),
+      ]);
+
+      if (sentenceQueue.length === 0 && !drainDone && !signal.aborted) {
+        const recentSet = new Set(this.recentFillers);
+        const { fillerSpeed, maxFillers } = this.fillerStrategy();
+        const usedFillers = new Set<string>();
+        let fillersPlayed = 0;
+        while (
+          sentenceQueue.length === 0 &&
+          !drainDone &&
+          !signal.aborted &&
+          fillersPlayed < maxFillers
+        ) {
+          const filler = fillersPlayed === 0
+            ? pickFirstFiller(recentSet)
+            : pickContinuationFiller('thinking', usedFillers, recentSet);
+          usedFillers.add(filler);
+          this.trackRecentFiller(filler);
+          const trailingSilenceMs = 300 + fillersPlayed * 250;
+          await this.streamTts(turnId, filler, signal, {
+            filler: true,
+            speed: fillerSpeed,
+            trailingSilenceMs,
+          });
+          fillersPlayed++;
+        }
+      }
+
       // Drain the queue; play each sentence as soon as it's available.
       while (!signal.aborted) {
         if (sentenceQueue.length > 0) {
@@ -369,6 +403,11 @@ export class Pipeline {
       let streamDone = false;
       let fullText = '';
 
+      // Track outstanding tool calls so the result event can report
+      // accurate latency and name even when the reasoner multiplexes
+      // several calls inside a single turn.
+      const toolInflight = new Map<string, { name: string; startedAtMs: number }>();
+
       const tokensPromise = (async () => {
         try {
           for await (const ev of this.reasoner.stream({
@@ -385,6 +424,32 @@ export class Pipeline {
               fullText += ev.text;
               await this.bus.emit({ type: 'llm.token', turnId, token: ev.text, atMs: Date.now() });
               for (const sentence of chunker.feed(ev.text)) sentenceQueue.push(sentence);
+            } else if (ev.type === 'tool_use') {
+              toolInflight.set(ev.id, { name: ev.name, startedAtMs: Date.now() });
+              await this.bus.emit({
+                type: 'tool.use',
+                turnId,
+                toolCallId: ev.id,
+                name: ev.name,
+                input: ev.input,
+                atMs: Date.now(),
+              });
+              this.metrics?.inc('tool_calls_total', { name: ev.name });
+            } else if (ev.type === 'tool_result') {
+              const entry = toolInflight.get(ev.id);
+              toolInflight.delete(ev.id);
+              const isErr = !!(ev.output && typeof ev.output === 'object'
+                && 'error' in (ev.output as Record<string, unknown>));
+              await this.bus.emit({
+                type: 'tool.result',
+                turnId,
+                toolCallId: ev.id,
+                name: entry?.name ?? 'tool',
+                ok: !isErr,
+                preview: previewOutput(ev.output),
+                latencyMs: Date.now() - (entry?.startedAtMs ?? Date.now()),
+                atMs: Date.now(),
+              });
             } else if (ev.type === 'done') {
               const rest = chunker.flush();
               if (rest && rest.trim().length > 0) sentenceQueue.push(rest);
@@ -398,6 +463,7 @@ export class Pipeline {
         }
         streamDone = true;
       })();
+
 
       // Race first-SENTENCE vs the filler threshold. We need a full
       // sentence to start synthesizing the reply, not just the first
@@ -610,6 +676,23 @@ export class Pipeline {
         this.recentFillers.shift();
       }
     }
+  }
+}
+
+/**
+ * Collapse a tool result to a short human-readable preview. The UI
+ * surfaces this in the event stream; pipeline logs pick it up too.
+ * Never exceeds 180 chars so noisy HTML-scraped bodies don't blow out
+ * log lines.
+ */
+function previewOutput(out: unknown): string {
+  if (out == null) return '';
+  if (typeof out === 'string') return out.replace(/\s+/g, ' ').slice(0, 180);
+  try {
+    const s = JSON.stringify(out);
+    return s.replace(/\s+/g, ' ').slice(0, 180);
+  } catch {
+    return String(out).slice(0, 180);
   }
 }
 

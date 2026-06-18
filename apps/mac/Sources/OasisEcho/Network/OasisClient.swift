@@ -12,6 +12,10 @@ actor OasisClient {
     private var baseURL: URL
     private let sse = SSEClient()
     private var session: URLSession
+    // Separate session for long-running operations (meeting note
+    // generation can take 30s+ when the reasoner streams a full
+    // markdown document end-to-end).
+    private var longSession: URLSession
 
     init(baseURL: URL) {
         self.baseURL = baseURL
@@ -19,6 +23,11 @@ actor OasisClient {
         c.timeoutIntervalForRequest = 20
         c.waitsForConnectivity = false
         self.session = URLSession(configuration: c)
+        let lc = URLSessionConfiguration.default
+        lc.timeoutIntervalForRequest = 120
+        lc.timeoutIntervalForResource = 180
+        lc.waitsForConnectivity = false
+        self.longSession = URLSession(configuration: lc)
     }
 
     func updateBase(_ url: URL) { self.baseURL = url }
@@ -77,6 +86,48 @@ actor OasisClient {
             guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             return try? JSONDecoder().decode(BackchannelClip.self, from: data)
         } catch { return nil }
+    }
+
+    // MARK: - Meeting notes
+
+    func generateMeetingNotes(
+        transcript: [MeetingSegment],
+        userNotes: String,
+        startedAt: Int64
+    ) async throws -> MeetingNotesResponse {
+        var req = URLRequest(url: baseURL.appending(path: "/meeting/notes"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 120
+        req.httpBody = try JSONEncoder().encode(MeetingNotesRequestBody(
+            transcript: transcript,
+            userNotes: userNotes,
+            startedAt: startedAt
+        ))
+        let (data, resp) = try await longSession.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw ServerError(status: 0, body: "no response")
+        }
+        if http.statusCode != 200 {
+            throw ServerError(status: http.statusCode, body: String(data: data, encoding: .utf8) ?? "")
+        }
+        return try JSONDecoder().decode(MeetingNotesResponse.self, from: data)
+    }
+
+    func listMeetings() async throws -> [MeetingListItem] {
+        let (data, resp) = try await session.data(from: baseURL.appending(path: "/meetings"))
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw ServerError(status: (resp as? HTTPURLResponse)?.statusCode ?? 0, body: "")
+        }
+        return try JSONDecoder().decode(MeetingListResponse.self, from: data).meetings
+    }
+
+    func getMeeting(id: String) async throws -> MeetingDetail {
+        let (data, resp) = try await session.data(from: baseURL.appending(path: "/meeting/\(id)"))
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw ServerError(status: (resp as? HTTPURLResponse)?.statusCode ?? 0, body: "")
+        }
+        return try JSONDecoder().decode(MeetingDetail.self, from: data)
     }
 
     func learnCorrection(original: String, corrected: String) async throws {

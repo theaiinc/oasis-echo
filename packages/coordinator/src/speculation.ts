@@ -85,6 +85,15 @@ export type SpeculationManagerOpts = {
 
 type Buffer = {
   partial: string;
+  /**
+   * The partial as it looked when the router decision was made —
+   * captured once and never updated. The prefix-extension fast path
+   * keeps the same router verdict even as `partial` grows, so the
+   * commit-time length-divergence guard needs this reference point
+   * (not the latest partial) to detect "router saw 3 words but the
+   * user ended up saying 20".
+   */
+  routedPartial: string;
   routerPromise: Promise<RouterOutput>;
   reasonerPromise: Promise<string> | null;
   abort: AbortController;
@@ -151,6 +160,7 @@ export class SpeculationManager {
     }
     const buf: Buffer = {
       partial: trimmed,
+      routedPartial: trimmed,
       // Placeholder; replaced immediately below.
       routerPromise: Promise.resolve({} as RouterOutput),
       reasonerPromise: null,
@@ -201,6 +211,12 @@ export class SpeculationManager {
         userText: buf.partial,
         state: this.getState(),
         signal: buf.abort.signal,
+        // Tools fire on committed turns, not speculation. Running
+        // web_search on partial STT ("I'm checking the we…") would
+        // pay a DuckDuckGo hit with the wrong query and cache a
+        // hallucinated answer that the commit similarity check would
+        // then happily promote.
+        allowTools: false,
       })) {
         if (buf.abort.signal.aborted) break;
         if (ev.type === 'token') {
@@ -276,6 +292,30 @@ export class SpeculationManager {
       return { kind: 'miss', reason: 'diverged' };
     }
 
+    // Length-divergence guard against a stale router decision.
+    // The router ran ONCE on `routedPartial`; prefix-extension keeps
+    // extending `partial` without re-routing. So even if the latest
+    // `partial` is close to `finalText` (similarity passes), the
+    // cached router verdict may have been made on a much shorter
+    // fragment that classified as smalltalk.
+    //
+    // Compare the partial-at-route-time to the final text; if the
+    // router saw less than half the content, bail out and let
+    // `handleTurn` re-route with full context.
+    const routedWords = countWords(buf.routedPartial);
+    const finalWords = countWords(finalText);
+    if (finalWords >= 6 && routedWords < finalWords * 0.55) {
+      buf.abort.abort();
+      this.logger?.info('speculation commit miss (routed-partial too short)', {
+        id,
+        routedWords,
+        finalWords,
+        routedPartial: buf.routedPartial,
+        finalText,
+      });
+      return { kind: 'miss', reason: 'diverged' };
+    }
+
     this.logger?.info('speculation commit hit', {
       id,
       similarity: Number(sim.toFixed(2)),
@@ -340,6 +380,10 @@ export class SpeculationManager {
 
 function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function countWords(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
 }
 
 /** Lightweight sentence splitter used for the local-reply case where

@@ -12,3 +12,4 @@ export * from './mic-capture.js';
 export * from './emotion-detector.js';
 export * from './barge-in-monitor.js';
 export * from './audio-stream.js';
+export * from './voice-session.js';

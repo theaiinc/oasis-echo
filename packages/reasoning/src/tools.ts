@@ -1,7 +1,14 @@
+/**
+ * Widened JSON-Schema shape so MCP-sourced tool schemas (which can have
+ * nested objects, arrays, additionalProperties, `$defs`, etc.) pass
+ * through unmodified. Anthropic / OpenAI / Ollama all accept arbitrary
+ * JSON Schema for tool inputs, so we avoid constraining the surface.
+ */
 export type ToolParamSchema = {
   type: 'object';
-  properties: Record<string, { type: string; description?: string; enum?: string[] }>;
+  properties?: Record<string, unknown>;
   required?: string[];
+  [key: string]: unknown;
 };
 
 export type ToolDefinition<TInput = unknown, TOutput = unknown> = {

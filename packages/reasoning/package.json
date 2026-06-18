@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@modelcontextprotocol/sdk": "^1.0.4",
     "@oasis-echo/telemetry": "*",
     "@oasis-echo/types": "*"
   }

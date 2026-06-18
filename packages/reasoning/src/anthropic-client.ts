@@ -14,6 +14,12 @@ export type ReasoningOpts = {
   tools?: ToolRegistry;
   redactor?: PiiRedactor;
   systemPrompt?: string;
+  /**
+   * Appended to the end of the system prompt (including `DEFAULT_SYSTEM`).
+   * Lets callers layer in context — e.g. an enumeration of MCP tools
+   * available in this session — without overriding persona rules.
+   */
+  systemPromptSuffix?: string;
 };
 
 export type ReasoningStreamEvent =
@@ -27,6 +33,12 @@ export interface Reasoner {
     userText: string;
     state: DialogueState;
     signal?: AbortSignal;
+    /**
+     * When false the reasoner suppresses tool-calling even if a
+     * registry is configured. Used by speculation pre-compute so
+     * MCP tools don't fire on truncated partial text.
+     */
+    allowTools?: boolean;
   }): AsyncIterable<ReasoningStreamEvent>;
 }
 
@@ -65,7 +77,10 @@ export class AnthropicReasoner implements Reasoner {
     this.logger = opts.logger;
     this.tools = opts.tools;
     this.redactor = opts.redactor ?? new PiiRedactor();
-    this.systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM;
+    const base = opts.systemPrompt ?? DEFAULT_SYSTEM;
+    this.systemPrompt = opts.systemPromptSuffix
+      ? `${base}\n\n${opts.systemPromptSuffix}`
+      : base;
   }
 
   get circuitStatus(): string {

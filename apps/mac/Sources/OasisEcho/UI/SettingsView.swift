@@ -18,6 +18,23 @@ struct GeneralTab: View {
 
     var body: some View {
         Form {
+            Section("Startup") {
+                Toggle(
+                    "Open Oasis Echo at login",
+                    isOn: Binding(
+                        get: { state.launchAtLogin },
+                        set: { newValue in
+                            state.launchAtLogin = newValue
+                            LaunchAtLogin.apply(newValue)
+                        }
+                    )
+                )
+                Text("Uses the standard macOS login item for this app. You may need to approve it once under System Settings → General → Login Items & Extensions.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Toggle("Listen for \"Hey Echo\"", isOn: $state.wakeWordEnabled)
+                Text("When enabled, the mic stays on and listens for the phrase \"Hey Echo\" to start an Echo session. Uses on-device Apple Speech recognition.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             Section("Server") {
                 TextField("Oasis Echo URL", text: $state.serverBaseURL)
                     .textFieldStyle(.roundedBorder)
@@ -29,6 +46,21 @@ struct GeneralTab: View {
                         Text("· \(state.serverModel)").foregroundStyle(.secondary)
                     }
                 }.font(.caption)
+                Toggle(
+                    "Start local API if offline",
+                    isOn: $state.autoStartServer
+                )
+                Toggle("Use Docker (instead of npm)", isOn: $state.useDocker)
+                    .disabled(!state.autoStartServer)
+                Text(state.useDocker
+                    ? "Runs `docker compose up -d` from the repo root. Requires Docker Desktop. The container uses a private 10.89.87.0/24 network that won't conflict with common API endpoints."
+                    : "Runs `npm run server` from your oasis-echo checkout. Requires `node` / `npm` on your PATH."
+                ).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                TextField("Repository folder (optional)", text: $state.serverRepoRootPath)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                Text("Leave the folder blank if you build OasisEcho.app from this repo (the app walks up from the bundle to find the root).")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section("Pill") {
                 Toggle("Anchor to bottom of screen", isOn: $state.pillAtBottom)

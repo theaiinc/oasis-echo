@@ -14,7 +14,7 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
 
     enum WSState { case disconnected, connecting, idle, active, finishing }
 
-    private let baseURL: URL
+    private var baseURL: URL
     private let resampler = AudioResampler()
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
@@ -96,6 +96,22 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         state = .disconnected
+    }
+
+    /// Reconnect the audio WebSocket when the HTTP base URL changes (e.g.
+    /// ephemeral port discovery or Settings edit).
+    func updateServerBase(_ url: URL) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.baseURL.absoluteString != url.absoluteString else { return }
+            self.baseURL = url
+            self.reconnectWork?.cancel()
+            self.task?.cancel(with: .goingAway, reason: nil)
+            self.task = nil
+            self.pendingBuffers.removeAll()
+            self.state = .disconnected
+            self.connect()
+        }
     }
 
     // MARK: - WebSocket lifecycle

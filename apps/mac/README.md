@@ -20,7 +20,7 @@ First launch asks for **Microphone**, **Speech Recognition**, and **Accessibilit
 
 ## Run
 
-1. Start the Oasis Echo server: `npm run server` from the repo root (default `http://127.0.0.1:3000`).
+1. Start the Oasis Echo server: `npm run server` from the repo root. By default the server binds an **ephemeral** port and prints `http://127.0.0.1:…`; the port is also written to `~/.oasis-echo/listen-port`. The Mac app tries that file if your saved server URL is unreachable. Use `PORT=3000` in `.env` for a fixed port.
 2. Launch `OasisEcho.app`. A pill appears at the bottom-center; a microphone glyph appears in the menu bar.
 3. Hold the push-to-talk hotkey, speak, release. Cleaned text pastes into the focused app (Transcribe mode) or the agent replies in voice (Echo mode).
 
@@ -40,7 +40,7 @@ All hotkeys are remappable in **Settings → Shortcuts**. The Fn-key listener ca
 ## Architecture
 
 ```
-Mac App (Swift)                              Oasis Echo server :3000
+Mac App (Swift)                              Oasis Echo server (ephemeral or `PORT`)
 ─────────────────                            ───────────────────────────
 Core Audio mic ──► AudioResampler ──► WS    ┌────────────────┐
    (AVAudioEngine)    (16 kHz mono Float32) │  /audio (WS)   │ ◄─ default streaming STT (Whisper)

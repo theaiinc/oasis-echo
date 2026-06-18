@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "wordRules": {
+    "prya": "Priya"
+  },
+  "phrases": [],
+  "history": [
+    {
+      "original": "prya",
+      "corrected": "Priya",
+      "atMs": 1776924926234
+    }
+  ]
+}
