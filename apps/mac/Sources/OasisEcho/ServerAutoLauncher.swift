@@ -82,7 +82,7 @@ final class ServerAutoLauncher {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["-l", "-c", "npm run server"]
+        p.arguments = ["-l", "-c", "PORT=9187 npm run server"]
         p.currentDirectoryURL = repo
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "dumb"

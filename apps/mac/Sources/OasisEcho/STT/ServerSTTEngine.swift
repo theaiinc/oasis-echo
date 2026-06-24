@@ -21,6 +21,8 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
     private var state: WSState = .disconnected
     private var pendingBuffers: [Data] = []
     private var reconnectWork: DispatchWorkItem?
+    private var currentUtteranceID: String?
+    private var finishingUtteranceID: String?
 
     private var onPartial: (@Sendable (String) -> Void)?
     private var onFinal: (@Sendable (String) -> Void)?
@@ -47,11 +49,14 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
         self.onPartial = onPartial
         self.onFinal = onFinal
         self.onError = onError
+        let utteranceID = UUID().uuidString
         queue.async { [weak self] in
             guard let self else { return }
             if state == .disconnected { self.connect() }
             state = .active
-            self.sendControl(["type": "start"])
+            currentUtteranceID = utteranceID
+            finishingUtteranceID = nil
+            self.sendControl(["type": "start", "utteranceId": utteranceID])
         }
     }
 
@@ -75,8 +80,12 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
     func finish() {
         queue.async { [weak self] in
             guard let self, state == .active else { return }
+            let utteranceID = currentUtteranceID
             state = .finishing
-            self.sendControl(["type": "end"])
+            finishingUtteranceID = utteranceID
+            var payload: [String: Any] = ["type": "end"]
+            if let utteranceID { payload["utteranceId"] = utteranceID }
+            self.sendControl(payload)
         }
     }
 
@@ -84,8 +93,14 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             if state == .active || state == .finishing {
-                self.sendControl(["type": "abort"])
+                var payload: [String: Any] = ["type": "abort"]
+                if let utteranceID = finishingUtteranceID ?? currentUtteranceID {
+                    payload["utteranceId"] = utteranceID
+                }
+                self.sendControl(payload)
                 state = .idle
+                currentUtteranceID = nil
+                finishingUtteranceID = nil
             }
         }
     }
@@ -177,13 +192,33 @@ final class ServerSTTEngine: STTEngine, @unchecked Sendable {
                 self.pendingBuffers.removeAll()
             }
         case "stt.partial":
-            if let t = obj["text"] as? String, !t.isEmpty { onPartial?(t) }
+            guard let t = obj["text"] as? String, !t.isEmpty else { return }
+            let utteranceID = obj["utteranceId"] as? String
+            queue.async { [weak self] in
+                guard let self, self.acceptsSTTMessage(utteranceID, final: false) else { return }
+                self.onPartial?(t)
+            }
         case "stt.final":
             let t = (obj["text"] as? String) ?? ""
-            onFinal?(t)
-            queue.async { [weak self] in self?.state = .idle }
+            let utteranceID = obj["utteranceId"] as? String
+            queue.async { [weak self] in
+                guard let self, self.acceptsSTTMessage(utteranceID, final: true) else { return }
+                self.onFinal?(t)
+                self.state = .idle
+                self.currentUtteranceID = nil
+                self.finishingUtteranceID = nil
+            }
         default: break
         }
+    }
+
+    private func acceptsSTTMessage(_ utteranceID: String?, final: Bool) -> Bool {
+        if let utteranceID {
+            return utteranceID == currentUtteranceID || utteranceID == finishingUtteranceID
+        }
+        // Backward compatibility for older servers that do not echo IDs:
+        // accept only messages that match the local lifecycle phase.
+        return final ? state == .finishing : state == .active
     }
 
     private func sendControl(_ payload: [String: Any]) {

@@ -3,6 +3,7 @@ import Foundation
 import AVFoundation
 import Combine
 import SwiftUI
+import os.log
 
 // Owns the capture → STT → post-process → (paste | echo) loop. All
 // user-visible state flows through AppState so the UI stays reactive.
@@ -19,6 +20,7 @@ import SwiftUI
 
 @MainActor
 final class TurnController: ObservableObject {
+    private let log = Logger(subsystem: "ai.oasis.echo.mac", category: "controller")
     private let state: AppState
     private var client: OasisClient
     private let mic = MicCapture()
@@ -28,14 +30,9 @@ final class TurnController: ObservableObject {
     private let wakeWord = WakeWordDetector()
     private var pill: PillWindowController?
     private var eventsOpen = false
-    // Streaming STT (server Whisper) emits one `stt.final` per VAD
-    // segment, not one per turn. A long sentence with a natural breath
-    // in the middle arrives as TWO finals; the user releasing the
-    // hotkey is what actually ends the turn. So we accumulate segment
-    // finals into `committedTranscript` and keep the in-flight
-    // partial in `pendingPartial`; the live caption shows their join.
-    private var committedTranscript: String = ""
-    private var pendingPartial: String = ""
+    // Server Whisper/FunASR partials are rolling-buffer hypotheses, so
+    // later text can replace an earlier unstable tail instead of appending.
+    private var transcriptAssembler = TranscriptAssembler()
     private var committedForEcho: Bool = false
     // Set the moment finishAfterSTT runs (whether through the user's
     // release-driven grace, the safety net, or an explicit
@@ -101,11 +98,15 @@ final class TurnController: ObservableObject {
         self.state = state
         self.client = OasisClient(baseURL: URL(string: state.serverBaseURL) ?? URL(string: "http://127.0.0.1:3000")!)
 
-        // When "Hey Echo" is detected, switch to echo mode and start capture.
+        // When "Hey Echo" is detected, switch to echo mode AND
+        // immediately start capture (hands-free). Manual mode switch
+        // (hotkey/menu) requires Fn key activation — wake word is
+        // "different" because the user is already speaking.
         wakeWord.onWakeWordDetected = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard case .idle = state.pill else { return }
+                log.debug("wakeword: detected, switching to .echo + beginCapture")
                 state.setMode(.echo)
                 beginCapture()
             }
@@ -308,14 +309,44 @@ final class TurnController: ObservableObject {
     }
 
     func onModeChanged(_ mode: Mode) {
+        // Log every mode change pill state for debugging.
+        log.debug("onModeChanged: mode=\(mode.rawValue), pill=\(self.pillLabel(self.state.pill))")
+
         // Cancel any in-flight capture when the user flips mode mid-turn.
-        if case .listening = state.pill {
+        switch state.pill {
+        case .listening, .processing:
+            log.debug("onModeChanged: cancelling in-flight capture")
             cancelCapture()
+        case .speaking:
+            // Echo mode is speaking — stop audio and reset to idle so
+            // the user can immediately start a new capture in the new
+            // mode without waiting for the audio queue to drain or the
+            // .modeSwitched toast to timeout.
+            log.debug("onModeChanged: cancelling Echo speaking state")
+            cancelCapture()
+            // Also stop and reset the audio player to silence any
+            // in-flight TTS playback immediately.
+            player.resetQueue()
+        default:
+            break
         }
         // No flash here — AppState.setMode already shows the proper
         // .modeSwitched(mode) toast. A second flashPill() here would
         // overwrite it with stale state (this is what caused the
         // mysterious "Pasted" bubble after ⌘⇧M).
+    }
+
+    private func pillLabel(_ p: PillState) -> String {
+        switch p {
+        case .idle: return "idle"
+        case .listening: return "listening"
+        case .processing: return "processing"
+        case .speaking: return "speaking"
+        case .pasted: return "pasted"
+        case .copiedOnly: return "copiedOnly"
+        case .modeSwitched: return "modeSwitched"
+        case .error: return "error"
+        }
     }
 
     // MARK: - Capture lifecycle
@@ -329,7 +360,11 @@ final class TurnController: ObservableObject {
     }
 
     private func beginCapture() {
-        guard case .idle = state.pill else { return }
+        guard case .idle = state.pill else {
+            log.debug("beginCapture: skipped — pill not idle (\(self.pillLabel(self.state.pill)))")
+            return
+        }
+        log.notice("beginCapture: starting capture")
         // Pause the wake-word detector so it doesn't compete for the mic.
         wakeWord.pause()
 
@@ -341,8 +376,7 @@ final class TurnController: ObservableObject {
         longCaptureTimer?.cancel(); longCaptureTimer = nil
         longCaptureFired = false
         savePasteTarget()
-        committedTranscript = ""
-        pendingPartial = ""
+        transcriptAssembler.reset()
         committedForEcho = false
         finishCommitted = false
         commitInProgress = false
@@ -460,6 +494,7 @@ final class TurnController: ObservableObject {
     }
 
     private func cancelCapture() {
+        log.debug("cancelCapture: cancelling (pill was \(self.pillLabel(self.state.pill)))")
         safetyNetTask?.cancel(); safetyNetTask = nil
         graceTask?.cancel();     graceTask = nil
         disarmLongCaptureTimer()
@@ -470,6 +505,7 @@ final class TurnController: ObservableObject {
         stt = nil
         state.liveTranscript = ""
         state.pill = .idle
+        log.debug("cancelCapture: pill set to idle, resuming wake word")
         wakeWord.resume()
         NotificationCenter.default.post(name: .init("OasisCaptureCancelled"), object: nil)
     }
@@ -481,9 +517,7 @@ final class TurnController: ObservableObject {
     // Combined committed segments + the in-flight partial. This is what
     // gets handed to handleTranscribe / handleEcho when the turn ends.
     private func fullTranscript() -> String {
-        if pendingPartial.isEmpty { return committedTranscript }
-        if committedTranscript.isEmpty { return pendingPartial }
-        return committedTranscript + " " + pendingPartial
+        transcriptAssembler.text
     }
 
     private func refreshLiveTranscript() {
@@ -493,52 +527,13 @@ final class TurnController: ObservableObject {
     /// Merge a streaming partial without discarding earlier speech when
     /// Whisper re-infers the rolling buffer and drops leading words.
     private func ingestPartialText(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        if pendingPartial.isEmpty {
-            pendingPartial = trimmed
-            refreshLiveTranscript()
-            return
-        }
-
-        if trimmed.hasPrefix(pendingPartial)
-            || (trimmed.count >= pendingPartial.count
-                && trimmed.localizedCaseInsensitiveContains(pendingPartial)) {
-            pendingPartial = trimmed
-            refreshLiveTranscript()
-            return
-        }
-
-        if pendingPartial.hasPrefix(trimmed) {
-            refreshLiveTranscript()
-            return
-        }
-
-        commitPendingToCommitted()
-        pendingPartial = trimmed
+        transcriptAssembler.ingestPartial(text)
         refreshLiveTranscript()
     }
 
     private func ingestFinalText(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        // Final from Apple Speech is always authoritative — replace
-        // all the partial accumulation garbage with the clean result.
-        committedTranscript = trimmed
-        pendingPartial = ""
+        transcriptAssembler.ingestFinal(text)
         refreshLiveTranscript()
-    }
-
-    private func commitPendingToCommitted() {
-        let part = pendingPartial.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !part.isEmpty else { return }
-        if committedTranscript.isEmpty {
-            committedTranscript = part
-        } else if !committedTranscript.localizedCaseInsensitiveContains(part) {
-            committedTranscript += " " + part
-        }
-        pendingPartial = ""
     }
 
     private func tryFinalizeAfterSTT() {

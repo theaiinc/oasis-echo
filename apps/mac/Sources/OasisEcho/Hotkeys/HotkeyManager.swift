@@ -31,11 +31,14 @@ final class HotkeyManager {
         }
 
         // Mode toggle: flip Transcribe ⇄ Echo anywhere, any time.
+        // Call onModeChanged BEFORE setMode so it can inspect the
+        // current pill state (e.g. .listening) before setMode overwrites
+        // it with the .modeSwitched toast.
         KeyboardShortcuts.onKeyDown(for: .toggleMode) { [weak state, weak controller] in
             guard let state, let controller else { return }
             let next = state.mode.toggled()
-            state.setMode(next)
             controller.onModeChanged(next)
+            state.setMode(next)
         }
 
         // Fn key push-to-talk (modifier — not bindable through the

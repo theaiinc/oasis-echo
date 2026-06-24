@@ -85,6 +85,10 @@ export type ToolUseEvent = BaseEvent & {
   input: unknown;
 };
 
+export type ThinkTokenEvent = BaseEvent & {
+  token: string;
+};
+
 export type ToolResultEvent = BaseEvent & {
   toolCallId: string;
   name: string;
@@ -117,6 +121,7 @@ export interface EventMap {
   'stt.final': SttFinalEvent;
   'stt.postprocess': SttPostprocessEvent;
   'route.decision': RouteDecisionEvent;
+  'think.token': ThinkTokenEvent;
   'tts.chunk': TtsChunkEvent;
   'turn.complete': TurnCompleteEvent;
   'turn.summary': TurnSummaryEvent;

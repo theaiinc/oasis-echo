@@ -5,12 +5,11 @@ import os
 // Auto-paste into the frontmost app:
 //   1) write plain text to the general pasteboard
 //   2) bring target app to front
-//   3) synthesize a ⌘V key event — three paths:
-//      a) CGEventPost (.cghidEventTap) — needs AX
-//      b) AppleScript (System Events keystroke) — needs Automation + AX
-//      c) CGEventPostToPid — private SPI, no AX needed
+//   3) synthesize a single ⌘V-style insertion path
 //
-// Path (c) is the only reliable option without AX on macOS 14+.
+// Direct AX mutation is kept as the final fallback. Some apps can mutate
+// their focused element even when AX reports a non-success result; trying
+// Cmd+V after that ambiguous side effect can insert the same text twice.
 
 
 
@@ -42,37 +41,39 @@ enum Paster {
             Thread.sleep(forTimeInterval: 0.3)
         }
 
-        // Try every path regardless of AXIsProcessTrusted() — the API
-        // can return false even when the toggle is ON (ad-hoc identity
-        // mismatch), but the underlying AX/event APIs might still work.
+        // Try event-based paste paths first. They all use the pasteboard
+        // and mimic a normal user paste, so a single request maps to one
+        // visible insertion.
         let axTrusted = isAccessibilityTrusted()
         log.notice("paste: started (AX=\(axTrusted, privacy: .public), textLen=\(text.count, privacy: .public))")
 
-        // Path 1: AX insertion (most reliable).
-        if insertViaAX(text) {
-            log.notice("paste: AX insertion OK")
-            consecutiveFailures = 0; alertShown = false
-            return .pasted
-        }
-
-        // Path 2: CGEventPostToPid — posts Cmd+V directly to the target PID.
+        // Path 1: CGEventPostToPid — posts Cmd+V directly to the target PID.
         if let pid, sendCmdVViaPostToPid(pid) {
             log.notice("paste: CGEventPostToPid OK")
             consecutiveFailures = 0; alertShown = false
             return .pasted
         }
 
-        // Path 3: AppleScript — System Events keystroke.
+        // Path 2: AppleScript — System Events keystroke.
         if sendCmdVViaAppleScript() {
             log.notice("paste: AppleScript OK")
             consecutiveFailures = 0; alertShown = false
             return .pasted
         }
 
-        // Path 4: HID tap (only when AX trusted).
+        // Path 3: HID tap (only when AX trusted).
         if axTrusted {
             log.notice("paste: HID tap")
             sendCmdVViaHIDTap()
+            consecutiveFailures = 0; alertShown = false
+            return .pasted
+        }
+
+        // Path 4: AX insertion fallback. This is intentionally last so
+        // an ambiguous AX side effect is never followed by another paste
+        // strategy for the same request.
+        if insertViaAX(text) {
+            log.notice("paste: AX insertion OK")
             consecutiveFailures = 0; alertShown = false
             return .pasted
         }

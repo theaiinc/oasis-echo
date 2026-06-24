@@ -16,6 +16,11 @@ coverage/
 .swiftpm/
 DerivedData/
 # Built app bundle — produced by apps/mac/Scripts/make-app.sh
-apps/mac/OasisEcho.app/
+apps/mac/OasisEcho.app
 *.xcuserstate
 .mcp.json
+apps/mac/.xcodebuild
+experiments/wakeword/__pycache__
+experiments/wakeword/models/*
+!experiments/wakeword/models/hey_echo_verifier.pkl
+experiments/wakeword/recordings

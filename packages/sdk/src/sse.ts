@@ -64,6 +64,7 @@ export function openSse(opts: SseOpts): SseHandle {
       'stt.final',
       'stt.postprocess',
       'route.decision',
+      'think.token',
       'tts.chunk',
       'turn.complete',
       'turn.summary',

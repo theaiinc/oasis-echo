@@ -401,7 +401,14 @@ export class Pipeline {
       const chunker = new SentenceChunker();
       const sentenceQueue: string[] = [];
       let streamDone = false;
+      let streamError: unknown;
       let fullText = '';
+      // Stateful filter that captures <think>...</think> blocks and
+      // routes them via bus.emit('think.token') for the UI, while
+      // stripping them from the TTS sentence stream.
+      const thinkFilter = new ThinkingFilter(
+        (token) => { void this.bus.emit({ type: 'think.token' as const, turnId, token, atMs: Date.now() }); },
+      );
 
       // Track outstanding tool calls so the result event can report
       // accurate latency and name even when the reasoner multiplexes
@@ -423,7 +430,9 @@ export class Pipeline {
               }
               fullText += ev.text;
               await this.bus.emit({ type: 'llm.token', turnId, token: ev.text, atMs: Date.now() });
-              for (const sentence of chunker.feed(ev.text)) sentenceQueue.push(sentence);
+              // Strip <think>...</think> blocks so reasoning tokens are
+              // never synthesized into speech.
+              for (const sentence of chunker.feed(thinkFilter.filter(ev.text))) sentenceQueue.push(sentence);
             } else if (ev.type === 'tool_use') {
               toolInflight.set(ev.id, { name: ev.name, startedAtMs: Date.now() });
               await this.bus.emit({
@@ -459,7 +468,7 @@ export class Pipeline {
             }
           }
         } catch (err) {
-          if (!signal.aborted) throw err;
+          if (!signal.aborted) streamError = err;
         }
         streamDone = true;
       })();
@@ -538,6 +547,7 @@ export class Pipeline {
       }
 
       await tokensPromise;
+      if (streamError) throw streamError;
 
       if (signal.aborted) {
         interrupted = true;
@@ -693,6 +703,99 @@ function previewOutput(out: unknown): string {
     return s.replace(/\s+/g, ' ').slice(0, 180);
   } catch {
     return String(out).slice(0, 180);
+  }
+}
+
+/**
+ * Stateful filter that captures <think>...</think> blocks from a token
+ * stream and routes them to a callback (for UI display) while stripping
+ * them from the text returned to TTS.
+ *
+ * Tags and their content can span arbitrary token boundaries; the filter
+ * tracks open/close state and accumulated partial matches.
+ */
+class ThinkingFilter {
+  private readonly openTag = '<think>';
+  private readonly closeTag = '</think>';
+  private inside = false;
+  /** Buffer for partial tag matching across token boundaries. */
+  private partial = '';
+  private readonly onThinkToken: (token: string) => void;
+
+  constructor(onThinkToken: (token: string) => void) {
+    this.onThinkToken = onThinkToken;
+  }
+
+  filter(token: string): string {
+    // Fully inside a think block — capture and drop everything.
+    if (this.inside) {
+      const ci = token.indexOf(this.closeTag);
+      if (ci === -1) {
+        this.onThinkToken(token);
+        return '';
+      }
+      const beforeClose = token.slice(0, ci);
+      if (beforeClose.length > 0) this.onThinkToken(beforeClose);
+      this.inside = false;
+      return this.filter(token.slice(ci + this.closeTag.length));
+    }
+
+    // Outside — check for an opening tag.
+    const oi = token.indexOf(this.openTag);
+    if (oi !== -1) {
+      // Text before the open tag is regular reply
+      const prefix = token.slice(0, oi);
+      this.inside = true;
+      const rest = this.filter(token.slice(oi + this.openTag.length));
+      return prefix + (this.inside ? '' : rest);
+    }
+
+    // Handle partial tag splits across tokens.
+    // Accumulate partial until we have enough to match.
+    this.partial += token;
+    let result = '';
+
+    while (this.partial.length > 0) {
+      const oi2 = this.partial.indexOf(this.openTag);
+      if (oi2 !== -1) {
+        result += this.partial.slice(0, oi2);
+        this.partial = this.partial.slice(oi2 + this.openTag.length);
+        this.inside = true;
+        const ci2 = this.partial.indexOf(this.closeTag);
+        if (ci2 !== -1) {
+          // Capture content between open and close tag
+          const thinkContent = this.partial.slice(0, ci2);
+          if (thinkContent.length > 0) this.onThinkToken(thinkContent);
+          this.inside = false;
+          this.partial = this.partial.slice(ci2 + this.closeTag.length);
+        } else {
+          // Everything accumulated so far is content inside think
+          if (this.partial.length > 0) {
+            this.onThinkToken(this.partial);
+          }
+          this.partial = '';
+        }
+      } else if (this.partial.includes('<') && !this.partial.includes('>')) {
+        // Token ends mid-tag — hold it for the next token.
+        break;
+      } else {
+        result += this.partial;
+        this.partial = '';
+      }
+    }
+
+    return result;
+  }
+
+  /** Call when the stream ends to flush any held partial text. */
+  flush(): string {
+    // If we're inside a think block, remaining partial is thinking content
+    if (this.inside && this.partial.length > 0) {
+      this.onThinkToken(this.partial);
+    }
+    const out = this.partial;
+    this.partial = '';
+    return out;
   }
 }
 

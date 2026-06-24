@@ -13,6 +13,7 @@ export type OpenAIOpts = {
   redactor?: PiiRedactor;
   systemPrompt?: string;
   temperature?: number;
+  assistantPrefill?: boolean;
 };
 
 const DEFAULT_SYSTEM = PERSONA_RULES;
@@ -39,6 +40,7 @@ export class OpenAIReasoner implements Reasoner {
   private readonly redactor: PiiRedactor;
   private readonly systemPrompt: string;
   private readonly temperature: number;
+  private readonly assistantPrefill: boolean;
   private readonly breaker = new CircuitBreaker({ failureThreshold: 3, openDurationMs: 30_000 });
 
   constructor(opts: OpenAIOpts = {}) {
@@ -52,6 +54,7 @@ export class OpenAIReasoner implements Reasoner {
     this.redactor = opts.redactor ?? new PiiRedactor();
     this.systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM;
     this.temperature = opts.temperature ?? 0.7;
+    this.assistantPrefill = opts.assistantPrefill ?? shouldUseAssistantPrefill(this.baseUrl);
   }
 
   get circuitStatus(): string {
@@ -177,13 +180,18 @@ export class OpenAIReasoner implements Reasoner {
       if (turn.agentText) msgs.push({ role: 'assistant', content: turn.agentText });
     }
     msgs.push({ role: 'user', content: userText });
+    if (this.assistantPrefill) {
+      // LM Studio reasoning models can stream only `reasoning_content`
+      // unless generation is prefixed into the assistant response.
+      msgs.push({ role: 'assistant', content: ' ' });
+    }
     return msgs;
   }
 }
 
 type OpenAIStreamChunk = {
   choices?: Array<{
-    delta?: { content?: string };
+    delta?: { content?: string; reasoning_content?: string };
     finish_reason?: string;
   }>;
   usage?: {
@@ -203,4 +211,17 @@ function composeSignals(...signals: Array<AbortSignal | undefined>): AbortSignal
     s.addEventListener('abort', () => controller.abort(s.reason), { once: true });
   }
   return controller.signal;
+}
+
+function shouldUseAssistantPrefill(baseUrl: string): boolean {
+  const explicit = process.env['OASIS_OPENAI_ASSISTANT_PREFILL'];
+  if (explicit === '1' || explicit === 'true') return true;
+  if (explicit === '0' || explicit === 'false') return false;
+
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
 }

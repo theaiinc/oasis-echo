@@ -16,6 +16,12 @@ export type RouteDecisionEvent = {
 export type LlmTokenEvent = { type: 'llm.token'; turnId: string; token: string; atMs: number };
 export type LlmDoneEvent = { type: 'llm.done'; turnId: string; atMs: number };
 /**
+ * Emitted when the pipeline's thinking filter captures a <think> block.
+ * Conveys the raw reasoning text so the UI can display it in a dedi-
+ * cated collapsible panel. Never reaches TTS.
+ */
+export type ThinkTokenEvent = { type: 'think.token'; turnId: string; token: string; atMs: number };
+/**
  * Emitted when the reasoner dispatches an MCP (or native) tool call.
  * UI uses this to show "calling web_search..." and gate backchannel
  * timing so the user knows the agent is doing work rather than idle.
@@ -69,6 +75,7 @@ export type PipelineEvent =
   | RouteDecisionEvent
   | LlmTokenEvent
   | LlmDoneEvent
+  | ThinkTokenEvent
   | ToolUseEvent
   | ToolResultEvent
   | TtsChunkEvent

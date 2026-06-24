@@ -179,6 +179,27 @@
         font-style: italic;
         font-size: 11px;
       }
+      .think-block { margin-bottom: 4px; }
+      .think-block .think-toggle {
+        display: inline-flex; align-items: center; gap: 4px;
+        background: none; border: none; color: var(--local, #d29922);
+        font: 600 11px/1.4 -apple-system, sans-serif;
+        cursor: pointer; padding: 2px 0; opacity: 0.6; letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .think-block .think-toggle:hover { opacity: 1; }
+      .think-block .think-icon {
+        display: inline-block; font-size: 8px; transition: transform 0.15s;
+      }
+      .think-block.open .think-icon { transform: rotate(90deg); }
+      .think-block .think-content {
+        display: none; margin: 4px 0 6px 12px; padding: 6px 8px;
+        font-size: 12px; color: var(--muted); font-style: italic;
+        background: rgba(210, 153, 34, 0.06); border-radius: 4px;
+        border-left: 2px solid rgba(210, 153, 34, 0.25);
+        white-space: pre-wrap; line-height: 1.5;
+      }
+      .think-block.open .think-content { display: block; }
       .turn .meta {
         display: flex;
         gap: 8px;
@@ -660,6 +681,8 @@
           agentText: '',
           hasModelText: false,
           scheduledScroll: false,
+          thinkingEl: null,
+          thinkingTgl: null,
         };
         turnsById.set(turnId, entry);
         scheduleScroll(entry);
@@ -819,6 +842,25 @@
           t.agentEl.className = kindClass + ' pending';
         }
         scheduleScroll(t);
+      });
+
+      client.on('think.token', (p) => {
+        addEvent('think.token', p);
+        const t = ensureTurn(p.turnId);
+        // Accumulate thinking text into the turn's thinkingEl. This
+        // arrives before the first tts.chunk so the collapsible block
+        // is already populated when the reply text appears.
+        if (!t.thinkingEl) {
+          const el = document.createElement('div');
+          el.className = 'think-block';
+          el.innerHTML = `<button class="think-toggle" onclick="this.parentElement.classList.toggle('open')">
+            <span class="think-icon">▶</span><span class="think-label">Thought</span>
+          </button><div class="think-content"></div>`;
+          t.agentEl.parentElement.insertBefore(el, t.agentEl);
+          t.thinkingEl = el.querySelector('.think-content');
+          t.thinkingTgl = el;
+        }
+        t.thinkingEl.textContent += p.token;
       });
 
       client.on('tts.chunk', (p) => {

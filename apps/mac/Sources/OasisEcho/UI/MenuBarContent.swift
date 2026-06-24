@@ -192,8 +192,12 @@ struct MenuBarContent: View {
 
     private func toggleMode() {
         let next = state.mode.toggled()
-        state.setMode(next)
+        // MUST run onModeChanged BEFORE setMode so onModeChanged can
+        // inspect the current pill state (e.g. .listening) and cancel
+        // any in-flight capture before setMode overwrites it with the
+        // .modeSwitched toast.
         controller.onModeChanged(next)
+        state.setMode(next)
     }
 
     private func openSettingsWindow() {

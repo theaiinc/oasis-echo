@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 import PackageDescription
 
 let package = Package(
@@ -16,7 +16,14 @@ let package = Package(
             dependencies: [
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
             ],
-            path: "Sources/OasisEcho"
+            path: "Sources/OasisEcho",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "OasisEchoTests",
+            dependencies: ["OasisEcho"],
+            path: "Tests/OasisEchoTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

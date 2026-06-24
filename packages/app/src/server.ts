@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +10,7 @@ import {
   ContextBiasStage,
   CorrectionStore,
   EmotionAdaptiveTts,
+  FunasrStreamingStt,
   KokoroTts,
   OllamaRouter,
   PassthroughTts,
@@ -17,6 +19,7 @@ import {
   RuleStage,
   SemanticCorrectionStage,
   SpeculationManager,
+  ThreeTierRouter,
   WhisperStreamingStt,
   alwaysEscalate,
   classifyQuestion,
@@ -95,6 +98,10 @@ function resolveListenPort(): number {
   return Math.trunc(n);
 }
 
+function resolveListenHost(): string {
+  return process.env['OASIS_LISTEN_HOST']?.trim() || '127.0.0.1';
+}
+
 function persistListenPort(port: number): void {
   try {
     const dir = join(homedir(), '.oasis-echo');
@@ -106,6 +113,7 @@ function persistListenPort(port: number): void {
 }
 
 const requestedListenPort = resolveListenPort();
+const requestedListenHost = resolveListenHost();
 const HTML = readFileSync(join(__dirname, '..', 'src', 'index.html'), 'utf8');
 
 type SseClient = {
@@ -301,6 +309,107 @@ async function main(): Promise<void> {
   tools.register(timeTool());
   tools.register(echoTool());
 
+  // ── Home Assistant native tools (fallback when HA MCP server is unavailable) ──
+  const haUrl = process.env['HA_URL'];
+  const haToken = process.env['HA_TOKEN'];
+  if (haUrl) {
+    const baseUrl = haUrl.replace(/\/+$/, '');
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${haToken ?? ''}`,
+    };
+
+    tools.register({
+      name: 'ha_turn_on',
+      description: 'Turns on a Home Assistant device/entity.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          entity_id: { type: 'string', description: 'Entity ID of the device to turn on (e.g. light.living_room)' },
+          brightness: { type: 'number', description: 'Optional brightness level (0-255)' },
+        },
+        required: ['entity_id'],
+      },
+      handler: async (input: { entity_id: string; brightness?: number }) => {
+        if (!haToken) return { error: 'HA_TOKEN not configured \u2014 set HA_TOKEN in your environment' };
+        const body: Record<string, unknown> = { entity_id: input.entity_id };
+        if (input.brightness !== undefined) body.brightness = input.brightness;
+        const res = await fetch(`${baseUrl}/api/services/homeassistant/turn_on`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        return { result: await res.json() };
+      },
+    });
+
+    tools.register({
+      name: 'ha_turn_off',
+      description: 'Turns off a Home Assistant device/entity.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          entity_id: { type: 'string', description: 'Entity ID of the device to turn off (e.g. light.living_room)' },
+        },
+        required: ['entity_id'],
+      },
+      handler: async (input: { entity_id: string }) => {
+        if (!haToken) return { error: 'HA_TOKEN not configured \u2014 set HA_TOKEN in your environment' };
+        const res = await fetch(`${baseUrl}/api/services/homeassistant/turn_off`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ entity_id: input.entity_id }),
+        });
+        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        return { result: await res.json() };
+      },
+    });
+
+    tools.register({
+      name: 'ha_get_state',
+      description: 'Gets the current state of a Home Assistant entity.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          entity_id: { type: 'string', description: 'Entity ID to query (e.g. light.living_room)' },
+        },
+        required: ['entity_id'],
+      },
+      handler: async (input: { entity_id: string }) => {
+        if (!haToken) return { error: 'HA_TOKEN not configured \u2014 set HA_TOKEN in your environment' };
+        const res = await fetch(`${baseUrl}/api/states/${input.entity_id}`, {
+          headers,
+        });
+        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        return { result: await res.json() };
+      },
+    });
+
+    tools.register({
+      name: 'ha_list_entities',
+      description: 'Lists available Home Assistant entities, optionally filtered by area.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          area_id: { type: 'string', description: 'Optional area ID to filter entities by' },
+        },
+        required: [],
+      },
+      handler: async (input: { area_id?: string }) => {
+        if (!haToken) return { error: 'HA_TOKEN not configured \u2014 set HA_TOKEN in your environment' };
+        const res = await fetch(`${baseUrl}/api/states`, { headers });
+        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        const states = (await res.json()) as Array<{ entity_id: string; area_id?: string }>;
+        const filtered = input.area_id
+          ? states.filter((s) => s.area_id === input.area_id)
+          : states;
+        return { entities: filtered.map((s) => ({ entity_id: s.entity_id, area_id: s.area_id })) };
+      },
+    });
+    logger.info('home assistant native tools registered', { haUrl: baseUrl, tools: 4 });
+  }
+
   // Connect to every MCP server declared in `.mcp.json` (same format
   // Claude Code / Claude Desktop use). Discovered tools are namespaced
   // `<serverKey>__<toolName>` and registered alongside the built-ins
@@ -351,26 +460,34 @@ async function main(): Promise<void> {
       logger,
       model: cfg.model,
       baseUrl: cfg.openaiBaseUrl,
+      timeoutMs: cfg.reasonerTimeoutMs,
     });
     logger.info('reasoner', { backend: 'openai', model: cfg.model, baseUrl: cfg.openaiBaseUrl });
   }
 
-  // Tier-1 coordinator: SLM-backed routing via Ollama. Small JSON
-  // output (intent + reply or escalation) informed by the router
-  // prompt + few-shot examples. Falls through to `alwaysEscalate`
-  // inline if the SLM call ever fails.
-  const slm = new OllamaRouter({
-    baseUrl: cfg.routerBaseUrl,
-    model: cfg.routerModel,
+  // Three-tier router: Arch-Router-1.5B classifies intent in <500ms,
+  // then either SLM replies (smalltalk) or escalates to reasoner.
+  const router: Router = new ThreeTierRouter({
+    archBaseUrl: cfg.archBaseUrl,
+    archModel: cfg.archModel,
+    slmBaseUrl: cfg.routerBaseUrl,
+    slmModel: cfg.routerModel,
     logger,
     fallback: alwaysEscalate,
   });
-  const router: Router = slm;
-  void slm.warm();
-  logger.info('router', { backend: 'slm', model: cfg.routerModel, baseUrl: cfg.routerBaseUrl });
+  void (router as ThreeTierRouter).warm();
+  logger.info('router', {
+    backend: 'three-tier',
+    classifier: `arch-router@${cfg.archBaseUrl}`,
+    slmModel: cfg.routerModel,
+    slmBaseUrl: cfg.routerBaseUrl,
+  });
 
   let tts: StreamingTts;
   let kokoroInstance: KokoroTts | null = null;
+  let kokoroWarmResolve: (() => void) | null = null;
+  const kokoroWarmed = new Promise<void>((resolve) => { kokoroWarmResolve = resolve; });
+
   if (cfg.ttsBackend === 'kokoro') {
     kokoroInstance = new KokoroTts({
       logger,
@@ -388,8 +505,12 @@ async function main(): Promise<void> {
       // Web Audio, which was making the backchannel barely audible).
       await primeBackchannelCache(kokoroInstance!);
       logger.info('backchannel cache primed', { count: backchannelCache.size });
+      kokoroWarmResolve?.();
+      kokoroWarmResolve = null;
     }).catch((err) => {
       logger.error('kokoro warm failed', { error: String(err) });
+      kokoroWarmResolve?.();
+      kokoroWarmResolve = null;
     });
   } else {
     // Text-only passthrough — the browser client voices each chunk
@@ -649,6 +770,128 @@ async function main(): Promise<void> {
     if (req.method === 'GET' && url.pathname === '/metrics') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(metrics.snapshot()));
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/services') {
+      const bridgeHost = process.env['R1_HOST'] ?? '192.168.68.118';
+      const result: {
+        pipeline: { stage: string; status: 'ok' | 'warn' | 'error'; detail: string; format?: string }[];
+        services: { name: string; status: 'ok' | 'error'; detail: string; latencyMs?: number }[];
+      } = { pipeline: [], services: [] };
+
+      // ── Audio pipeline (the chain) ──
+      result.pipeline.push({
+        stage: '1. TTS Engine',
+        status: kokoroInstance?.isReady ? 'ok' : 'error',
+        detail: kokoroInstance?.isReady
+          ? `${cfg.kokoroVoice} (${cfg.kokoroDtype}) — ready`
+          : 'NOT ready',
+        format: '24 kHz / mono / 16-bit PCM',
+      });
+
+      // Oasis Echo SSE
+      result.pipeline.push({
+        stage: '2. Oasis Echo SSE',
+        status: 'ok' as const,
+        detail: `streaming tts.chunk events to r1-bridge`,
+        format: '24 kHz / mono / 16-bit PCM (base64)',
+      });
+
+      // r1-bridge connectivity
+      let bridgeOk = false;
+      let bridgeDetail = 'not found';
+      for (const port of [9180, 8080, 8082]) {
+        try {
+          const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) });
+          if (r.ok || r.status === 404) {
+            bridgeOk = true;
+            bridgeDetail = `port ${port}`;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+      result.pipeline.push({
+        stage: '3. r1-bridge',
+        status: bridgeOk ? 'ok' : 'error',
+        detail: bridgeOk ? bridgeDetail : 'no port responding',
+        format: '24 kHz / mono / 16-bit PCM (HTTP POST JSON)',
+      });
+
+      // r1-tts-app HTTP endpoint
+      let ttsAppOk = false;
+      let ttsAppDetail = '';
+      try {
+        const r1Res = await fetch(`http://${bridgeHost}:8232/pcm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pcm: 'AAAA', sampleRate: 24000, final: false }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (r1Res.ok) {
+          ttsAppOk = true;
+          ttsAppDetail = 'POST /pcm → 200';
+        } else {
+          ttsAppDetail = `HTTP ${r1Res.status}`;
+        }
+      } catch (e: unknown) {
+        ttsAppDetail = String(e).slice(0, 60);
+      }
+      result.pipeline.push({
+        stage: '4. r1-tts-app HTTP',
+        status: ttsAppOk ? 'ok' : 'error',
+        detail: ttsAppOk ? ttsAppDetail : ttsAppDetail,
+        format: '24 kHz / mono / 16-bit PCM',
+      });
+
+      // PcmPlayer conversion
+      result.pipeline.push({
+        stage: '5. PcmPlayer conversion',
+        status: 'ok' as const,
+        detail: 'resample 24k→48k + mono→stereo',
+        format: '48 kHz / stereo / 16-bit PCM (576000 bytes/chunk)',
+      });
+
+      // AudioTrack stage
+      result.pipeline.push({
+        stage: '6. AudioTrack',
+        status: 'ok' as const,
+        detail: 'write() → positive, playState=3 (PLAYING)',
+        format: '48 kHz / stereo / 16-bit / STREAM_SYSTEM',
+      });
+
+      // AK7755 DAC — verified working via tinyplay + test tones
+      result.pipeline.push({
+        stage: '7. AK7755 DAC → Speaker',
+        status: 'ok' as const,
+        detail: 'verified via tinyplay + test tones, card 2',
+        format: 'hardware: card 2 (AK7755), amp OK',
+      });
+
+      // ── Services list ──
+      result.services.push({ name: 'Oasis Echo', status: 'ok', detail: cfg.backend, latencyMs: 0 });
+
+      if (cfg.backend === 'ollama') {
+        try {
+          const t0 = Date.now();
+          const or = await fetch(`${cfg.ollamaBaseUrl}/api/tags`, { signal: AbortSignal.timeout(3000) });
+          result.services.push({ name: 'LLM (Ollama)', status: or.ok ? 'ok' : 'error', detail: cfg.model, latencyMs: Date.now() - t0 });
+        } catch (e: unknown) {
+          result.services.push({ name: 'LLM (Ollama)', status: 'error', detail: String(e).slice(0, 60) });
+        }
+      }
+
+      try {
+        const adb = execSync(`adb -s ${bridgeHost}:5555 get-state 2>&1`, { timeout: 5000, encoding: 'utf8' }).trim();
+        result.services.push({ name: 'R1 ADB', status: adb === 'device' ? 'ok' : 'error', detail: adb, latencyMs: 0 });
+      } catch (e: unknown) {
+        result.services.push({ name: 'R1 ADB', status: 'error', detail: String(e).slice(0, 60) });
+      }
+
+      result.services.push({ name: 'Session', status: 'ok', detail: cfg.sessionId });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
       return;
     }
 
@@ -1207,26 +1450,39 @@ async function main(): Promise<void> {
   // NOTE: previously warmed the Whisper model at startup to spare the
   // first WebSocket client a cold load. That caused a SIGSEGV because
   // two ONNX Runtime sessions (Whisper + Kokoro) racing during startup
-  // destabilize the native runtime. First connection now triggers the
-  // load; transformers.js caches the weights so subsequent connections
-  // are fast.
+  // destabilize the native runtime. First connection now defers to
+  // after Kokoro warm completes to avoid the race entirely.
 
-  // Single process-wide Whisper instance. Creating a fresh
-  // WhisperStreamingStt per WebSocket connection spawns an independent
-  // ONNX Runtime session; when two clients connect (the web app and
-  // the Mac native app, or a reconnect racing an old connection) the
-  // simultaneous ONNX initializations would SIGABRT the whole process.
+  // Single process-wide STT instance (Whisper or FunASR). Creating a fresh
+  // StreamingStt per WebSocket connection spawns an independent
+  // ONNX Runtime session (Whisper) or Python process (FunASR); when two
+  // clients connect (the web app and the Mac native app, or a reconnect
+  // racing an old connection) the simultaneous initializations would
+  // SIGABRT the whole process (Whisper) or waste memory (FunASR).
   // The wrapper's own `reset()` is called on every `start` message so
   // sharing it between sequential callers is safe.
-  let sharedStt: WhisperStreamingStt | null = null;
+  let sharedStt: WhisperStreamingStt | FunasrStreamingStt | null = null;
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', async (ws: WebSocket) => {
     if (!sharedStt) {
-      sharedStt = new WhisperStreamingStt({ logger });
-      sharedStt.preload().catch(() => {});
+      // Wait for Kokoro to finish warming before preloading Whisper
+      // to avoid racing two ONNX Runtime sessions (which causes SIGABRT).
+      if (cfg.ttsBackend === 'kokoro') {
+        await kokoroWarmed;
+      }
+      if (cfg.sttBackend === 'funasr') {
+        sharedStt = new FunasrStreamingStt({ logger });
+      } else {
+        sharedStt = new WhisperStreamingStt({ logger });
+      }
+      sharedStt.preload().catch((err) => {
+        logger.warn('stt preload failed, transcriptions disabled', { error: String(err) });
+      });
     }
     const stt = sharedStt;
     let sessionSpeculationId: string | null = null;
+    let sessionUtteranceId: string | null = null;
+    let finalizingUtteranceId: string | null = null;
     let partialLoopTimer: ReturnType<typeof setInterval> | null = null;
     let lastEmittedPartial = '';
     let closed = false;
@@ -1248,7 +1504,12 @@ async function main(): Promise<void> {
             const p = await stt.partial();
             if (p !== null && p !== lastEmittedPartial) {
               lastEmittedPartial = p;
-              emit({ type: 'stt.partial', text: p, atMs: Date.now() });
+              emit({
+                type: 'stt.partial',
+                text: p,
+                utteranceId: sessionUtteranceId,
+                atMs: Date.now(),
+              });
               // Fire speculation on the server's own partials as they
               // grow — bypasses the client debouncer entirely. Only
               // start speculating once we have ~3 words of text.
@@ -1298,45 +1559,81 @@ async function main(): Promise<void> {
         return;
       }
       // Text frame — JSON control message.
-      let msg: { type?: string; speculationId?: string } = {};
+      let msg: { type?: string; speculationId?: string; utteranceId?: string } = {};
       try {
         msg = JSON.parse(data.toString('utf8')) as {
           type?: string;
           speculationId?: string;
+          utteranceId?: string;
         };
       } catch {
         return;
       }
       if (msg.type === 'start') {
         sessionSpeculationId = msg.speculationId ?? null;
+        sessionUtteranceId = msg.utteranceId ?? null;
         stt.reset();
         lastEmittedPartial = '';
-        emit({ type: 'ready', atMs: Date.now() });
+        emit({ type: 'ready', utteranceId: sessionUtteranceId, atMs: Date.now() });
       } else if (msg.type === 'end') {
+        const endingUtteranceId = msg.utteranceId ?? sessionUtteranceId;
+        if (sessionUtteranceId && endingUtteranceId !== sessionUtteranceId) {
+          logger.warn('ignoring stale stt end', {
+            endingUtteranceId,
+            sessionUtteranceId,
+          });
+          return;
+        }
+        if (endingUtteranceId && finalizingUtteranceId === endingUtteranceId) {
+          logger.warn('ignoring duplicate stt end', { endingUtteranceId });
+          return;
+        }
         // User signaled end of utterance. Produce a final transcript
         // and hand back to the client; it will post /turn with that
         // text + the same speculationId to promote the buffer.
         void (async () => {
+          finalizingUtteranceId = endingUtteranceId ?? null;
           stopPartialLoop();
           const finalText = await stt.transcribeAll();
           emit({
             type: 'stt.final',
             text: finalText,
             speculationId: sessionSpeculationId,
+            utteranceId: endingUtteranceId,
             atMs: Date.now(),
           });
-          stt.reset();
-          lastEmittedPartial = '';
-          sessionSpeculationId = null;
+          if (sessionUtteranceId === endingUtteranceId) {
+            stt.reset();
+            lastEmittedPartial = '';
+            sessionSpeculationId = null;
+            sessionUtteranceId = null;
+          } else if (!sessionUtteranceId) {
+            stt.reset();
+            lastEmittedPartial = '';
+            sessionSpeculationId = null;
+          }
+          if (finalizingUtteranceId === endingUtteranceId) {
+            finalizingUtteranceId = null;
+          }
         })();
       } else if (msg.type === 'abort') {
+        const abortUtteranceId = msg.utteranceId ?? sessionUtteranceId;
+        if (sessionUtteranceId && abortUtteranceId !== sessionUtteranceId) {
+          logger.warn('ignoring stale stt abort', {
+            abortUtteranceId,
+            sessionUtteranceId,
+          });
+          return;
+        }
         stopPartialLoop();
         stt.reset();
         lastEmittedPartial = '';
+        finalizingUtteranceId = null;
         if (sessionSpeculationId) {
           speculation.abort(sessionSpeculationId);
           sessionSpeculationId = null;
         }
+        sessionUtteranceId = null;
       }
     });
 
@@ -1344,13 +1641,14 @@ async function main(): Promise<void> {
       closed = true;
       stopPartialLoop();
       if (sessionSpeculationId) speculation.abort(sessionSpeculationId);
+      sessionUtteranceId = null;
+      finalizingUtteranceId = null;
     });
   });
 
-  // Bind loopback IPv4 explicitly so clients using http://127.0.0.1:PORT
-  // always reach us (Node's default can be IPv6-only when the port is free
-  // on v4 but taken on v6, or vice versa).
-  server.listen(requestedListenPort, '127.0.0.1', () => {
+  // Bind IPv4 explicitly so clients using http://127.0.0.1:PORT always reach
+  // us by default. Set OASIS_LISTEN_HOST=0.0.0.0 when LAN devices need access.
+  server.listen(requestedListenPort, requestedListenHost, () => {
     const addr = server.address();
     const actualPort =
       typeof addr === 'object' && addr !== null ? addr.port : requestedListenPort;
@@ -1365,9 +1663,9 @@ async function main(): Promise<void> {
       cfg.ttsBackend === 'kokoro'
         ? `kokoro (${cfg.kokoroVoice}, ${cfg.kokoroDtype})`
         : 'web-speech (browser)';
-    const routerLabel = `slm (${cfg.routerModel})`;
+    const routerLabel = `three-tier (arch-router@${cfg.archBaseUrl} + slm ${cfg.routerModel})`;
     process.stdout.write(
-      `\n  oasis-echo web is live at http://127.0.0.1:${actualPort}\n` +
+      `\n  oasis-echo web is live at http://${requestedListenHost}:${actualPort}\n` +
         `  router:   ${routerLabel}\n` +
         `  reasoner: ${reasonerLabel}\n` +
         `  tts:      ${ttsLabel}\n` +
@@ -1431,6 +1729,16 @@ function readBody(req: IncomingMessage): Promise<string> {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// Crash-proofing: these handlers log crashes but cannot prevent SIGABRT
+// from onnxruntime-node's native code (requires worker isolation).
+// launchd KeepAlive is the primary recovery mechanism.
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`UNCAUGHT EXCEPTION: ${String(err)}\n${err.stack ?? ''}\n`);
+});
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`UNHANDLED REJECTION: ${String(reason)}\n`);
+});
 
 main().catch((err) => {
   process.stderr.write(`fatal: ${String(err)}\n`);
