@@ -58,6 +58,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // reads those as letter names ("em-ech-em"). Stick to tokens with a vowel
 // spelling the phonemizer can actually sound out.
 const BACKCHANNEL_PHRASES = [
+  'yes',
+  "what's up",
+  "I'm here",
+  'hi',
+  'tell me',
   'uh huh',
   'yeah',
   'right',
@@ -760,7 +765,11 @@ async function main(): Promise<void> {
         res.end(JSON.stringify({ ready: false }));
         return;
       }
-      const phrase = phrases[Math.floor(Math.random() * phrases.length)]!;
+      const requestedPhrase = url.searchParams.get('phrase')?.trim();
+      const phrase =
+        requestedPhrase && backchannelCache.has(requestedPhrase)
+          ? requestedPhrase
+          : phrases[Math.floor(Math.random() * phrases.length)]!;
       const entry = backchannelCache.get(phrase)!;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ready: true, text: phrase, ...entry }));
@@ -815,57 +824,39 @@ async function main(): Promise<void> {
         stage: '3. r1-bridge',
         status: bridgeOk ? 'ok' : 'error',
         detail: bridgeOk ? bridgeDetail : 'no port responding',
-        format: '24 kHz / mono / 16-bit PCM (HTTP POST JSON)',
+        format: 'local-only route to R1 VoiceBot POC',
       });
 
-      // r1-tts-app HTTP endpoint
-      let ttsAppOk = false;
-      let ttsAppDetail = '';
+      // Isolated VoiceBot POC playback endpoint.
+      let pocOk = false;
+      let pocDetail = '';
       try {
-        const r1Res = await fetch(`http://${bridgeHost}:8232/pcm`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pcm: 'AAAA', sampleRate: 24000, final: false }),
+        const r1Res = await fetch(`http://${bridgeHost}:8242/health`, {
           signal: AbortSignal.timeout(3000),
         });
         if (r1Res.ok) {
-          ttsAppOk = true;
-          ttsAppDetail = 'POST /pcm → 200';
+          const health = await r1Res.json().catch(() => null) as { engine?: string; status?: string } | null;
+          pocOk = health?.status === 'ok';
+          pocDetail = health?.engine ?? 'HTTP /health ok';
         } else {
-          ttsAppDetail = `HTTP ${r1Res.status}`;
+          pocDetail = `HTTP ${r1Res.status}`;
         }
       } catch (e: unknown) {
-        ttsAppDetail = String(e).slice(0, 60);
+        pocDetail = String(e).slice(0, 60);
       }
       result.pipeline.push({
-        stage: '4. r1-tts-app HTTP',
-        status: ttsAppOk ? 'ok' : 'error',
-        detail: ttsAppOk ? ttsAppDetail : ttsAppDetail,
-        format: '24 kHz / mono / 16-bit PCM',
+        stage: '4. R1 VoiceBot POC',
+        status: pocOk ? 'ok' : 'error',
+        detail: pocDetail,
+        format: 'HTTP 8242 /pcm complete-turn playback',
       });
 
-      // PcmPlayer conversion
+      // POC framework playback
       result.pipeline.push({
-        stage: '5. PcmPlayer conversion',
+        stage: '5. MediaPlayer framework playback',
         status: 'ok' as const,
-        detail: 'resample 24k→48k + mono→stereo',
-        format: '48 kHz / stereo / 16-bit PCM (576000 bytes/chunk)',
-      });
-
-      // AudioTrack stage
-      result.pipeline.push({
-        stage: '6. AudioTrack',
-        status: 'ok' as const,
-        detail: 'write() → positive, playState=3 (PLAYING)',
-        format: '48 kHz / stereo / 16-bit / STREAM_SYSTEM',
-      });
-
-      // AK7755 DAC — verified working via tinyplay + test tones
-      result.pipeline.push({
-        stage: '7. AK7755 DAC → Speaker',
-        status: 'ok' as const,
-        detail: 'verified via tinyplay + test tones, card 2',
-        format: 'hardware: card 2 (AK7755), amp OK',
+        detail: 'POC wraps Kokoro PCM as a private WAV and plays via Android MediaPlayer',
+        format: 'STREAM_MUSIC, safe volume capped at 8/15',
       });
 
       // ── Services list ──
