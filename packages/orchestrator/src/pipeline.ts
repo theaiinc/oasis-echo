@@ -431,7 +431,12 @@ export class Pipeline {
               await this.bus.emit({ type: 'llm.token', turnId, token: ev.text, atMs: Date.now() });
               // Strip <think>...</think> blocks so reasoning tokens are
               // never synthesized into speech.
-              for (const sentence of chunker.feed(thinkFilter.filter(ev.text))) sentenceQueue.push(sentence);
+              const speakable = chunker.feed(thinkFilter.filter(ev.text));
+              for (const sentence of speakable) sentenceQueue.push(sentence);
+              if (speakable.length === 0) {
+                const phrase = chunker.flushPhraseIfReady();
+                if (phrase) sentenceQueue.push(phrase);
+              }
             } else if (ev.type === 'tool_use') {
               toolInflight.set(ev.id, { name: ev.name, startedAtMs: Date.now() });
               await this.bus.emit({

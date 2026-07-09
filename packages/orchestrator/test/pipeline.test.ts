@@ -169,6 +169,47 @@ describe('Pipeline', () => {
     );
   });
 
+  it('streams a phrase chunk before punctuation or reasoner completion', async () => {
+    const slow = new Pipeline({
+      sessionId: 's',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: [
+          'Birds ',
+          'fly ',
+          'because ',
+          'their ',
+          'lightweight ',
+          'bodies ',
+          'and ',
+          'powerful ',
+          'wings ',
+          'create ',
+          'lift ',
+          'while ',
+          'the ',
+          'rest ',
+          'continues.',
+        ],
+        delayMs: 80,
+      }),
+      tts: new PassthroughTts(),
+    });
+    const order: string[] = [];
+    slow.bus.on('tts.chunk', (e) => {
+      if (e.filler !== true) order.push(`tts:${e.text}`);
+    });
+    slow.bus.on('llm.done', () => void order.push('done'));
+
+    await slow.handleTurn('why do birds fly');
+
+    const firstTts = order.findIndex((entry) => entry.startsWith('tts:'));
+    const done = order.indexOf('done');
+    expect(firstTts).toBeGreaterThanOrEqual(0);
+    expect(done).toBeGreaterThan(firstTts);
+    expect(order[firstTts]).toContain('Birds fly because');
+  });
+
   it('skips the filler entirely when the reasoner is fast', async () => {
     const fast = new Pipeline({
       sessionId: 'f',

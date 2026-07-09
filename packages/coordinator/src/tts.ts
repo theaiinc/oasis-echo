@@ -36,6 +36,8 @@ export class SentenceChunker {
   private readonly clauseBoundary = /[,;:][\s"')\]]*(?=\s|$)/g;
   private readonly minClauseWords = 6;
   private readonly minClauseChars = 42;
+  private readonly minPhraseWords = 8;
+  private readonly minPhraseChars = 56;
 
   feed(token: string): string[] {
     this.buffer += token;
@@ -54,6 +56,18 @@ export class SentenceChunker {
     const rest = this.buffer.trim();
     this.buffer = '';
     return rest.length > 0 ? rest : null;
+  }
+
+  flushPhraseIfReady(): string | null {
+    const candidate = this.buffer.trim();
+    if (
+      candidate.length >= this.minPhraseChars ||
+      countWords(candidate) >= this.minPhraseWords
+    ) {
+      this.buffer = '';
+      return candidate;
+    }
+    return null;
   }
 
   private findBoundary(): number | null {

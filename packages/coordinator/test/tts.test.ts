@@ -36,6 +36,15 @@ describe('SentenceChunker', () => {
     expect(c.feed('Yes,')).toEqual([]);
     expect(c.feed(' that is right.')).toEqual(['Yes, that is right.']);
   });
+
+  it('can flush a long phrase before punctuation arrives', () => {
+    const c = new SentenceChunker();
+    c.feed('Birds fly because their lightweight bodies and powerful wings');
+    expect(c.flushPhraseIfReady()).toBe(
+      'Birds fly because their lightweight bodies and powerful wings',
+    );
+    expect(c.flush()).toBeNull();
+  });
 });
 
 describe('PassthroughTts', () => {
