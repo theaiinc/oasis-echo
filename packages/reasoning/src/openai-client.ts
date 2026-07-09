@@ -133,6 +133,13 @@ export class OpenAIReasoner implements Reasoner {
             continue;
           }
           const choice = parsed.choices?.[0];
+          const reasoningDelta = choice?.delta?.reasoning_content ?? '';
+          if (reasoningDelta) {
+            yield {
+              type: 'token',
+              text: `<think>${this.redactor.rehydrate(reasoningDelta, redactions)}</think>`,
+            };
+          }
           const delta = choice?.delta?.content ?? '';
           if (delta) {
             outChars += delta.length;

@@ -130,12 +130,10 @@ export function pickFirstFiller(recent?: Set<string>): string {
 }
 
 /**
- * A longer "continuation" filler built by chaining two reason-pool
- * entries that haven't been used yet. Neural TTS gives a chained
- * phrase continuous prosody — much better than synthesizing separate
- * clips back-to-back. Callers pass a `used` set so we don't pick the
- * same phrase twice in a turn; they can also pass a `recent` set
- * scoped to the whole session to avoid repeating across turns.
+ * A short continuation filler. Keep this to one phrase so R1-side playback can
+ * keep up with repeated fillers while a slow local model is still thinking.
+ * Callers pass a `used` set so we prefer not to pick the same phrase twice in a
+ * turn; they can also pass a `recent` set scoped to the whole session.
  */
 export function pickContinuationFiller(
   reason: string,
@@ -151,12 +149,5 @@ export function pickContinuationFiller(
   const a = randomPick(candidates) ?? FALLBACK;
   used.add(a);
   recent?.add(a);
-
-  const remaining = candidates.filter((p) => p !== a);
-  const b = randomPick(remaining) ?? '';
-  if (b) {
-    used.add(b);
-    recent?.add(b);
-  }
-  return b ? `${a} ${b}` : a;
+  return a;
 }

@@ -74,18 +74,40 @@ const BACKCHANNEL_PHRASES = [
 
 type BackchannelCacheEntry = { audio: string; sampleRate: number };
 const backchannelCache = new Map<string, BackchannelCacheEntry>();
+const backchannelCacheEnabled = process.env['OASIS_BACKCHANNEL_CACHE'] !== '0';
+
+async function synthesizeKokoroClip(kokoro: KokoroTts, text: string): Promise<BackchannelCacheEntry> {
+  const chunks: Int16Array[] = [];
+  let sampleRate = 0;
+  let totalSamples = 0;
+  for await (const chunk of kokoro.synthesize(text)) {
+    if (!chunk.pcm) continue;
+    if (sampleRate !== 0 && chunk.sampleRate !== sampleRate) {
+      throw new Error(`mixed Kokoro sample rates: ${sampleRate} and ${chunk.sampleRate}`);
+    }
+    sampleRate = chunk.sampleRate;
+    chunks.push(chunk.pcm);
+    totalSamples += chunk.pcm.length;
+  }
+  if (chunks.length === 0 || sampleRate === 0) {
+    throw new Error('Kokoro produced no PCM');
+  }
+  const pcm = new Int16Array(totalSamples);
+  let offset = 0;
+  for (const chunk of chunks) {
+    pcm.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  return {
+    audio: Buffer.from(bytes).toString('base64'),
+    sampleRate,
+  };
+}
 
 async function primeBackchannelCache(kokoro: KokoroTts): Promise<void> {
   for (const phrase of BACKCHANNEL_PHRASES) {
-    for await (const chunk of kokoro.synthesize(phrase)) {
-      if (!chunk.pcm) continue;
-      const bytes = new Uint8Array(chunk.pcm.buffer, chunk.pcm.byteOffset, chunk.pcm.byteLength);
-      backchannelCache.set(phrase, {
-        audio: Buffer.from(bytes).toString('base64'),
-        sampleRate: chunk.sampleRate,
-      });
-      break; // only one chunk per short phrase
-    }
+    backchannelCache.set(phrase, await synthesizeKokoroClip(kokoro, phrase));
   }
 }
 // Load .env from the repo root so `ANTHROPIC_API_KEY=…` in that file
@@ -420,10 +442,16 @@ async function main(): Promise<void> {
   // `<serverKey>__<toolName>` and registered alongside the built-ins
   // so the reasoner's model sees them via the normal tools array.
   const mcp = new McpRegistry({ logger });
-  const mcpTools = await mcp.loadFromFile().catch((err) => {
-    logger.warn('mcp registry failed to load', { error: String(err) });
-    return [];
-  });
+  const mcpDisabled = process.env['OASIS_MCP_DISABLED'] === '1' || process.env['OASIS_MCP_DISABLED'] === 'true';
+  const mcpTools = mcpDisabled
+    ? []
+    : await mcp.loadFromFile().catch((err) => {
+      logger.warn('mcp registry failed to load', { error: String(err) });
+      return [];
+    });
+  if (mcpDisabled) {
+    logger.warn('mcp registry disabled by OASIS_MCP_DISABLED');
+  }
   for (const t of mcpTools) {
     try { tools.register(t); }
     catch (err) { logger.warn('mcp tool register failed', { name: t.name, error: String(err) }); }
@@ -508,8 +536,12 @@ async function main(): Promise<void> {
       // cache the PCM so the client can fetch them instantly at full
       // volume (speechSynthesis output is typically much quieter than
       // Web Audio, which was making the backchannel barely audible).
-      await primeBackchannelCache(kokoroInstance!);
-      logger.info('backchannel cache primed', { count: backchannelCache.size });
+      if (backchannelCacheEnabled) {
+        await primeBackchannelCache(kokoroInstance!);
+        logger.info('backchannel cache primed', { count: backchannelCache.size });
+      } else {
+        logger.warn('backchannel cache disabled by OASIS_BACKCHANNEL_CACHE=0');
+      }
       kokoroWarmResolve?.();
       kokoroWarmResolve = null;
     }).catch((err) => {
@@ -759,6 +791,11 @@ async function main(): Promise<void> {
       // Hand out a random pre-synthesized Kokoro clip. Empty payload
       // if the cache hasn't primed yet — client falls back to
       // speechSynthesis in that case.
+      if (!backchannelCacheEnabled) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: false, disabled: true }));
+        return;
+      }
       const phrases = [...backchannelCache.keys()];
       if (phrases.length === 0) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -773,6 +810,46 @@ async function main(): Promise<void> {
       const entry = backchannelCache.get(phrase)!;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ready: true, text: phrase, ...entry }));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/speech-clip') {
+      if (cfg.ttsBackend !== 'kokoro' || !kokoroInstance) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: false, reason: 'kokoro unavailable' }));
+        return;
+      }
+      if (!kokoroInstance.isReady) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: false, reason: 'kokoro not ready' }));
+        return;
+      }
+
+      let body: { text?: unknown } = {};
+      try {
+        body = JSON.parse(await readBody(req)) as { text?: unknown };
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: false, reason: 'invalid json' }));
+        return;
+      }
+
+      const text = typeof body.text === 'string' ? body.text.trim() : '';
+      if (!text || text.length > 240) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: false, reason: 'text must be 1..240 chars' }));
+        return;
+      }
+
+      try {
+        const clip = await synthesizeKokoroClip(kokoroInstance, text);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: true, text, ...clip }));
+      } catch (err) {
+        logger.warn('speech clip synthesis failed', { error: String(err), text });
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ready: false, reason: 'synthesis failed' }));
+      }
       return;
     }
 
@@ -1427,6 +1504,9 @@ async function main(): Promise<void> {
   // authoritative for turn commit + TTS chunks; this endpoint purely
   // replaces the browser's SpeechRecognition with server-side STT.
   const wss = new WebSocketServer({ noServer: true });
+  wss.on('error', (err) => {
+    logger.warn('audio websocket server error', { error: String(err) });
+  });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     if (url.pathname === '/audio') {
@@ -1454,7 +1534,18 @@ async function main(): Promise<void> {
   // sharing it between sequential callers is safe.
   let sharedStt: WhisperStreamingStt | FunasrStreamingStt | null = null;
 
-  wss.on('connection', async (ws: WebSocket) => {
+  wss.on('connection', async (ws: WebSocket, req) => {
+    ws.on('error', (err) => {
+      logger.warn('audio websocket connection error', {
+        error: String(err),
+        remoteAddress: req.socket.remoteAddress,
+      });
+      try {
+        ws.close(1009, 'invalid audio websocket frame');
+      } catch {
+        /* ignore */
+      }
+    });
     if (!sharedStt) {
       // Wait for Kokoro to finish warming before preloading Whisper
       // to avoid racing two ONNX Runtime sessions (which causes SIGABRT).

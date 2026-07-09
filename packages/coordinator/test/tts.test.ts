@@ -20,6 +20,22 @@ describe('SentenceChunker', () => {
     const c = new SentenceChunker();
     expect(c.feed('One. Two! Three?')).toEqual(['One.', 'Two!', 'Three?']);
   });
+
+  it('splits on safe clause boundaries for faster TTS', () => {
+    const c = new SentenceChunker();
+    expect(c.feed('Blue light scatters more strongly than red,')).toEqual([
+      'Blue light scatters more strongly than red,',
+    ]);
+    expect(c.feed(' which makes the sky look blue.')).toEqual([
+      'which makes the sky look blue.',
+    ]);
+  });
+
+  it('does not split tiny comma fragments', () => {
+    const c = new SentenceChunker();
+    expect(c.feed('Yes,')).toEqual([]);
+    expect(c.feed(' that is right.')).toEqual(['Yes, that is right.']);
+  });
 });
 
 describe('PassthroughTts', () => {

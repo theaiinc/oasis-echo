@@ -248,14 +248,13 @@ export class Pipeline {
 
       if (sentenceQueue.length === 0 && !drainDone && !signal.aborted) {
         const recentSet = new Set(this.recentFillers);
-        const { fillerSpeed, maxFillers } = this.fillerStrategy();
+        const { fillerSpeed } = this.fillerStrategy();
         const usedFillers = new Set<string>();
         let fillersPlayed = 0;
         while (
           sentenceQueue.length === 0 &&
           !drainDone &&
-          !signal.aborted &&
-          fillersPlayed < maxFillers
+          !signal.aborted
         ) {
           const filler = fillersPlayed === 0
             ? pickFirstFiller(recentSet)
@@ -480,7 +479,7 @@ export class Pipeline {
       // If the model is fast enough that a sentence lands before the
       // threshold, we skip the filler entirely.
       const FILLER_THRESHOLD_MS = 600;
-      const { fillerSpeed, maxFillers } = this.fillerStrategy();
+      const { fillerSpeed } = this.fillerStrategy();
       await Promise.race([
         (async () => {
           while (sentenceQueue.length === 0 && !signal.aborted && !streamDone) {
@@ -490,7 +489,7 @@ export class Pipeline {
         sleep(FILLER_THRESHOLD_MS),
       ]);
 
-      // Play up to maxFillers while tokens still haven't arrived.
+      // Play fillers while no speakable answer chunk has arrived.
       //   Iteration 0: short "first-beat" filler ("Hmm.") for snappy feedback.
       //   Iteration 1+: longer CHAINED continuation (two fresh pool entries
       //                 joined into a single TTS call) so prosody flows as
@@ -502,16 +501,14 @@ export class Pipeline {
         this.trackRecentFiller(fillerText);
       }
       let fillersPlayed = 0;
-      // Keep filling while we don't yet have a complete sentence to
-      // synthesize. First-token alone isn't enough — Gemma can emit
-      // the first token at 700ms but take another 2-4s to complete
-      // the sentence, and we can't synthesize a fragment. So we wait
-      // for sentenceQueue to have something real.
+      // Keep filling while we don't yet have a speakable answer chunk.
+      // First-token alone isn't enough — local models can emit a token at
+      // 700ms but take another few seconds to reach a sentence/clause break.
+      // The loop exits immediately once SentenceChunker queues a safe chunk.
       while (
         sentenceQueue.length === 0 &&
         !signal.aborted &&
-        !streamDone &&
-        fillersPlayed < maxFillers
+        !streamDone
       ) {
         const text =
           fillersPlayed === 0
@@ -553,6 +550,15 @@ export class Pipeline {
         interrupted = true;
         this.metrics?.inc('interruptions_total');
       } else {
+        if (agentText.trim().length === 0) {
+          this.logger?.warn('empty escalated answer after reasoner stream', {
+            turnId,
+            userText: userText.slice(0, 120),
+          });
+          const fallback = "Sorry, I got stuck thinking. Please try again.";
+          await this.streamTts(turnId, fallback, signal).catch(() => undefined);
+          agentText = fallback;
+        }
         await this.bus.emit({ type: 'tts.done', turnId, atMs: Date.now() });
       }
       this.metrics?.observe('ttfa_ms', Date.now() - startedAtMs, { tier: 'escalated' });
@@ -654,20 +660,16 @@ export class Pipeline {
 
   /**
    * Forecast next-turn wait from the TTFT EMA and return how
-   * aggressively we should pace and stack fillers. Note: the full wait
+   * aggressively we should pace fillers. Note: the full wait
    * until we can start synthesizing the reply is TTFT + time to
-   * complete the first sentence — typically 1-3x TTFT — so we cap
-   * generously here.
+   * reach the first sentence/clause boundary — typically 1-3x TTFT.
    */
-  private fillerStrategy(): { fillerSpeed: number; maxFillers: number } {
+  private fillerStrategy(): { fillerSpeed: number } {
     const predicted = this.ttftEmaMs;
-    // A TTFT in the 500-1000ms range still means 2-4s before we have
-    // a full sentence + its audio synthesized. Bias `maxFillers` high
-    // — the while loop exits early anyway once a sentence is ready.
-    if (predicted < 1000) return { fillerSpeed: 0.95, maxFillers: 3 };
-    if (predicted < 2500) return { fillerSpeed: 0.88, maxFillers: 4 };
-    if (predicted < 5000) return { fillerSpeed: 0.80, maxFillers: 5 };
-    return { fillerSpeed: 0.74, maxFillers: 6 };
+    if (predicted < 1000) return { fillerSpeed: 0.95 };
+    if (predicted < 2500) return { fillerSpeed: 0.88 };
+    if (predicted < 5000) return { fillerSpeed: 0.80 };
+    return { fillerSpeed: 0.74 };
   }
 
   private recordTtft(ms: number): void {
@@ -718,6 +720,10 @@ class ThinkingFilter {
   private readonly openTag = '<think>';
   private readonly closeTag = '</think>';
   private inside = false;
+  private rawThoughtMode = false;
+  private rawThoughtPrefixChecked = false;
+  private rawThoughtProbe = '';
+  private rawThoughtBuffer = '';
   /** Buffer for partial tag matching across token boundaries. */
   private partial = '';
   private readonly onThinkToken: (token: string) => void;
@@ -727,6 +733,28 @@ class ThinkingFilter {
   }
 
   filter(token: string): string {
+    if (this.rawThoughtMode) {
+      return this.filterRawThought(token);
+    }
+
+    if (!this.rawThoughtPrefixChecked) {
+      this.rawThoughtProbe += token;
+      const rawThoughtStart = this.rawThoughtProbe.match(/^\s*thought\s*(?::|\r?\n)/i);
+      if (rawThoughtStart) {
+        this.rawThoughtPrefixChecked = true;
+        this.rawThoughtMode = true;
+        const rest = this.rawThoughtProbe.slice(rawThoughtStart[0].length);
+        this.rawThoughtProbe = '';
+        return this.filterRawThought(rest);
+      }
+      if (/^\s*(?:t|th|tho|thou|thoug|though|thought|thought\s*:?)$/i.test(this.rawThoughtProbe)) {
+        return '';
+      }
+      this.rawThoughtPrefixChecked = true;
+      token = this.rawThoughtProbe;
+      this.rawThoughtProbe = '';
+    }
+
     // Fully inside a think block — capture and drop everything.
     if (this.inside) {
       const ci = token.indexOf(this.closeTag);
@@ -789,6 +817,20 @@ class ThinkingFilter {
 
   /** Call when the stream ends to flush any held partial text. */
   flush(): string {
+    if (!this.rawThoughtPrefixChecked && this.rawThoughtProbe.length > 0) {
+      const out = this.rawThoughtProbe;
+      this.rawThoughtProbe = '';
+      this.rawThoughtPrefixChecked = true;
+      return out;
+    }
+    if (this.rawThoughtMode) {
+      if (this.rawThoughtBuffer.length > 0) {
+        this.onThinkToken(this.rawThoughtBuffer);
+      }
+      this.rawThoughtBuffer = '';
+      this.rawThoughtMode = false;
+      return '';
+    }
     // If we're inside a think block, remaining partial is thinking content
     if (this.inside && this.partial.length > 0) {
       this.onThinkToken(this.partial);
@@ -796,6 +838,21 @@ class ThinkingFilter {
     const out = this.partial;
     this.partial = '';
     return out;
+  }
+
+  private filterRawThought(token: string): string {
+    this.rawThoughtBuffer += token;
+    const marker = this.rawThoughtBuffer.match(/\b(?:response|answer|final)\s*:\s*/i);
+    if (!marker || marker.index === undefined) {
+      return '';
+    }
+
+    const thought = this.rawThoughtBuffer.slice(0, marker.index);
+    if (thought.length > 0) this.onThinkToken(thought);
+    this.rawThoughtMode = false;
+    const reply = this.rawThoughtBuffer.slice(marker.index + marker[0].length);
+    this.rawThoughtBuffer = '';
+    return reply;
   }
 }
 

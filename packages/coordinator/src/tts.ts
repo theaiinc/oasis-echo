@@ -24,21 +24,25 @@ export interface StreamingTts {
 }
 
 /**
- * Splits a stream of LLM tokens into sentence-sized chunks so downstream
- * TTS can begin synthesis at the first punctuation boundary without
- * waiting for the full reply.
+ * Splits a stream of LLM tokens into speakable chunks so downstream TTS can
+ * begin synthesis at the first safe punctuation boundary without waiting for
+ * the full reply. Sentence boundaries always flush; comma-like clause
+ * boundaries flush only after enough words have accumulated to avoid tiny,
+ * awkward fragments such as "The answer is,".
  */
 export class SentenceChunker {
   private buffer = '';
-  private readonly boundary = /([.!?]+[\s"')\]]*)(?=\s|$)/;
+  private readonly sentenceBoundary = /[.!?]+[\s"')\]]*(?=\s|$)/g;
+  private readonly clauseBoundary = /[,;:][\s"')\]]*(?=\s|$)/g;
+  private readonly minClauseWords = 6;
+  private readonly minClauseChars = 42;
 
   feed(token: string): string[] {
     this.buffer += token;
     const out: string[] = [];
     while (true) {
-      const m = this.boundary.exec(this.buffer);
-      if (!m) break;
-      const end = m.index + m[0].length;
+      const end = this.findBoundary();
+      if (end === null) break;
       const sentence = this.buffer.slice(0, end).trim();
       if (sentence.length > 0) out.push(sentence);
       this.buffer = this.buffer.slice(end);
@@ -51,6 +55,33 @@ export class SentenceChunker {
     this.buffer = '';
     return rest.length > 0 ? rest : null;
   }
+
+  private findBoundary(): number | null {
+    this.sentenceBoundary.lastIndex = 0;
+    const sentence = this.sentenceBoundary.exec(this.buffer);
+
+    this.clauseBoundary.lastIndex = 0;
+    let clause: RegExpExecArray | null;
+    while ((clause = this.clauseBoundary.exec(this.buffer))) {
+      const end = clause.index + clause[0].length;
+      if (sentence && sentence.index < clause.index) {
+        return sentence.index + sentence[0].length;
+      }
+      const candidate = this.buffer.slice(0, end).trim();
+      if (
+        countWords(candidate) >= this.minClauseWords ||
+        candidate.length >= this.minClauseChars
+      ) {
+        return end;
+      }
+    }
+
+    return sentence ? sentence.index + sentence[0].length : null;
+  }
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
 /**

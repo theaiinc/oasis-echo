@@ -123,4 +123,36 @@ describe('OpenAIReasoner', () => {
     const messages = (JSON.parse(requestBody) as { messages: Array<{ role: string; content: string }> }).messages;
     expect(messages.at(-1)).toEqual({ role: 'assistant', content: ' ' });
   });
+
+  it('routes OpenAI-compatible reasoning_content through think tags', async () => {
+    const baseUrl = await startFakeOpenAI((write, end) => {
+      write(
+        'data: ' +
+          JSON.stringify({
+            choices: [{ delta: { reasoning_content: 'private reasoning' } }],
+          }),
+      );
+      write('');
+      write(
+        'data: ' +
+          JSON.stringify({
+            choices: [{ delta: { content: 'Visible answer.' } }],
+          }),
+      );
+      write('');
+      write('data: [DONE]');
+      end();
+    });
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'x' });
+    const tokens: string[] = [];
+    for await (const ev of reasoner.stream({
+      userText: 'reply',
+      state: newDialogueState('s', 0),
+    })) {
+      if (ev.type === 'token') tokens.push(ev.text);
+    }
+
+    expect(tokens.join('')).toContain('<think>private reasoning</think>');
+    expect(tokens.join('')).toContain('Visible answer.');
+  });
 });

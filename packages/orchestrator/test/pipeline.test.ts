@@ -91,6 +91,28 @@ describe('Pipeline', () => {
     expect(joined).toContain('cloud answer');
   });
 
+  it('routes literal leading thought output to thinking events instead of TTS', async () => {
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: ['thought', '\nI should reason privately. Res', 'ponse: Clean answer.'],
+      }),
+      tts: new PassthroughTts(),
+    });
+    const chunks: string[] = [];
+    const thinking: string[] = [];
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
+    p.bus.on('think.token', (e) => void thinking.push(e.token));
+
+    const turn = await p.handleTurn('why do rainbows form');
+
+    expect(thinking.join('')).toContain('I should reason privately');
+    expect(chunks.join(' ')).toContain('Clean answer');
+    expect(chunks.join(' ')).not.toContain('thought');
+    expect(turn.agentText).toBe('Clean answer.');
+  });
+
   it('plays a filler chunk first when the reasoner is slow', async () => {
     const slow = new Pipeline({
       sessionId: 's',
@@ -109,6 +131,42 @@ describe('Pipeline', () => {
     const fillerCount = events.filter((e) => e.filler).length;
     expect(fillerCount).toBeGreaterThan(0);
     expect(events.map((e) => e.text).join(' ').toLowerCase()).toContain('slow');
+  });
+
+  it('continues fillers until a speakable clause arrives', async () => {
+    const slow = new Pipeline({
+      sessionId: 's',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: [
+          'This ',
+          'answer ',
+          'takes ',
+          'a ',
+          'while ',
+          'before ',
+          'the ',
+          'first ',
+          'safe ',
+          'clause,',
+          ' then finishes.',
+        ],
+        delayMs: 180,
+      }),
+      tts: new PassthroughTts(),
+    });
+    const events: Array<{ text: string; filler: boolean }> = [];
+    slow.bus.on('tts.chunk', (e) =>
+      void events.push({ text: e.text, filler: e.filler === true }),
+    );
+
+    await slow.handleTurn('explain a delayed answer');
+
+    const fillerCount = events.filter((e) => e.filler).length;
+    expect(fillerCount).toBeGreaterThan(3);
+    expect(events.map((e) => e.text).join(' ')).toContain(
+      'This answer takes a while before the first safe clause,',
+    );
   });
 
   it('skips the filler entirely when the reasoner is fast', async () => {
