@@ -14,6 +14,7 @@ import type { Logger, Metrics, Tracer } from '@oasis-echo/telemetry';
 import type { Intent, RouterOutput, Turn } from '@oasis-echo/types';
 import { BargeInArbiter } from './bargein-arbiter.js';
 import { EventBus } from './event-bus.js';
+import type { FillerAdvisor } from './filler-advisor.js';
 import { pickApology, pickContinuationFiller, pickFirstFiller } from './filler.js';
 
 export type PipelineOpts = {
@@ -27,6 +28,7 @@ export type PipelineOpts = {
   logger?: Logger;
   metrics?: Metrics;
   tracer?: Tracer;
+  fillerAdvisor?: FillerAdvisor;
   summarizeEveryNTurns?: number;
 };
 
@@ -55,6 +57,7 @@ export class Pipeline {
   private readonly logger: Logger | undefined;
   private readonly metrics: Metrics | undefined;
   private readonly tracer: Tracer | undefined;
+  private readonly fillerAdvisor: FillerAdvisor | undefined;
   private readonly summarizeEveryNTurns: number;
   private turnCounter = 0;
   /**
@@ -95,6 +98,7 @@ export class Pipeline {
     this.logger = opts.logger;
     this.metrics = opts.metrics;
     this.tracer = opts.tracer;
+    this.fillerAdvisor = opts.fillerAdvisor;
     this.summarizeEveryNTurns = opts.summarizeEveryNTurns ?? 5;
   }
 
@@ -378,6 +382,10 @@ export class Pipeline {
     const recentSet = new Set(this.recentFillers);
     const fillerText =
       output.decision.filler ?? pickFirstFiller(recentSet);
+    const usedFillers = new Set<string>();
+    let advisedFiller: string | null = null;
+    let fillerAdviceInFlight = false;
+    let thinkingContext = '';
 
     // Begin turn with arbiter; signal propagates to TTS and LLM
     const signal = this.arbiter.beginTurn(turnId, () => {});
@@ -405,8 +413,39 @@ export class Pipeline {
       // Stateful filter that captures <think>...</think> blocks and
       // routes them via bus.emit('think.token') for the UI, while
       // stripping them from the TTS sentence stream.
+      const requestFillerAdvice = (): void => {
+        if (
+          !this.fillerAdvisor ||
+          fillerAdviceInFlight ||
+          signal.aborted ||
+          sentenceQueue.length > 0 ||
+          thinkingContext.trim().length < 16
+        ) {
+          return;
+        }
+        fillerAdviceInFlight = true;
+        const input = {
+          userText,
+          reason: fillerReason,
+          thinking: thinkingContext.slice(-900),
+          previousFillers: [...usedFillers, ...this.recentFillers].slice(-12),
+        };
+        void this.fillerAdvisor.advise(input).then((phrase) => {
+          if (phrase && !signal.aborted && !usedFillers.has(phrase)) {
+            advisedFiller = phrase;
+          }
+        }).catch((err) => {
+          this.logger?.debug('filler advisor failed', { error: String(err) });
+        }).finally(() => {
+          fillerAdviceInFlight = false;
+        });
+      };
       const thinkFilter = new ThinkingFilter(
-        (token) => { void this.bus.emit({ type: 'think.token' as const, turnId, token, atMs: Date.now() }); },
+        (token) => {
+          thinkingContext = (thinkingContext + token).slice(-1200);
+          requestFillerAdvice();
+          void this.bus.emit({ type: 'think.token' as const, turnId, token, atMs: Date.now() });
+        },
       );
 
       // Track outstanding tool calls so the result event can report
@@ -500,11 +539,6 @@ export class Pipeline {
       //                 joined into a single TTS call) so prosody flows as
       //                 one natural thought. The `usedFillers` set prevents
       //                 the same phrase appearing twice in one turn.
-      const usedFillers = new Set<string>();
-      if (fillerText) {
-        usedFillers.add(fillerText);
-        this.trackRecentFiller(fillerText);
-      }
       let fillersPlayed = 0;
       // Keep filling while we don't yet have a speakable answer chunk.
       // First-token alone isn't enough — local models can emit a token at
@@ -515,11 +549,21 @@ export class Pipeline {
         !signal.aborted &&
         !streamDone
       ) {
-        const text =
-          fillersPlayed === 0
-            ? fillerText
-            : pickContinuationFiller(fillerReason, usedFillers, recentSet);
-        if (fillersPlayed > 0) this.trackRecentFiller(text);
+        let text = fillerText;
+        if (fillersPlayed > 0) {
+          if (advisedFiller && !usedFillers.has(advisedFiller)) {
+            text = advisedFiller;
+            advisedFiller = null;
+            usedFillers.add(text);
+            this.trackRecentFiller(text);
+          } else {
+            text = pickContinuationFiller(fillerReason, usedFillers, recentSet);
+            this.trackRecentFiller(text);
+          }
+        } else if (text) {
+          usedFillers.add(text);
+          this.trackRecentFiller(text);
+        }
         // Natural "breath" pause before the next filler. Scales with
         // position (later fillers → longer pause) so the pacing feels
         // like someone genuinely hesitating rather than reading a list.
@@ -530,6 +574,7 @@ export class Pipeline {
           trailingSilenceMs,
         });
         fillersPlayed++;
+        requestFillerAdvice();
       }
 
       // Drain sentences as they arrive. Each synth starts right after

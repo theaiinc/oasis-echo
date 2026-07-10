@@ -36,7 +36,7 @@ export const ALLOWED_INTENTS_BY_PHASE: Record<Phase, readonly Intent[]> = {
   idle: ['greeting', 'smalltalk', 'question_simple', 'question_complex', 'command_local', 'command_tool'],
   greeting: ['greeting', 'smalltalk', 'question_simple', 'command_local', 'command_tool'],
   collecting: ['smalltalk', 'question_simple', 'question_complex', 'command_local', 'command_tool', 'cancel'],
-  confirming: ['confirm', 'deny', 'cancel', 'wait'],
+  confirming: ['confirm', 'deny', 'cancel', 'wait', 'question_simple', 'question_complex', 'command_local', 'command_tool'],
   executing: ['stop', 'cancel', 'wait', 'backchannel'],
   closing: ['greeting', 'smalltalk', 'confirm', 'deny'],
 };

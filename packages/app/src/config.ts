@@ -30,6 +30,8 @@ export type RuntimeConfig = {
   archBaseUrl: string;
   /** Arch-Router model ID as registered in LM Studio. */
   archModel: string;
+  archTimeoutMs: number;
+  slmTimeoutMs: number;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   profile: 'm3pro-18gb' | 'm4max-64gb' | 'test';
 };
@@ -90,7 +92,7 @@ export function loadConfig(): RuntimeConfig {
     kokoroDtype: (process.env['KOKORO_DTYPE'] as RuntimeConfig['kokoroDtype']) ?? 'q8',
     router: 'slm',
     routerBaseUrl,
-    routerModel: process.env['OASIS_ROUTER_MODEL'] ?? (backend === 'ollama' ? model : 'gemma4:e2b'),
+    routerModel: process.env['OASIS_ROUTER_MODEL'] ?? (backend === 'ollama' ? model : 'qwen3:4b'),
     reasonerTimeoutMs: Number(process.env['OASIS_REASONER_TIMEOUT_MS'] ?? 120_000),
     // Arch-Router 1.5B runs on LM Studio (OpenAI-compatible API).
     // Default to localhost:1234/v1 with model ID as loaded in LM Studio.
@@ -100,6 +102,8 @@ export function loadConfig(): RuntimeConfig {
       'http://localhost:1234/v1',
     archModel:
       process.env['OASIS_ARCH_MODEL'] ?? 'arch-router-1.5b.gguf',
+    archTimeoutMs: Number(process.env['OASIS_ARCH_TIMEOUT_MS'] ?? 15_000),
+    slmTimeoutMs: Number(process.env['OASIS_SLM_TIMEOUT_MS'] ?? 20_000),
     logLevel: (process.env['OASIS_LOG_LEVEL'] as RuntimeConfig['logLevel']) ?? 'info',
     profile: (process.env['OASIS_PROFILE'] as RuntimeConfig['profile']) ?? 'm3pro-18gb',
   };

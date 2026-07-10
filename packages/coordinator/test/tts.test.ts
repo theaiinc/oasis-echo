@@ -23,12 +23,12 @@ describe('SentenceChunker', () => {
 
   it('splits on safe clause boundaries for faster TTS', () => {
     const c = new SentenceChunker();
-    expect(c.feed('Blue light scatters more strongly than red,')).toEqual([
-      'Blue light scatters more strongly than red,',
+    expect(
+      c.feed('Blue light scatters more strongly than red across the upper atmosphere,'),
+    ).toEqual([
+      'Blue light scatters more strongly than red across the upper atmosphere,',
     ]);
-    expect(c.feed(' which makes the sky look blue.')).toEqual([
-      'which makes the sky look blue.',
-    ]);
+    expect(c.feed(' which makes the sky look blue.')).toEqual(['which makes the sky look blue.']);
   });
 
   it('does not split tiny comma fragments', () => {
@@ -37,12 +37,49 @@ describe('SentenceChunker', () => {
     expect(c.feed(' that is right.')).toEqual(['Yes, that is right.']);
   });
 
-  it('can flush a long phrase before punctuation arrives', () => {
+  it('does not flush short phrase fragments before punctuation arrives', () => {
     const c = new SentenceChunker();
     c.feed('Birds fly because their lightweight bodies and powerful wings');
-    expect(c.flushPhraseIfReady()).toBe(
+    expect(c.flushPhraseIfReady()).toBeNull();
+    expect(c.flush()).toBe(
       'Birds fly because their lightweight bodies and powerful wings',
     );
+  });
+
+  it('can flush a longer phrase before punctuation arrives', () => {
+    const c = new SentenceChunker();
+    c.feed(
+      'Birds fly because their lightweight bodies and powerful wings create lift while their feathers shape airflow over each wing during steady forward motion across changing air pressure patterns around them',
+    );
+    expect(c.flushPhraseIfReady()).toBe(
+      'Birds fly because their lightweight bodies and powerful wings create lift while their feathers shape airflow over each wing during steady forward motion across changing air pressure patterns around them',
+    );
+    expect(c.flush()).toBeNull();
+  });
+
+  it('does not flush phrase chunks that end on weak connector words', () => {
+    const c = new SentenceChunker();
+    c.feed(
+      'The high concept science fiction thrillers are really dominating the',
+    );
+    expect(c.flushPhraseIfReady()).toBeNull();
+    c.feed(' buzz lately with mysteries that');
+    expect(c.flushPhraseIfReady()).toBeNull();
+    c.feed(' keep viewers guessing while the unresolved clues build a steady sense of momentum that');
+    expect(c.flushPhraseIfReady()).toBeNull();
+    c.feed(' carries forward through each new reveal and emotional reversal');
+    expect(c.flushPhraseIfReady()).toBe(
+      'The high concept science fiction thrillers are really dominating the buzz lately with mysteries that keep viewers guessing while the unresolved clues build a steady sense of momentum that carries forward through each new reveal and emotional reversal',
+    );
+  });
+
+  it('drops punctuation-only chunks after an early phrase flush', () => {
+    const c = new SentenceChunker();
+    c.feed(
+      'They combine mind bending philosophical concepts with intense visual spectacle allowing viewers to explore big ideas about humanity and existence within a thrillingly dynamic narrative framework',
+    );
+    expect(c.flushPhraseIfReady()).toContain('narrative framework');
+    expect(c.feed('.')).toEqual([]);
     expect(c.flush()).toBeNull();
   });
 });

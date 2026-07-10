@@ -52,6 +52,11 @@
 - `docker-compose.yml` uses static IP 10.89.87.10.
 - `host.docker.internal` for Ollama access.
 
+## Local Model Runtime
+
+- Aha: the live local LLM stack can run from Avalon (`/Users/stevetran/llama-dash`) instead of separate LM Studio/Ollama servers. Current `.env` maps the OpenAI reasoner to `http://localhost:8787/v1` model `google_gemma-4-E4B-it-qat-q4_0-gguf`, the Arch classifier to `katanemo_Arch-Router-1.5B.gguf`, and the SLM/filler Ollama-compatible path to `http://localhost:8787` model `Qwen_Qwen3-4B-GGUF`.
+- Aha: Avalon currently serves GGUF through `llama-cli` subprocess calls, not a resident LM Studio server, so router timeouts must be higher than the old hot-model defaults. Use `OASIS_ARCH_TIMEOUT_MS=15000` and `OASIS_SLM_TIMEOUT_MS=20000` for this setup.
+
 ## STT Backends
 
 ### Whisper (default)

@@ -27,6 +27,7 @@ Design notes:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import sys
@@ -104,7 +105,11 @@ class FunasrBridge:
                 return {"type": response_type, "text": ""}
             # SenseVoiceSmall returns a list of dicts, e.g.
             # [{"text": "<|en|><|NEUTRAL|><|Speech|><|withitn|>Hello world"}]
-            result = self.model.generate(input=self._buffer, language="auto")
+            # FunASR/modelscope may emit progress bars or timing summaries to
+            # stdout. Stdout is our line-delimited JSON protocol, so route that
+            # library noise to stderr while inference runs.
+            with contextlib.redirect_stdout(sys.stderr):
+                result = self.model.generate(input=self._buffer, language="auto")
             text = ""
             if isinstance(result, list):
                 parts: list[str] = []
@@ -129,37 +134,29 @@ class FunasrBridge:
 def main() -> None:
     bridge = FunasrBridge()
 
-    stdin_bin = sys.stdin.buffer  # binary stream, no buffering surprises
-    buf = b""
-    while True:
-        chunk = stdin_bin.read(65536)
-        if not chunk:
-            break  # stdin closed -> parent process exited
-        buf += chunk
-        while b"\n" in buf:
-            line_bytes, buf = buf.split(b"\n", 1)
-            line = line_bytes.decode("utf-8").strip()
-            if not line:
-                continue
-            try:
-                cmd = json.loads(line)
-            except json.JSONDecodeError as exc:
-                _respond({"type": "error", "message": f"json decode: {exc}"})
-                continue
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _respond({"type": "error", "message": f"json decode: {exc}"})
+            continue
 
-            cmd_type = cmd.get("type")
-            if cmd_type == "preload":
-                _respond(bridge.cmd_preload())
-            elif cmd_type == "feed":
-                _respond(bridge.cmd_feed(cmd.get("samples", "")))
-            elif cmd_type == "partial":
-                _respond(bridge.cmd_partial())
-            elif cmd_type == "finalize":
-                _respond(bridge.cmd_finalize())
-            elif cmd_type == "reset":
-                _respond(bridge.cmd_reset())
-            else:
-                _respond({"type": "error", "message": f"unknown command: {cmd_type}"})
+        cmd_type = cmd.get("type")
+        if cmd_type == "preload":
+            _respond(bridge.cmd_preload())
+        elif cmd_type == "feed":
+            _respond(bridge.cmd_feed(cmd.get("samples", "")))
+        elif cmd_type == "partial":
+            _respond(bridge.cmd_partial())
+        elif cmd_type == "finalize":
+            _respond(bridge.cmd_finalize())
+        elif cmd_type == "reset":
+            _respond(bridge.cmd_reset())
+        else:
+            _respond({"type": "error", "message": f"unknown command: {cmd_type}"})
 
 
 def _respond(obj: dict) -> None:

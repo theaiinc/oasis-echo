@@ -34,7 +34,7 @@ import {
   type StreamingTts,
   type Strategy,
 } from '@oasis-echo/coordinator';
-import { Pipeline } from '@oasis-echo/orchestrator';
+import { OllamaFillerAdvisor, Pipeline } from '@oasis-echo/orchestrator';
 import {
   AnthropicReasoner,
   McpRegistry,
@@ -503,8 +503,10 @@ async function main(): Promise<void> {
   const router: Router = new ThreeTierRouter({
     archBaseUrl: cfg.archBaseUrl,
     archModel: cfg.archModel,
+    archTimeoutMs: cfg.archTimeoutMs,
     slmBaseUrl: cfg.routerBaseUrl,
     slmModel: cfg.routerModel,
+    slmTimeoutMs: cfg.slmTimeoutMs,
     logger,
     fallback: alwaysEscalate,
   });
@@ -555,15 +557,27 @@ async function main(): Promise<void> {
     tts = new PassthroughTts();
   }
 
-  const pipeline = new Pipeline({
-    sessionId: cfg.sessionId,
-    router,
-    reasoner,
-    tts,
-    logger,
-    metrics,
-    tracer: new Tracer(),
-  });
+  const fillerAdvisor = process.env['OASIS_FILLER_ADVISOR'] === '0'
+    ? undefined
+    : new OllamaFillerAdvisor({
+        baseUrl: cfg.routerBaseUrl,
+        model: cfg.routerModel,
+        timeoutMs: Number(process.env['OASIS_FILLER_ADVISOR_TIMEOUT_MS'] ?? 2000),
+      });
+  const pipeline = new Pipeline(
+    Object.assign(
+      {
+        sessionId: cfg.sessionId,
+        router,
+        reasoner,
+        tts,
+        logger,
+        metrics,
+        tracer: new Tracer(),
+      },
+      fillerAdvisor ? { fillerAdvisor } : {},
+    ),
+  );
 
   // Speculative execution: run router + reasoner on stable partials
   // while the user is still speaking, so first TTS chunk can fire
@@ -781,6 +795,7 @@ async function main(): Promise<void> {
           allowedIntents: s.allowedIntents,
           slots: s.slots,
           turns: s.turns.length,
+          recentTurns: s.turns.slice(-10),
           summary: s.summary,
         }),
       );

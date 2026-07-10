@@ -21,6 +21,7 @@ export const DEFAULT_TRANSITIONS: StateTransition[] = [
   { from: 'collecting', to: 'confirming', on: ['command_tool'] },
   { from: 'confirming', to: 'executing', on: ['confirm'] },
   { from: 'confirming', to: 'collecting', on: ['deny'] },
+  { from: 'confirming', to: 'collecting', on: ['question_simple', 'question_complex', 'command_local', 'command_tool'] },
   { from: 'confirming', to: 'idle', on: ['cancel'] },
   { from: 'executing', to: 'closing', on: ['confirm'] },
   { from: 'executing', to: 'idle', on: ['cancel', 'stop'] },

@@ -70,7 +70,7 @@ export class OllamaRouter implements Router {
 
   constructor(opts: OllamaRouterOpts = {}) {
     this.baseUrl = (opts.baseUrl ?? 'http://localhost:11434').replace(/\/$/, '');
-    this.model = opts.model ?? 'gemma4:e2b';
+    this.model = opts.model ?? 'qwen3:4b';
     // First call is often slow (model load); give it room, but the
     // fallback still kicks in after this point if the SLM is broken.
     this.timeoutMs = opts.timeoutMs ?? 12_000;

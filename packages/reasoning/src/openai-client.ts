@@ -99,13 +99,36 @@ export class OpenAIReasoner implements Reasoner {
       }
       if (!res.body) throw new Error('openai: missing response body');
 
-      const decoder = new TextDecoder();
-      const reader = res.body.getReader();
-      let buf = '';
       let outChars = 0;
       let inputTokens = 0;
       let outputTokens = 0;
       let stopReason: string | null = null;
+
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.includes('text/event-stream')) {
+        const completion = await res.json() as OpenAIChatCompletion;
+        const rawMessage = completion.choices?.[0]?.message?.content ?? '';
+        const message = shouldUseLocalConsoleFilter(this.baseUrl)
+          ? stripLocalConsoleEcho(rawMessage)
+          : rawMessage;
+        if (message) {
+          outChars += message.length;
+          yield { type: 'token', text: this.redactor.rehydrate(message, redactions) };
+        }
+        const usage = completion.usage;
+        this.breaker.recordSuccess();
+        yield {
+          type: 'done',
+          stopReason: completion.choices?.[0]?.finish_reason ?? 'stop',
+          inputTokens: usage?.prompt_tokens ?? 0,
+          outputTokens: usage?.completion_tokens ?? Math.ceil(outChars / 4),
+        };
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      const reader = res.body.getReader();
+      let buf = '';
 
       while (true) {
         const { value, done } = await reader.read();
@@ -186,7 +209,7 @@ export class OpenAIReasoner implements Reasoner {
       msgs.push({ role: 'user', content: turn.userText });
       if (turn.agentText) msgs.push({ role: 'assistant', content: turn.agentText });
     }
-    msgs.push({ role: 'user', content: userText });
+    msgs.push({ role: 'user', content: shouldUseNoThinkDirective(this.baseUrl) ? `${userText}\n/no_think` : userText });
     if (this.assistantPrefill) {
       // LM Studio reasoning models can stream only `reasoning_content`
       // unless generation is prefixed into the assistant response.
@@ -199,6 +222,17 @@ export class OpenAIReasoner implements Reasoner {
 type OpenAIStreamChunk = {
   choices?: Array<{
     delta?: { content?: string; reasoning_content?: string };
+    finish_reason?: string;
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  };
+};
+
+type OpenAIChatCompletion = {
+  choices?: Array<{
+    message?: { content?: string };
     finish_reason?: string;
   }>;
   usage?: {
@@ -231,4 +265,50 @@ function shouldUseAssistantPrefill(baseUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+function shouldUseNoThinkDirective(baseUrl: string): boolean {
+  const explicit = process.env['OASIS_OPENAI_NO_THINK'];
+  if (explicit === '1' || explicit === 'true') return true;
+  if (explicit === '0' || explicit === 'false') return false;
+
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
+function shouldUseLocalConsoleFilter(baseUrl: string): boolean {
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
+function stripLocalConsoleEcho(raw: string): string {
+  let text = raw
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+
+  const noThinkIndex = text.lastIndexOf('/no_think');
+  if (noThinkIndex !== -1) {
+    text = text.slice(noThinkIndex + '/no_think'.length);
+  } else if (text.includes('(truncated)')) {
+    text = text.slice(text.lastIndexOf('(truncated)') + '(truncated)'.length);
+  } else if (/^\s*loading model/i.test(text) || /\bavailable commands:\b/i.test(text)) {
+    // If the local server only returned its CLI banner/prompt echo, do
+    // not let that reach TTS. A later retry after warmup will answer.
+    return '';
+  }
+
+  text = text
+    .replace(/^\s*(?:>?\s*assistant\s*:)?\s*/i, '')
+    .replace(/^\s*assistant\s*/i, '')
+    .trim();
+
+  return text;
 }

@@ -196,7 +196,9 @@ export class ArchRouter implements Router {
     const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    const raw = (data.choices?.[0]?.message?.content ?? '').trim().toLowerCase();
+    const raw = sanitizeLocalClassifierOutput(data.choices?.[0]?.message?.content ?? '')
+      .trim()
+      .toLowerCase();
     const matched = this.matchIntent(raw, state.allowedIntents);
 
     if (!matched) {
@@ -216,4 +218,16 @@ export class ArchRouter implements Router {
     }
     return null;
   }
+}
+
+function sanitizeLocalClassifierOutput(raw: string): string {
+  let text = raw
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+  if (text.includes('(truncated)')) {
+    text = text.slice(text.lastIndexOf('(truncated)') + '(truncated)'.length);
+  }
+  return text
+    .replace(/^\s*(?:>?\s*assistant\s*:)?\s*/i, '')
+    .trim();
 }

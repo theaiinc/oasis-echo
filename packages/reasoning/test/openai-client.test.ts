@@ -34,6 +34,23 @@ async function startFakeOpenAI(
   });
 }
 
+async function startFakeJsonOpenAI(body: unknown): Promise<string> {
+  return await new Promise((resolve) => {
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      });
+    });
+    server.listen(0, () => {
+      currentServer = server;
+      const addr = server.address();
+      if (typeof addr === 'object' && addr) resolve(`http://127.0.0.1:${addr.port}/v1`);
+    });
+  });
+}
+
 afterEach(async () => {
   if (currentServer) {
     await new Promise<void>((r) => currentServer!.close(() => r()));
@@ -121,6 +138,7 @@ describe('OpenAIReasoner', () => {
     }
 
     const messages = (JSON.parse(requestBody) as { messages: Array<{ role: string; content: string }> }).messages;
+    expect(messages.at(-2)).toEqual({ role: 'user', content: 'reply ok\n/no_think' });
     expect(messages.at(-1)).toEqual({ role: 'assistant', content: ' ' });
   });
 
@@ -154,5 +172,78 @@ describe('OpenAIReasoner', () => {
 
     expect(tokens.join('')).toContain('<think>private reasoning</think>');
     expect(tokens.join('')).toContain('Visible answer.');
+  });
+
+  it('accepts non-streaming JSON completions from local compatible servers', async () => {
+    const baseUrl = await startFakeJsonOpenAI({
+      choices: [
+        {
+          message: { content: 'A real answer.' },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 3, completion_tokens: 4 },
+    });
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'x' });
+    const tokens: string[] = [];
+    const doneEvents: Array<{ inputTokens: number; outputTokens: number }> = [];
+    for await (const ev of reasoner.stream({
+      userText: 'reply',
+      state: newDialogueState('s', 0),
+    })) {
+      if (ev.type === 'token') tokens.push(ev.text);
+      if (ev.type === 'done') doneEvents.push(ev);
+    }
+
+    expect(tokens.join('')).toBe('A real answer.');
+    expect(doneEvents).toMatchObject([{ inputTokens: 3, outputTokens: 4 }]);
+  });
+
+  it('strips local llama console echo from JSON completions', async () => {
+    const baseUrl = await startFakeJsonOpenAI({
+      choices: [
+        {
+          message: {
+            content:
+              'Loading model...\n\n> system: prompt\n> user: reply\n/no_think\nassistant:\n\nA clean answer.',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+    });
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'x' });
+    const tokens: string[] = [];
+    for await (const ev of reasoner.stream({
+      userText: 'reply',
+      state: newDialogueState('s', 0),
+    })) {
+      if (ev.type === 'token') tokens.push(ev.text);
+    }
+
+    expect(tokens.join('')).toBe('A clean answer.');
+  });
+
+  it('strips local llama truncated prompt echo from JSON completions', async () => {
+    const baseUrl = await startFakeJsonOpenAI({
+      choices: [
+        {
+          message: {
+            content:
+              'Loading model...\n\navailable commands:\n\n> system: long prompt ... (truncated)\nA clean answer after truncation.',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+    });
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'x' });
+    const tokens: string[] = [];
+    for await (const ev of reasoner.stream({
+      userText: 'reply',
+      state: newDialogueState('s', 0),
+    })) {
+      if (ev.type === 'token') tokens.push(ev.text);
+    }
+
+    expect(tokens.join('')).toBe('A clean answer after truncation.');
   });
 });

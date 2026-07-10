@@ -26,6 +26,19 @@ describe('DialogueStateStore', () => {
     expect(s.phase).toBe('executing');
   });
 
+  it('allows substantive corrections while confirming', () => {
+    const s = new DialogueStateStore({ sessionId: 's1' });
+    s.applyIntent('command_tool');
+    s.applyIntent('command_tool');
+    expect(s.phase).toBe('confirming');
+    expect(s.allowedIntents).toContain('question_complex');
+
+    const res = s.applyIntent('question_complex');
+
+    expect(res.transitioned).toBe(true);
+    expect(s.phase).toBe('collecting');
+  });
+
   it('does not transition on disallowed intent', () => {
     const s = new DialogueStateStore({ sessionId: 's1' });
     const res = s.applyIntent('backchannel');

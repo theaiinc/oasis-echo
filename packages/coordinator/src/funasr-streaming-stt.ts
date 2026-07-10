@@ -354,9 +354,12 @@ export class FunasrStreamingStt {
         const pending = this.responseQueue.shift();
         if (pending) pending.resolve(response);
       } catch (err) {
-        const pending = this.responseQueue.shift();
-        if (pending)
-          pending.reject(new Error(`Invalid JSON from bridge: ${trimmed}`));
+        // FunASR/modelscope can print tqdm/status noise to stdout during
+        // inference. That output is not part of our protocol; do not consume
+        // a queued response or the real JSON line that follows will orphan.
+        this.logger?.warn('ignoring non-json funasr bridge stdout', {
+          line: trimmed.slice(0, 200),
+        });
       }
     }
   }

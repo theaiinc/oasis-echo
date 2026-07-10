@@ -6,6 +6,7 @@ import type {
 } from '@oasis-echo/reasoning';
 import { Metrics } from '@oasis-echo/telemetry';
 import type { DialogueState, Intent } from '@oasis-echo/types';
+import type { FillerAdvisor } from '../src/filler-advisor.js';
 import { Pipeline } from '../src/pipeline.js';
 
 /**
@@ -169,6 +170,47 @@ describe('Pipeline', () => {
     );
   });
 
+  it('uses non-blocking thinking-aware filler advice when it arrives before the next filler', async () => {
+    const advisor: FillerAdvisor = {
+      async advise(input) {
+        if (input.thinking.includes('wing shape')) {
+          return 'Wings and lift, thinking.';
+        }
+        return null;
+      },
+    };
+    const slow = new Pipeline({
+      sessionId: 's',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: [
+          '<think>wing shape and lift matter</think>',
+          'Birds ',
+          'fly ',
+          'because ',
+          'their ',
+          'wings ',
+          'create ',
+          'lift ',
+          'over ',
+          'light ',
+          'bodies.',
+        ],
+        delayMs: 180,
+      }),
+      tts: new PassthroughTts(),
+      fillerAdvisor: advisor,
+    });
+    const fillers: string[] = [];
+    slow.bus.on('tts.chunk', (e) => {
+      if (e.filler === true) fillers.push(e.text);
+    });
+
+    await slow.handleTurn('why do birds fly');
+
+    expect(fillers).toContain('Wings and lift, thinking.');
+  });
+
   it('streams a phrase chunk before punctuation or reasoner completion', async () => {
     const slow = new Pipeline({
       sessionId: 's',
@@ -187,8 +229,27 @@ describe('Pipeline', () => {
           'create ',
           'lift ',
           'while ',
+          'feathers ',
+          'shape ',
+          'airflow ',
+          'over ',
+          'each ',
+          'wing ',
+          'and ',
           'the ',
           'rest ',
+          'of ',
+          'the ',
+          'body ',
+          'stays ',
+          'balanced ',
+          'through ',
+          'small ',
+          'adjustments ',
+          'as ',
+          'the ',
+          'air ',
+          'moves ',
           'continues.',
         ],
         delayMs: 80,

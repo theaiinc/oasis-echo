@@ -34,10 +34,10 @@ export class SentenceChunker {
   private buffer = '';
   private readonly sentenceBoundary = /[.!?]+[\s"')\]]*(?=\s|$)/g;
   private readonly clauseBoundary = /[,;:][\s"')\]]*(?=\s|$)/g;
-  private readonly minClauseWords = 6;
-  private readonly minClauseChars = 42;
-  private readonly minPhraseWords = 8;
-  private readonly minPhraseChars = 56;
+  private readonly minClauseWords = 10;
+  private readonly minClauseChars = 80;
+  private readonly minPhraseWords = 28;
+  private readonly minPhraseChars = 190;
 
   feed(token: string): string[] {
     this.buffer += token;
@@ -46,7 +46,7 @@ export class SentenceChunker {
       const end = this.findBoundary();
       if (end === null) break;
       const sentence = this.buffer.slice(0, end).trim();
-      if (sentence.length > 0) out.push(sentence);
+      if (isSpeakableChunk(sentence)) out.push(sentence);
       this.buffer = this.buffer.slice(end);
     }
     return out;
@@ -55,14 +55,16 @@ export class SentenceChunker {
   flush(): string | null {
     const rest = this.buffer.trim();
     this.buffer = '';
-    return rest.length > 0 ? rest : null;
+    return isSpeakableChunk(rest) ? rest : null;
   }
 
   flushPhraseIfReady(): string | null {
     const candidate = this.buffer.trim();
     if (
-      candidate.length >= this.minPhraseChars ||
-      countWords(candidate) >= this.minPhraseWords
+      (candidate.length >= this.minPhraseChars ||
+        countWords(candidate) >= this.minPhraseWords) &&
+      !endsOnWeakBoundary(candidate) &&
+      isSpeakableChunk(candidate)
     ) {
       this.buffer = '';
       return candidate;
@@ -96,6 +98,43 @@ export class SentenceChunker {
 
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function isSpeakableChunk(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
+function endsOnWeakBoundary(text: string): boolean {
+  const lastWord = text
+    .trim()
+    .toLowerCase()
+    .match(/[a-z0-9]+$/)?.[0];
+  if (!lastWord) return true;
+  return new Set([
+    'a',
+    'an',
+    'and',
+    'as',
+    'at',
+    'because',
+    'but',
+    'by',
+    'for',
+    'from',
+    'if',
+    'in',
+    'into',
+    'like',
+    'of',
+    'on',
+    'or',
+    'that',
+    'the',
+    'to',
+    'while',
+    'which',
+    'with',
+  ]).has(lastWord);
 }
 
 /**
