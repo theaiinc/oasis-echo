@@ -52,6 +52,9 @@ export class PostProcessPipeline {
       original,
       stagesApplied,
       history,
+      reviewCandidate: history.some(
+        (entry) => entry.stage === 'semantic' && entry.before !== entry.after,
+      ),
       latencyMs: Date.now() - startedAt,
     };
   }

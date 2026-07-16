@@ -66,6 +66,8 @@ export type PostProcessResult = {
   stagesApplied: string[];
   /** Per-stage before/after for tracing. */
   history: Array<{ stage: string; before: string; after: string; info?: Record<string, unknown> }>;
+  /** True when a semantic rewrite is worth showing as a non-blocking review. */
+  reviewCandidate?: boolean;
   /** Wall-clock ms for the entire pipeline. */
   latencyMs: number;
 };

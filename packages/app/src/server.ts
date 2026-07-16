@@ -642,19 +642,21 @@ async function main(): Promise<void> {
         phrases: [...loadPhraseList(), ...correctionStore.phrases()],
         similarityThreshold: 0.78,
       }),
-      ...(cfg.backend === 'ollama'
-        ? [
-            new SemanticCorrectionStage({
-              correct: makeOllamaCorrector({
-                baseUrl: cfg.ollamaBaseUrl,
-                model: cfg.routerModel,
-                logger,
-              }),
-              minConfidenceToRun: 0.6,
-              timeoutMs: 2500,
-            }),
-          ]
-        : []),
+      // Use the local Ollama-compatible SLM for ambiguous STT even when
+      // the primary dialogue reasoner is OpenAI/Anthropic. This stage is
+      // marker-gated, so clean transcripts avoid the extra request while
+      // fragments such as "u hold up" get repaired before display.
+      new SemanticCorrectionStage({
+        correct: makeOllamaCorrector({
+          baseUrl: cfg.backend === 'openai' ? cfg.openaiBaseUrl : cfg.ollamaBaseUrl,
+          model: cfg.backend === 'openai'
+            ? (cfg.mediumReasonerModel ?? cfg.model)
+            : cfg.routerModel,
+          logger,
+        }),
+        minConfidenceToRun: 0.6,
+        timeoutMs: 2500,
+      }),
     ]);
   }
 
@@ -1120,6 +1122,7 @@ async function main(): Promise<void> {
               final: pp.text,
               stages: pp.stagesApplied,
               history: pp.history,
+              reviewCandidate: pp.reviewCandidate === true,
               latencyMs: pp.latencyMs,
               atMs: Date.now(),
             });
@@ -1313,10 +1316,16 @@ async function main(): Promise<void> {
       const body = await readBody(req);
       let original = '';
       let corrected = '';
+      let phraseOnly = false;
       try {
-        const parsed = JSON.parse(body) as { original?: unknown; corrected?: unknown };
+        const parsed = JSON.parse(body) as {
+          original?: unknown;
+          corrected?: unknown;
+          phraseOnly?: unknown;
+        };
         original = String(parsed.original ?? '').trim();
         corrected = String(parsed.corrected ?? '').trim();
+        phraseOnly = parsed.phraseOnly === true;
       } catch {
         // fall through to validation below
       }
@@ -1325,7 +1334,7 @@ async function main(): Promise<void> {
         res.end(JSON.stringify({ error: 'missing original or corrected' }));
         return;
       }
-      const analysis = await correctionStore.addCorrection(original, corrected);
+      const analysis = await correctionStore.addCorrection(original, corrected, { phraseOnly });
       logger.info('correction', {
         original,
         corrected,
@@ -1378,6 +1387,7 @@ async function main(): Promise<void> {
           original: pp.original,
           stages: pp.stagesApplied,
           history: pp.history,
+          reviewCandidate: pp.reviewCandidate === true,
           latencyMs: pp.latencyMs,
           totalMs: Date.now() - started,
         }),

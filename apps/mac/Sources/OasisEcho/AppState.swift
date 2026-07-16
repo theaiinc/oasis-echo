@@ -35,6 +35,12 @@ struct AgentMessage: Identifiable, Equatable {
     var partial: Bool
 }
 
+struct CorrectionReview: Identifiable, Equatable {
+    let id = UUID()
+    let original: String
+    let corrected: String
+}
+
 extension UserDefaults {
     @objc dynamic var wakeWordEnabled: Bool {
         bool(forKey: "oasis.wakeWordEnabled")
@@ -55,6 +61,7 @@ final class AppState: ObservableObject {
     @Published var isHudExpanded: Bool = false
     @Published var serverReachable: Bool = false
     @Published var serverModel: String = ""
+    @Published var correctionReviews: [CorrectionReview] = []
 
     // configuration
     @AppStorage("oasis.serverBaseURL") var serverBaseURL: String = "http://127.0.0.1:9187"
@@ -127,5 +134,27 @@ final class AppState: ObservableObject {
             guard let self else { return }
             if self.pill == state { self.pill = .idle }
         }
+    }
+
+    func enqueueCorrectionReview(original: String, corrected: String) {
+        guard original != corrected,
+              !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !corrected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !correctionReviews.contains(where: { $0.original == original && $0.corrected == corrected })
+        else { return }
+        correctionReviews.append(CorrectionReview(original: original, corrected: corrected))
+        if correctionReviews.count > 10 {
+            correctionReviews.removeFirst(correctionReviews.count - 10)
+        }
+    }
+
+    func dismissCorrectionReview(_ review: CorrectionReview) {
+        correctionReviews.removeAll { $0.id == review.id }
+    }
+
+    func deferCorrectionReview(_ review: CorrectionReview) {
+        guard let index = correctionReviews.firstIndex(where: { $0.id == review.id }) else { return }
+        let item = correctionReviews.remove(at: index)
+        correctionReviews.append(item)
     }
 }

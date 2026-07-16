@@ -18,25 +18,44 @@ export function makeOllamaCorrector(opts: OllamaCorrectorOpts = {}): SemanticCor
 
   return async (text, opts = {}) => {
     const { signal, agentContext } = opts;
-    const res = await fetch(`${baseUrl}/api/generate`, {
+    const openAICompatible = baseUrl.endsWith('/v1') || baseUrl.includes(':8787');
+    const res = await fetch(
+      openAICompatible ? `${baseUrl}/chat/completions` : `${baseUrl}/api/generate`,
+      {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        prompt: buildCorrectionPrompt(text, agentContext),
-        stream: false,
-        think: false,
-        keep_alive: '30m',
-        options: { temperature: 0.1, num_predict: 200 },
-      }),
+      body: openAICompatible
+        ? JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: buildCorrectionPrompt(text, agentContext) }],
+            stream: false,
+            temperature: 0.1,
+            max_tokens: 200,
+          })
+        : JSON.stringify({
+            model,
+            prompt: buildCorrectionPrompt(text, agentContext),
+            stream: false,
+            think: false,
+            keep_alive: '30m',
+            options: { temperature: 0.1, num_predict: 200 },
+          }),
       ...(signal ? { signal } : {}),
-    });
+      },
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`ollama corrector ${res.status}: ${body.slice(0, 120)}`);
     }
-    const data = (await res.json()) as { response?: string };
-    const raw = (data.response ?? '').trim();
+    const data = (await res.json()) as {
+      response?: string;
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const raw = (
+      (openAICompatible
+        ? data.choices?.[0]?.message?.content
+        : data.response) ?? ''
+    ).trim();
     // Strip a leading 'Corrected:' echo in case the model repeats the hint.
     return raw.replace(/^corrected\s*:\s*/i, '').trim();
   };

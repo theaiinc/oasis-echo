@@ -130,11 +130,13 @@ actor OasisClient {
         return try JSONDecoder().decode(MeetingDetail.self, from: data)
     }
 
-    func learnCorrection(original: String, corrected: String) async throws {
+    func learnCorrection(original: String, corrected: String, phraseOnly: Bool = false) async throws {
         var req = URLRequest(url: baseURL.appending(path: "/correction"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONEncoder().encode(CorrectionRequestBody(original: original, corrected: corrected))
+        req.httpBody = try JSONEncoder().encode(
+            CorrectionRequestBody(original: original, corrected: corrected, phraseOnly: phraseOnly)
+        )
         _ = try await session.data(for: req)
     }
 

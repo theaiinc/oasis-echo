@@ -18,6 +18,7 @@ struct SttPostprocessEvent: Decodable {
     let original: String?
     let final: String
     let stages: [String]?
+    let reviewCandidate: Bool?
     let latencyMs: Double?
 }
 
@@ -64,6 +65,7 @@ struct TranscribeResponse: Decodable {
     let text: String
     let original: String?
     let stages: [String]?
+    let reviewCandidate: Bool?
     let latencyMs: Double?
     let totalMs: Double?
 }
@@ -80,6 +82,7 @@ struct TurnRequestBody: Encodable {
 struct CorrectionRequestBody: Encodable {
     let original: String
     let corrected: String
+    let phraseOnly: Bool
 }
 
 struct ConfigResponse: Decodable {

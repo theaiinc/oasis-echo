@@ -584,39 +584,35 @@ final class TurnController: ObservableObject {
 
     private func handleTranscribe(raw: String) {
         let startMs = Self.nowMs()
+        let words = raw.split(whereSeparator: { $0.isWhitespace }).count
+        let totalMs = Int(Self.nowMs() - startMs)
+        if state.autoPaste {
+            switch Paster.paste(raw, activateTarget: pasteTargetApp()) {
+            case .pasted:
+                state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
+            case .copiedOnly:
+                state.flashPill(.copiedOnly(words: words), after: 2.4)
+                Paster.showPermissionGate()
+            case .empty:
+                break
+            }
+        } else {
+            state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
+        }
+        state.liveTranscript = ""
+
+        guard state.serverReachable else { return }
         Task { [weak self] in
             guard let self else { return }
-            var cleaned = raw
-            if state.serverReachable {
-                do {
-                    let resp = try await client.transcribe(raw)
-                    cleaned = resp.text
-                } catch {
-                    // Fall through with raw text; don't block the paste.
-                }
-            }
-            await MainActor.run {
-                let words = cleaned.split(whereSeparator: { $0.isWhitespace }).count
-                let totalMs = Int(Self.nowMs() - startMs)
-                if self.state.autoPaste {
-                    switch Paster.paste(cleaned, activateTarget: self.pasteTargetApp()) {
-                    case .pasted:
-                        self.state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
-                    case .copiedOnly:
-                        // Text is on the clipboard. Paste via AppleScript
-                        // (System Events) or CGEvent (AX) didn't work.
-                        // Show a one-shot guide to grant Automation
-                        // permission for System Events — this survives
-                        // ad-hoc rebuilds because it's tied to bundle ID.
-                        self.state.flashPill(.copiedOnly(words: words), after: 2.4)
-                        Paster.showPermissionGate()
-                    case .empty:
-                        break
+            do {
+                let resp = try await client.transcribe(raw)
+                if resp.reviewCandidate == true, resp.text != raw {
+                    await MainActor.run {
+                        self.state.enqueueCorrectionReview(original: raw, corrected: resp.text)
                     }
-                } else {
-                    self.state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
                 }
-                self.state.liveTranscript = ""
+            } catch {
+                // The raw transcript has already been delivered; review is best-effort.
             }
         }
     }
@@ -708,11 +704,18 @@ final class TurnController: ObservableObject {
             }
         case "stt.postprocess":
             if let e = try? JSONDecoder().decode(SttPostprocessEvent.self, from: data) {
-                // No-op in Mac; /transcribe returns the cleaned text
-                // directly. The stream copy is useful in Echo mode when
-                // the server’s own STT path runs — it can still reach
-                // here via websocket capture. Keep for parity.
-                _ = e
+                // Echo mode adds the raw user transcript immediately so the
+                // conversation feels responsive. Replace it once the server
+                // finishes its spacing/phonetic/context correction instead
+                // of leaving malformed STT text visible in the transcript.
+                if e.reviewCandidate != true,
+                   let index = state.agentMessages.lastIndex(where: { $0.role == .user }),
+                   e.original == nil || state.agentMessages[index].text == e.original {
+                    state.agentMessages[index].text = e.final
+                }
+                if e.reviewCandidate == true, let original = e.original, original != e.final {
+                    state.enqueueCorrectionReview(original: original, corrected: e.final)
+                }
             }
         case "emotion.directives":
             if let e = try? JSONDecoder().decode(EmotionDirectivesEvent.self, from: data) {
@@ -797,6 +800,28 @@ final class TurnController: ObservableObject {
 
     func teachCorrection(original: String, corrected: String) async throws {
         try await client.learnCorrection(original: original, corrected: corrected)
+    }
+
+    func acceptCorrectionReview(_ review: CorrectionReview) {
+        state.dismissCorrectionReview(review)
+        if let index = state.agentMessages.lastIndex(where: { $0.role == .user && $0.text == review.original }) {
+            state.agentMessages[index].text = review.corrected
+        }
+        Task {
+            try? await client.learnCorrection(
+                original: review.original,
+                corrected: review.corrected,
+                phraseOnly: true
+            )
+        }
+    }
+
+    func dismissCorrectionReview(_ review: CorrectionReview) {
+        state.dismissCorrectionReview(review)
+    }
+
+    func deferCorrectionReview(_ review: CorrectionReview) {
+        state.deferCorrectionReview(review)
     }
 
     private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }

@@ -68,6 +68,10 @@
 
 ### API startup
 - Aha: the macOS app must always probe `/config` during launch and start the local API when it is unavailable; do not gate this recovery path on the legacy `autoStartServer` preference. Docker vs `npm run server` remains selectable.
+- Aha: Echo mode initially displays raw STT text, so the Mac client must apply the server's `stt.postprocess` event to the latest user message; otherwise spacing and phonetic corrections are only used for reasoning while malformed text remains visible.
+- Aha: short STT artifacts such as `u`, `ur`, and `r` should trigger semantic correction; the local Ollama-compatible SLM can repair ambiguous transcripts even when the primary dialogue reasoner is OpenAI or Anthropic.
+- Aha: Avalon exposes the correction model through OpenAI-compatible `/v1/chat/completions`, not Ollama `/api/generate`; when `OPENAI_BASE_URL` points at Avalon, semantic STT correction must use that protocol or it silently falls back to raw text.
+- Aha: transcript corrections must never block dictation; deliver the raw transcript immediately, surface semantic proposals as a bounded non-blocking review queue, and persist only explicitly accepted phrase-level mappings.
 
 ### Whisper (default)
 - Uses `@huggingface/transformers` with `Xenova/whisper-base.en` ONNX model.
@@ -98,3 +102,14 @@ Commands (JSON lines to stdin):
 - `{"type":"reset"}` — clear buffer, responds `{"type":"ack"}`
 - On error: `{"type":"error","message":"..."}`
 - stderr is inherited by parent (not part of protocol).
+
+### Meeting mode reliability
+- Meeting transcripts are autosaved locally in macOS `UserDefaults` after each
+  final segment and notes edit, with a server-side `.oasis-meetings/current-draft.json`
+  backup when the API is reachable. An interrupted meeting can be resumed from
+  the Meeting window instead of being discarded on app/server restart.
+- The meeting prompt starts at `8` and uses an observable main-run-loop timer
+  to count down visibly to zero before dismissing.
+- Meeting microphone buffers are also written to local CAF files under
+  `~/Library/Application Support/OasisEcho/Meetings/`; transcript recovery and
+  raw audio recovery are separate so a server failure does not lose either.

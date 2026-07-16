@@ -78,9 +78,13 @@ export class CorrectionStore {
    * notifies the `onChange` callback so callers can rebuild their
    * live post-process pipeline.
    */
-  async addCorrection(original: string, corrected: string): Promise<CorrectionAnalysis> {
+  async addCorrection(
+    original: string,
+    corrected: string,
+    options: { phraseOnly?: boolean } = {},
+  ): Promise<CorrectionAnalysis> {
     const analysis = analyzeDiff(original, corrected);
-    for (const { wrong, right } of analysis.wordPairs) {
+    for (const { wrong, right } of options.phraseOnly ? [] : analysis.wordPairs) {
       if (wrong.length > 1 && right.length > 0 && wrong.toLowerCase() !== right.toLowerCase()) {
         this.data.wordRules[wrong.toLowerCase()] = right;
       }

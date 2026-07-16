@@ -10,6 +10,7 @@ import SwiftUI
 // underneath is never replaced.
 struct PillView: View {
     @EnvironmentObject var state: AppState
+    @EnvironmentObject var controller: TurnController
 
     // Geometry — kept tight so the panel can hug the orb and not
     // intercept clicks across a huge dead zone.
@@ -24,6 +25,10 @@ struct PillView: View {
     var body: some View {
         let t = now.timeIntervalSince(startedAt)
         VStack(spacing: 4) {
+            if let review = state.correctionReviews.first {
+                correctionReview(review)
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
             if hasToast {
                 toastBubble.transition(.opacity.combined(with: .scale(scale: 0.94)))
             }
@@ -32,6 +37,25 @@ struct PillView: View {
         .onReceive(tick) { now = $0 }
         .onHover { hovering = $0 }
         .transaction { $0.animation = nil }
+    }
+
+    private func correctionReview(_ review: CorrectionReview) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Possible transcript correction")
+                .font(.system(size: 11, weight: .semibold))
+            Text("“\(review.original)” → “\(review.corrected)”")
+                .font(.system(size: 11))
+                .lineLimit(2)
+            HStack(spacing: 6) {
+                Button("Accept") { controller.acceptCorrectionReview(review) }
+                Button("Keep") { controller.dismissCorrectionReview(review) }
+                Button("Later") { controller.deferCorrectionReview(review) }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+        }
+        .padding(8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 
     // MARK: - Orb

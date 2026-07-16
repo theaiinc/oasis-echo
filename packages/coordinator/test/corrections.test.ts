@@ -77,6 +77,14 @@ describe('CorrectionStore', () => {
     expect(store.phrases()).toEqual(['send an email']);
   });
 
+  it('can persist review feedback as a phrase without a global word rule', async () => {
+    const store = new CorrectionStore(file);
+    await store.load();
+    await store.addCorrection('schedule a meting', 'schedule a meeting', { phraseOnly: true });
+    expect(store.wordRules()).toEqual({});
+    expect(store.phrases()).toEqual(['schedule a meeting']);
+  });
+
   it('does both on a single-word diff inside a phrase', async () => {
     const store = new CorrectionStore(file);
     await store.load();

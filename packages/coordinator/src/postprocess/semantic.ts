@@ -27,6 +27,7 @@ export type SemanticCorrectionOpts = {
 
 const DEFAULT_AMBIGUITY: RegExp[] = [
   /\b(?:uh+|um+|eh+)\b/i,      // residual fillers the rule stage missed
+  /\b(?:u|ur|r)\b/i,           // common STT substitutions for spoken words
   /\b(\w+)\s+\1\b/i,            // duplicated words
   /\s[a-z]{1,2}\s[a-z]{1,2}\s/, // run of very short tokens = often garbled
 ];
@@ -75,7 +76,8 @@ export class SemanticCorrectionStage implements PostProcessStage {
     const conf = ctx.confidence ?? 1;
     if (conf < this.minConfidenceToRun) return true;
     // Confidence looks fine — still check structural ambiguity markers.
-    return this.ambiguityMarkers.some((re) => re.test(ctx.text));
+    return this.ambiguityMarkers.some((re) => re.test(ctx.text))
+      || hasNearDuplicateWords(ctx.text);
   }
 
   async run(ctx: PostProcessContext): Promise<PostProcessStepResult> {
@@ -103,7 +105,10 @@ export class SemanticCorrectionStage implements PostProcessStage {
       return {
         text: corrected,
         changed: true,
-        info: agentContext ? { usedAgentContext: true } : {},
+        info: {
+          reviewCandidate: true,
+          ...(agentContext ? { usedAgentContext: true } : {}),
+        },
       };
     } catch (err) {
       return { text: ctx.text, changed: false, info: { error: String(err) } };
@@ -111,6 +116,25 @@ export class SemanticCorrectionStage implements PostProcessStage {
       clearTimeout(timer);
     }
   }
+}
+
+function hasNearDuplicateWords(text: string): boolean {
+  const words = text.toLowerCase().match(/[a-z]+/g) ?? [];
+  for (let i = 1; i < words.length; i += 1) {
+    const previous = words[i - 1]!;
+    const current = words[i]!;
+    if (previous.length < 4 || current.length < 4) continue;
+    let common = 0;
+    while (common < previous.length
+      && common < current.length
+      && previous[common] === current[common]) {
+      common += 1;
+    }
+    if (common >= 3 && Math.abs(previous.length - current.length) <= 3) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -125,11 +149,15 @@ export class SemanticCorrectionStage implements PostProcessStage {
  */
 export function buildCorrectionPrompt(noisyText: string, agentContext?: AgentContext): string {
   const lines = [
-    'Fix transcription errors in the following text. Rules:',
-    '- Preserve meaning exactly. Do NOT add new information.',
+    'You are correcting an automatic speech transcript, not answering a question.',
+    'Return one clean transcript that preserves exactly what the speaker meant.',
+    '- Remove duplicated rolling-buffer fragments and filler words.',
+    '- Join fragments only when they clearly repeat the same spoken words.',
+    '- Restore missing spaces and punctuation.',
     '- Remove filler words ("uh", "um", "like", "you know").',
     '- Fix obvious homophone errors (to/too/two, their/there).',
     '- Fix word-level grammar only if obviously wrong.',
+    '- Preserve meaning exactly. Do NOT add new information or answer the text.',
     '- Do NOT rephrase, summarize, or expand.',
     '- Return ONLY the corrected text. No preamble, no quotes.',
   ];

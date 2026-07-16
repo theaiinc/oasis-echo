@@ -44,6 +44,11 @@ describe('RuleStage', () => {
     expect(out.text).toBe('hello, world! how are you');
   });
 
+  it('restores spaces around joined numbers', () => {
+    const out = stage.run({ text: 'maximum15 days and 15days' });
+    expect(out.text).toBe('maximum 15 days and 15 days');
+  });
+
   it('preserves already-clean text (changed=false)', () => {
     const out = stage.run({ text: 'The weather is nice today.' });
     expect(out.text).toBe('The weather is nice today.');
@@ -191,6 +196,13 @@ describe('SemanticCorrectionStage', () => {
     expect(stage.shouldRun({ text: 'the the cat', confidence: 0.99 })).toBe(true);
   });
 
+  it('runs for near-duplicate STT words', () => {
+    const stage = new SemanticCorrectionStage({
+      correct: async (t) => t,
+    });
+    expect(stage.shouldRun({ text: 'i sout sounds pretty good', confidence: 0.99 })).toBe(true);
+  });
+
   it('applies the corrector and returns changed text', async () => {
     const stage = new SemanticCorrectionStage({
       correct: async () => 'corrected version',
@@ -199,6 +211,19 @@ describe('SemanticCorrectionStage', () => {
     const out = await stage.run({ text: 'bad input' });
     expect(out.text).toBe('corrected version');
     expect(out.changed).toBe(true);
+  });
+
+  it('marks semantic rewrites as review candidates', async () => {
+    const pipeline = new PostProcessPipeline([
+      new RuleStage(),
+      new SemanticCorrectionStage({
+        correct: async () => 'sounds pretty good',
+        minConfidenceToRun: null,
+      }),
+    ]);
+    const out = await pipeline.process({ text: 'i sout sounds pretty good' });
+    expect(out.text).toBe('sounds pretty good');
+    expect(out.reviewCandidate).toBe(true);
   });
 
   it('rejects pathological length drift (hallucination guardrail)', async () => {

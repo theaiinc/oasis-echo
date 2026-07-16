@@ -68,21 +68,30 @@ final class PillWindowController {
     // window for exactly that reason.
     func bindSizeUpdates(_ state: AppState) {
         hudSubscription = state.$pill
-            .combineLatest(state.$liveTranscript)
+            .combineLatest(state.$liveTranscript, state.$correctionReviews)
             .removeDuplicates(by: { lhs, rhs in
-                Self.targetSize(state: state, pill: lhs.0, caption: lhs.1)
-                  == Self.targetSize(state: state, pill: rhs.0, caption: rhs.1)
+                Self.targetSize(
+                    state: state, pill: lhs.0, caption: lhs.1, hasReview: !lhs.2.isEmpty
+                ) == Self.targetSize(
+                    state: state, pill: rhs.0, caption: rhs.1, hasReview: !rhs.2.isEmpty
+                )
             })
-            .sink { [weak self] (pill, caption) in
+            .sink { [weak self] (pill, caption, reviews) in
                 guard let self else { return }
-                let target = Self.targetSize(state: state, pill: pill, caption: caption)
+                let target = Self.targetSize(
+                    state: state, pill: pill, caption: caption, hasReview: !reviews.isEmpty
+                )
                 self.resize(to: target, isShrinking: target.height < self.panel.frame.height)
             }
     }
 
     private static func targetSize(state: AppState,
                                    pill: PillState,
-                                   caption: String) -> CGSize {
+                                   caption: String,
+                                   hasReview: Bool) -> CGSize {
+        if hasReview {
+            return CGSize(width: 360, height: 150)
+        }
         // Listening with a partial transcript caption above the orb.
         if case .listening = pill, !caption.isEmpty {
             return CGSize(width: 340, height: 90)
