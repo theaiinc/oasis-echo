@@ -34,11 +34,14 @@ async function startFakeOpenAI(
   });
 }
 
-async function startFakeJsonOpenAI(body: unknown): Promise<string> {
+async function startFakeJsonOpenAI(body: unknown, delayMs = 0): Promise<string> {
   return await new Promise((resolve) => {
     const server = createServer((req, res) => {
       req.resume();
-      req.on('end', () => {
+      req.on('end', async () => {
+        if (delayMs > 0) {
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(body));
       });
@@ -91,6 +94,33 @@ describe('OpenAIReasoner', () => {
     expect(done).toBe(true);
   });
 
+  it('uses a per-turn model override when provided', async () => {
+    let requestBody = '';
+    const baseUrl = await startFakeOpenAI((write, end, body) => {
+      requestBody = body;
+      write(
+        'data: ' +
+          JSON.stringify({
+            choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }],
+          }),
+      );
+      write('');
+      write('data: [DONE]');
+      end();
+    });
+
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'primary-model' });
+    for await (const _ev of reasoner.stream({
+      userText: 'medium question',
+      state: newDialogueState('s', 0),
+      model: 'Qwen_Qwen3-4B-GGUF',
+    })) {
+      // Drain the stream so the request is sent.
+    }
+
+    expect((JSON.parse(requestBody) as { model: string }).model).toBe('Qwen_Qwen3-4B-GGUF');
+  });
+
   it('rehydrates redacted PII across the stream', async () => {
     const baseUrl = await startFakeOpenAI((write, end) => {
       write(
@@ -140,6 +170,37 @@ describe('OpenAIReasoner', () => {
     const messages = (JSON.parse(requestBody) as { messages: Array<{ role: string; content: string }> }).messages;
     expect(messages.at(-2)).toEqual({ role: 'user', content: 'reply ok\n/no_think' });
     expect(messages.at(-1)).toEqual({ role: 'assistant', content: ' ' });
+  });
+
+  it('instructs local reasoners not to emit hidden thinking by default', async () => {
+    let requestBody = '';
+    const baseUrl = await startFakeOpenAI((write, end, body) => {
+      requestBody = body;
+      write(
+        'data: ' +
+          JSON.stringify({
+            choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }],
+          }),
+      );
+      write('');
+      write('data: [DONE]');
+      end();
+    });
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'x' });
+
+    for await (const _ev of reasoner.stream({
+      userText: 'reply ok',
+      state: newDialogueState('s', 0),
+    })) {
+      // Drain the stream so the request is sent.
+    }
+
+    const messages = (JSON.parse(requestBody) as { messages: Array<{ role: string; content: string }> }).messages;
+    const policy = messages.find((message) =>
+      message.role === 'system' && message.content.includes('Reasoning policy:'),
+    )?.content;
+    expect(policy).toContain('Do not output internal thinking');
+    expect(policy).toContain('If the user explicitly asks for reasoning');
   });
 
   it('routes OpenAI-compatible reasoning_content through think tags', async () => {
@@ -197,6 +258,28 @@ describe('OpenAIReasoner', () => {
 
     expect(tokens.join('')).toBe('A real answer.');
     expect(doneEvents).toMatchObject([{ inputTokens: 3, outputTokens: 4 }]);
+  });
+
+  it('emits heartbeats while waiting for delayed non-streaming local completions', async () => {
+    const baseUrl = await startFakeJsonOpenAI({
+      choices: [
+        {
+          message: { content: 'Delayed answer.' },
+          finish_reason: 'stop',
+        },
+      ],
+    }, 2200);
+    const reasoner = new OpenAIReasoner({ apiKey: 'test', baseUrl, model: 'x' });
+    const events: string[] = [];
+    for await (const ev of reasoner.stream({
+      userText: 'reply',
+      state: newDialogueState('s', 0),
+    })) {
+      events.push(ev.type);
+    }
+
+    expect(events).toContain('heartbeat');
+    expect(events).toEqual(expect.arrayContaining(['token', 'done']));
   });
 
   it('strips local llama console echo from JSON completions', async () => {

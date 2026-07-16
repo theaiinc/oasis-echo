@@ -17,6 +17,9 @@ export type OpenAIOpts = {
 };
 
 const DEFAULT_SYSTEM = PERSONA_RULES;
+const DEFAULT_REASONING_POLICY =
+  'Reasoning policy: Do not output internal thinking, scratchpad, analysis logs, "Thought", "Thinking Process", "[Start thinking]", or similar hidden reasoning. ' +
+  'By default, answer directly and only provide the final response. If the user explicitly asks for reasoning, include only a concise user-facing rationale in the final answer, not private chain-of-thought.';
 
 /**
  * Streaming reasoner for OpenAI's Chat Completions API — and any
@@ -65,6 +68,7 @@ export class OpenAIReasoner implements Reasoner {
     userText: string;
     state: DialogueState;
     signal?: AbortSignal;
+    model?: string;
   }): AsyncIterable<ReasoningStreamEvent> {
     if (!this.breaker.canAttempt()) {
       throw new Error(`circuit ${this.breaker.status}: openai unavailable`);
@@ -72,26 +76,36 @@ export class OpenAIReasoner implements Reasoner {
 
     const { text: redactedUser, redactions } = this.redactor.redact(input.userText);
     const messages = this.buildMessages(input.state, redactedUser);
+    const model = input.model ?? this.model;
 
     const timeoutCtl = new AbortController();
     const timer = setTimeout(() => timeoutCtl.abort(), this.timeoutMs);
     const signal = composeSignals(input.signal, timeoutCtl.signal);
 
     try {
-      const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      const fetchPromise = fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: this.model,
+          model,
           messages,
           stream: true,
           temperature: this.temperature,
         }),
         signal,
       });
+      let res: Response | null = null;
+      for await (const event of waitWithHeartbeats(fetchPromise, signal)) {
+        if (event.type === 'value') {
+          res = event.value;
+        } else {
+          yield event;
+        }
+      }
+      if (!res) throw new Error('openai: missing response');
 
       if (!res.ok) {
         const body = await res.text().catch(() => '');
@@ -106,7 +120,15 @@ export class OpenAIReasoner implements Reasoner {
 
       const contentType = res.headers.get('content-type') ?? '';
       if (!contentType.includes('text/event-stream')) {
-        const completion = await res.json() as OpenAIChatCompletion;
+        let completion: OpenAIChatCompletion | null = null;
+        for await (const event of waitWithHeartbeats(res.json() as Promise<OpenAIChatCompletion>, signal)) {
+          if (event.type === 'value') {
+            completion = event.value;
+          } else {
+            yield event;
+          }
+        }
+        if (!completion) throw new Error('openai: missing JSON completion');
         const rawMessage = completion.choices?.[0]?.message?.content ?? '';
         const message = shouldUseLocalConsoleFilter(this.baseUrl)
           ? stripLocalConsoleEcho(rawMessage)
@@ -201,6 +223,7 @@ export class OpenAIReasoner implements Reasoner {
   ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
     const msgs: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
       { role: 'system', content: this.systemPrompt },
+      { role: 'system', content: DEFAULT_REASONING_POLICY },
     ];
     if (state.summary.length > 0) {
       msgs.push({ role: 'system', content: `Conversation so far:\n${state.summary}` });
@@ -311,4 +334,35 @@ function stripLocalConsoleEcho(raw: string): string {
     .trim();
 
   return text;
+}
+
+async function* waitWithHeartbeats<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): AsyncIterable<{ type: 'value'; value: T } | { type: 'heartbeat'; atMs: number }> {
+  let settled = false;
+  let value: T | undefined;
+  let error: unknown;
+  promise.then(
+    (result) => {
+      settled = true;
+      value = result;
+    },
+    (err) => {
+      settled = true;
+      error = err;
+    },
+  );
+
+  while (!settled) {
+    await sleep(1_000);
+    if (signal.aborted) break;
+    if (!settled) yield { type: 'heartbeat', atMs: Date.now() };
+  }
+  if (error !== undefined) throw error;
+  if (settled) yield { type: 'value', value: value as T };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

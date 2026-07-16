@@ -9,6 +9,7 @@ import { loadDotenv } from './env.js';
 import {
   ContextBiasStage,
   CorrectionStore,
+  EchoedAgentQuestionStage,
   EmotionAdaptiveTts,
   FunasrStreamingStt,
   KokoroTts,
@@ -496,6 +497,9 @@ async function main(): Promise<void> {
       timeoutMs: cfg.reasonerTimeoutMs,
     });
     logger.info('reasoner', { backend: 'openai', model: cfg.model, baseUrl: cfg.openaiBaseUrl });
+    if (cfg.mediumReasonerModel) {
+      logger.info('medium reasoner override', { model: cfg.mediumReasonerModel });
+    }
   }
 
   // Three-tier router: Arch-Router-1.5B classifies intent in <500ms,
@@ -576,6 +580,7 @@ async function main(): Promise<void> {
         tracer: new Tracer(),
       },
       fillerAdvisor ? { fillerAdvisor } : {},
+      cfg.mediumReasonerModel ? { mediumReasonerModel: cfg.mediumReasonerModel } : {},
     ),
   );
 
@@ -626,6 +631,7 @@ async function main(): Promise<void> {
           ...correctionStore.wordRules(),
         },
       }),
+      new EchoedAgentQuestionStage(),
       // Context-bias runs AFTER rules (so it sees cleaned text) but
       // BEFORE phrase matching (a successful context snap can feed a
       // cleaner phrase match). Skipped automatically when no agent
@@ -768,6 +774,7 @@ async function main(): Promise<void> {
         JSON.stringify({
           backend: cfg.backend,
           model: cfg.model,
+          mediumReasonerModel: cfg.mediumReasonerModel,
           ...(cfg.backend === 'ollama' ? { baseUrl: cfg.ollamaBaseUrl } : {}),
           ...(cfg.backend === 'openai' ? { baseUrl: cfg.openaiBaseUrl } : {}),
           tts: {
@@ -779,6 +786,9 @@ async function main(): Promise<void> {
                   ready: kokoroInstance?.isReady ?? false,
                 }
               : {}),
+          },
+          stt: {
+            backend: cfg.sttBackend,
           },
           session: cfg.sessionId,
         }),

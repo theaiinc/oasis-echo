@@ -46,12 +46,7 @@ struct GeneralTab: View {
                         Text("· \(state.serverModel)").foregroundStyle(.secondary)
                     }
                 }.font(.caption)
-                Toggle(
-                    "Start local API if offline",
-                    isOn: $state.autoStartServer
-                )
                 Toggle("Use Docker (instead of npm)", isOn: $state.useDocker)
-                    .disabled(!state.autoStartServer)
                 Text(state.useDocker
                     ? "Runs `docker compose up -d` from the repo root. Requires Docker Desktop. The container uses a private 10.89.87.0/24 network that won't conflict with common API endpoints."
                     : "Runs `npm run server` from your oasis-echo checkout. Requires `node` / `npm` on your PATH."

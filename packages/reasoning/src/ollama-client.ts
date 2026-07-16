@@ -86,6 +86,7 @@ export class OllamaReasoner implements Reasoner {
     state: DialogueState;
     signal?: AbortSignal;
     allowTools?: boolean;
+    model?: string;
   }): AsyncIterable<ReasoningStreamEvent> {
     if (!this.breaker.canAttempt()) {
       throw new Error(`circuit ${this.breaker.status}: ollama unavailable`);
@@ -98,6 +99,7 @@ export class OllamaReasoner implements Reasoner {
       messages,
       redactions,
       signal: input.signal,
+      model: input.model,
       // Speculation pre-compute passes `allowTools: false` to skip
       // tool calls on partial text; everything else defaults to true
       // (i.e. tools are enabled whenever a registry is present).
@@ -116,6 +118,7 @@ export class OllamaReasoner implements Reasoner {
     messages: ChatMessage[];
     redactions: Parameters<PiiRedactor['rehydrate']>[1];
     signal: AbortSignal | undefined;
+    model: string | undefined;
     round: number;
   }): AsyncIterable<ReasoningStreamEvent> {
     const allowTool = !!this.tools && ctx.round < this.maxToolRounds;
@@ -150,7 +153,7 @@ export class OllamaReasoner implements Reasoner {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: this.model,
+          model: ctx.model ?? this.model,
           messages: ctx.messages,
           stream: true,
           // Keep the reasoner model hot in VRAM for 30 minutes so
@@ -337,6 +340,7 @@ export class OllamaReasoner implements Reasoner {
         messages: nextMessages,
         redactions: ctx.redactions,
         signal: ctx.signal,
+        model: ctx.model,
         round: this.maxToolRounds,
       });
       return;
@@ -368,6 +372,7 @@ export class OllamaReasoner implements Reasoner {
       messages: ChatMessage[];
       redactions: Parameters<PiiRedactor['rehydrate']>[1];
       signal: AbortSignal | undefined;
+      model: string | undefined;
       round: number;
     };
     /**
@@ -465,6 +470,7 @@ export class OllamaReasoner implements Reasoner {
       messages: nextMessages,
       redactions: ctx.redactions,
       signal: ctx.signal,
+      model: ctx.model,
       round: ctx.round + 1,
     });
   }

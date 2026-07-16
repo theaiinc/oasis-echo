@@ -4,6 +4,7 @@ import {
   Guardrail,
   LastTurnsSummarizer,
   SentenceChunker,
+  sanitizeMarkdownForSpeech,
   type Router,
   type SpeculationHit,
   type StreamingTts,
@@ -17,6 +18,8 @@ import { EventBus } from './event-bus.js';
 import type { FillerAdvisor } from './filler-advisor.js';
 import { pickApology, pickContinuationFiller, pickFirstFiller } from './filler.js';
 
+const LLM_STALL_TIMEOUT_MS = Number(process.env['OASIS_LLM_STALL_TIMEOUT_MS'] ?? 8_000);
+
 export type PipelineOpts = {
   sessionId: string;
   router: Router;
@@ -29,6 +32,12 @@ export type PipelineOpts = {
   metrics?: Metrics;
   tracer?: Tracer;
   fillerAdvisor?: FillerAdvisor;
+  /**
+   * Fast reasoner model for medium-complexity escalations such as
+   * `question_simple` / factual lookup. Complex/tool turns keep the
+   * primary configured reasoner model.
+   */
+  mediumReasonerModel?: string;
   summarizeEveryNTurns?: number;
 };
 
@@ -58,6 +67,7 @@ export class Pipeline {
   private readonly metrics: Metrics | undefined;
   private readonly tracer: Tracer | undefined;
   private readonly fillerAdvisor: FillerAdvisor | undefined;
+  private readonly mediumReasonerModel: string | undefined;
   private readonly summarizeEveryNTurns: number;
   private turnCounter = 0;
   /**
@@ -99,6 +109,7 @@ export class Pipeline {
     this.metrics = opts.metrics;
     this.tracer = opts.tracer;
     this.fillerAdvisor = opts.fillerAdvisor;
+    this.mediumReasonerModel = opts.mediumReasonerModel?.trim() || undefined;
     this.summarizeEveryNTurns = opts.summarizeEveryNTurns ?? 5;
   }
 
@@ -392,9 +403,20 @@ export class Pipeline {
 
     let agentText = '';
     let interrupted = false;
+    const markTimeline = (stage: string, detail?: string): void => {
+      void this.bus.emit({
+        type: 'turn.timeline',
+        turnId,
+        stage,
+        elapsedMs: Date.now() - startedAtMs,
+        atMs: Date.now(),
+        ...(detail ? { detail } : {}),
+      });
+    };
 
     try {
       await this.bus.emit({ type: 'tts.start', turnId, atMs: Date.now() });
+      markTimeline('tts.start');
 
       // If the agent got cut off mid-reply last turn, open with a
       // quick apology so the user knows we noticed we interrupted them.
@@ -409,6 +431,9 @@ export class Pipeline {
       const sentenceQueue: string[] = [];
       let streamDone = false;
       let streamError: unknown;
+      let streamStopReason: string | null = null;
+      let streamCompletedCleanly = false;
+      let watchdogTimedOut = false;
       let fullText = '';
       // Stateful filter that captures <think>...</think> blocks and
       // routes them via bus.emit('think.token') for the UI, while
@@ -452,19 +477,43 @@ export class Pipeline {
       // accurate latency and name even when the reasoner multiplexes
       // several calls inside a single turn.
       const toolInflight = new Map<string, { name: string; startedAtMs: number }>();
+      const watchdogController = new AbortController();
+      let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+      const resetWatchdog = (): void => {
+        if (watchdogTimer) clearTimeout(watchdogTimer);
+        watchdogTimer = setTimeout(() => {
+          watchdogTimedOut = true;
+          watchdogController.abort();
+        }, LLM_STALL_TIMEOUT_MS);
+      };
 
       const tokensPromise = (async () => {
         try {
-          for await (const ev of this.reasoner.stream({
+          const selectedReasonerModel = this.reasonerModelFor(output);
+          if (selectedReasonerModel) {
+            markTimeline('llm.model', selectedReasonerModel);
+            this.logger?.info('medium reasoner model selected', {
+              turnId,
+              intent: output.intent,
+              reason: output.decision.kind === 'escalate' ? output.decision.reason : undefined,
+              model: selectedReasonerModel,
+            });
+          }
+          resetWatchdog();
+          const reasonerInput: Parameters<Reasoner['stream']>[0] = {
             userText,
             state: this.state.snapshot(),
-            signal,
-          })) {
+            signal: composeAbortSignals(signal, watchdogController.signal),
+          };
+          if (selectedReasonerModel) reasonerInput.model = selectedReasonerModel;
+          for await (const ev of this.reasoner.stream(reasonerInput)) {
             if (signal.aborted) break;
+            resetWatchdog();
             if (ev.type === 'token') {
               if (firstTokenState.atMs === 0) {
                 firstTokenState.atMs = Date.now();
                 this.recordTtft(firstTokenState.atMs - startedAtMs);
+                markTimeline('llm.first_token');
               }
               fullText += ev.text;
               await this.bus.emit({ type: 'llm.token', turnId, token: ev.text, atMs: Date.now() });
@@ -477,6 +526,7 @@ export class Pipeline {
                 if (phrase) sentenceQueue.push(phrase);
               }
             } else if (ev.type === 'tool_use') {
+              markTimeline('tool.use', ev.name);
               toolInflight.set(ev.id, { name: ev.name, startedAtMs: Date.now() });
               await this.bus.emit({
                 type: 'tool.use',
@@ -503,15 +553,22 @@ export class Pipeline {
                 atMs: Date.now(),
               });
             } else if (ev.type === 'done') {
+              streamStopReason = ev.stopReason;
+              streamCompletedCleanly = ev.stopReason === 'stop';
               const rest = chunker.flush();
               if (rest && rest.trim().length > 0) sentenceQueue.push(rest);
               await this.bus.emit({ type: 'llm.done', turnId, atMs: Date.now() });
+              markTimeline('llm.done', ev.stopReason ?? 'unknown');
               this.metrics?.inc('llm_tokens_out_total', {}, ev.outputTokens);
               this.metrics?.inc('llm_tokens_in_total', {}, ev.inputTokens);
             }
           }
         } catch (err) {
-          if (!signal.aborted) streamError = err;
+          if (!signal.aborted) streamError = watchdogTimedOut
+            ? new Error(`LLM stream stalled for ${LLM_STALL_TIMEOUT_MS}ms`)
+            : err;
+        } finally {
+          if (watchdogTimer) clearTimeout(watchdogTimer);
         }
         streamDone = true;
       })();
@@ -585,6 +642,7 @@ export class Pipeline {
         if (sentenceQueue.length > 0) {
           const next = sentenceQueue.shift()!;
           agentText = agentText ? agentText + ' ' + next : next;
+          if (agentText === next) markTimeline('tts.first_answer_chunk');
           await this.streamTts(turnId, next, signal);
         } else if (streamDone) {
           break;
@@ -600,16 +658,21 @@ export class Pipeline {
         interrupted = true;
         this.metrics?.inc('interruptions_total');
       } else {
-        if (agentText.trim().length === 0) {
+        const completion = evaluateResponseCompletion(agentText, streamStopReason, streamCompletedCleanly);
+        if (agentText.trim().length === 0 || !completion.complete) {
           this.logger?.warn('empty escalated answer after reasoner stream', {
             turnId,
             userText: userText.slice(0, 120),
+            completion,
           });
-          const fallback = "Sorry, I got stuck thinking. Please try again.";
+          const fallback = agentText.trim().length === 0
+            ? "Sorry, I got stuck thinking. Please try again."
+            : "Sorry, I got cut off there. Please try again.";
           await this.streamTts(turnId, fallback, signal).catch(() => undefined);
           agentText = fallback;
         }
         await this.bus.emit({ type: 'tts.done', turnId, atMs: Date.now() });
+        markTimeline('tts.done');
       }
       this.metrics?.observe('ttfa_ms', Date.now() - startedAtMs, { tier: 'escalated' });
       this.metrics?.inc('turns_total', { tier: 'escalated' });
@@ -639,6 +702,22 @@ export class Pipeline {
       tier: 'escalated',
       interrupted,
     };
+  }
+
+  private reasonerModelFor(output: RouterOutput): string | undefined {
+    if (
+      !this.mediumReasonerModel ||
+      output.decision.kind !== 'escalate'
+    ) {
+      return undefined;
+    }
+    if (
+      output.intent === 'question_simple' ||
+      output.decision.reason === 'factual-lookup'
+    ) {
+      return this.mediumReasonerModel;
+    }
+    return undefined;
   }
 
   private async playText(
@@ -682,10 +761,11 @@ export class Pipeline {
     signal: AbortSignal,
     opts: { filler?: boolean; speed?: number; trailingSilenceMs?: number } = {},
   ): Promise<string> {
-    if (text.trim().length === 0) return '';
+    const speechText = sanitizeMarkdownForSpeech(text);
+    if (speechText.trim().length === 0) return '';
     const synthOpts: { signal: AbortSignal; speed?: number } = { signal };
     if (opts.speed !== undefined) synthOpts.speed = opts.speed;
-    for await (const chunk of this.tts.synthesize(text, synthOpts)) {
+    for await (const chunk of this.tts.synthesize(speechText, synthOpts)) {
       if (signal.aborted) break;
       // If the caller wants a gap after this chunk and we have real
       // PCM, append silence samples so the client's Web Audio
@@ -705,7 +785,7 @@ export class Pipeline {
         ...(opts.filler ? { filler: true } : {}),
       });
     }
-    return text;
+    return speechText;
   }
 
   /**
@@ -758,6 +838,40 @@ function previewOutput(out: unknown): string {
   }
 }
 
+function composeAbortSignals(...signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+  }
+  return controller.signal;
+}
+
+function evaluateResponseCompletion(
+  text: string,
+  stopReason: string | null,
+  streamCompletedCleanly: boolean,
+): { complete: boolean; reason?: string; stopReason: string | null } {
+  const trimmed = text.trim();
+  if (!streamCompletedCleanly) {
+    return { complete: false, reason: 'stream did not finish cleanly', stopReason };
+  }
+  if (stopReason && stopReason !== 'stop') {
+    return { complete: false, reason: `finish reason ${stopReason}`, stopReason };
+  }
+  if (!trimmed) {
+    return { complete: false, reason: 'empty answer', stopReason };
+  }
+  if (!/[.!?]["')\]]?$/.test(trimmed)) {
+    return { complete: false, reason: 'missing sentence terminator', stopReason };
+  }
+  return { complete: true, stopReason };
+}
+
 /**
  * Stateful filter that captures <think>...</think> blocks from a token
  * stream and routes them to a callback (for UI display) while stripping
@@ -771,6 +885,7 @@ class ThinkingFilter {
   private readonly closeTag = '</think>';
   private inside = false;
   private rawThoughtMode = false;
+  private rawThoughtUsesEndMarker = false;
   private rawThoughtPrefixChecked = false;
   private rawThoughtProbe = '';
   private rawThoughtBuffer = '';
@@ -789,15 +904,26 @@ class ThinkingFilter {
 
     if (!this.rawThoughtPrefixChecked) {
       this.rawThoughtProbe += token;
-      const rawThoughtStart = this.rawThoughtProbe.match(/^\s*thought\s*(?::|\r?\n)/i);
-      if (rawThoughtStart) {
+      const rawThoughtStart = this.rawThoughtProbe.match(
+        /^\s*(?:(\[[^\]]*(?:think|thought|reason|analysis)[^\]]*\])\s*)*(?:[#>*_\-`\s]*)?(?:(?:thought|thinking|analysis|reasoning)(?:\s+process)?(?:[*_`\s]*)\s*(?::|\r?\n))?/i,
+      );
+      const matched = rawThoughtStart?.[0] ?? '';
+      const hasBracketStart = Boolean(rawThoughtStart?.[1]);
+      const hasThoughtLabel = /(?:thought|thinking|analysis|reasoning)/i.test(
+        matched.replace(/\[[^\]]*\]/g, ''),
+      );
+      if (rawThoughtStart && (hasBracketStart || hasThoughtLabel)) {
         this.rawThoughtPrefixChecked = true;
         this.rawThoughtMode = true;
+        this.rawThoughtUsesEndMarker = hasBracketStart;
         const rest = this.rawThoughtProbe.slice(rawThoughtStart[0].length);
         this.rawThoughtProbe = '';
         return this.filterRawThought(rest);
       }
-      if (/^\s*(?:t|th|tho|thou|thoug|though|thought|thought\s*:?)$/i.test(this.rawThoughtProbe)) {
+      if (
+        /^\s*(?:\[[^\]]*(?:t|th|thi|thin|think|thinking|thought|r|re|rea|reas|reason|reasoning|a|an|ana|anal|analysis)?[^\]]*\]\s*)?(?:[#>*_\-`\s]*)?(?:t|th|thi|thin|think|thinking|a|an|ana|anal|analy|analys|analysi|analysis|r|re|rea|reas|reaso|reason|reasoni|reasonin|reasoning|tho|thou|thoug|though|thought|thought\s*:?)$/i
+          .test(this.rawThoughtProbe)
+      ) {
         return '';
       }
       this.rawThoughtPrefixChecked = true;
@@ -879,6 +1005,7 @@ class ThinkingFilter {
       }
       this.rawThoughtBuffer = '';
       this.rawThoughtMode = false;
+      this.rawThoughtUsesEndMarker = false;
       return '';
     }
     // If we're inside a think block, remaining partial is thinking content
@@ -892,7 +1019,22 @@ class ThinkingFilter {
 
   private filterRawThought(token: string): string {
     this.rawThoughtBuffer += token;
-    const marker = this.rawThoughtBuffer.match(/\b(?:response|answer|final)\s*:\s*/i);
+    if (this.rawThoughtUsesEndMarker) {
+      const endMarker = this.rawThoughtBuffer.match(/\[[^\]]*end[^\]]*(?:think|thought|reason|analysis)[^\]]*\]/i);
+      if (!endMarker || endMarker.index === undefined) {
+        return '';
+      }
+      const thought = this.rawThoughtBuffer.slice(0, endMarker.index);
+      if (thought.length > 0) this.onThinkToken(thought);
+      this.rawThoughtMode = false;
+      this.rawThoughtUsesEndMarker = false;
+      const reply = this.rawThoughtBuffer.slice(endMarker.index + endMarker[0].length);
+      this.rawThoughtBuffer = '';
+      return stripLeadingAnswerMarker(reply);
+    }
+    const marker = this.rawThoughtBuffer.match(
+      /(?:[#>*_\-`\s]*)\b(?:response|answer|final(?:\s+answer)?)\b(?:[*_`\s]*)\s*:\s*(?:[*_`\s]*)/i,
+    );
     if (!marker || marker.index === undefined) {
       return '';
     }
@@ -900,10 +1042,18 @@ class ThinkingFilter {
     const thought = this.rawThoughtBuffer.slice(0, marker.index);
     if (thought.length > 0) this.onThinkToken(thought);
     this.rawThoughtMode = false;
+    this.rawThoughtUsesEndMarker = false;
     const reply = this.rawThoughtBuffer.slice(marker.index + marker[0].length);
     this.rawThoughtBuffer = '';
-    return reply;
+    return stripLeadingAnswerMarker(reply);
   }
+}
+
+function stripLeadingAnswerMarker(text: string): string {
+  return text.replace(
+    /^\s*(?:[#>*_\-`\s]*)?\b(?:response|answer|final(?:\s+answer)?)\b(?:[*_`\s]*)\s*:\s*(?:[*_`\s]*)/i,
+    '',
+  );
 }
 
 function sleep(ms: number): Promise<void> {

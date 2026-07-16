@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PassthroughTts, SentenceChunker } from '../src/tts.js';
+import { PassthroughTts, SentenceChunker, sanitizeMarkdownForSpeech } from '../src/tts.js';
 
 describe('SentenceChunker', () => {
   it('splits on sentence boundaries', () => {
@@ -84,6 +84,28 @@ describe('SentenceChunker', () => {
   });
 });
 
+describe('sanitizeMarkdownForSpeech', () => {
+  it('removes emphasis markers without changing the spoken words', () => {
+    expect(sanitizeMarkdownForSpeech('*My Hero Academia* is **popular**.')).toBe(
+      'My Hero Academia is popular.',
+    );
+  });
+
+  it('removes markdown list markers and links before speech', () => {
+    expect(
+      sanitizeMarkdownForSpeech(
+        '* [Severance](https://example.com) is tense.\n* `Silo` is atmospheric.',
+      ),
+    ).toBe('Severance is tense.\nSilo is atmospheric.');
+  });
+
+  it('strips headings and blockquote markers', () => {
+    expect(sanitizeMarkdownForSpeech('### Picks\n> *Slow Horses* is sharp.')).toBe(
+      'Picks\nSlow Horses is sharp.',
+    );
+  });
+});
+
 describe('PassthroughTts', () => {
   it('emits a chunk per sentence and marks the last as final', async () => {
     const tts = new PassthroughTts();
@@ -102,6 +124,15 @@ describe('PassthroughTts', () => {
     for await (const c of tts.synthesize('Hello.')) chunks.push(c);
     expect(chunks[0]?.pcm).toBeUndefined();
     expect(chunks[0]?.text).toBe('Hello.');
+  });
+
+  it('emits markdown-sanitized speech chunks', async () => {
+    const tts = new PassthroughTts();
+    const chunks = [];
+    for await (const c of tts.synthesize('*My Hero Academia* is **popular**.')) {
+      chunks.push(c);
+    }
+    expect(chunks[0]?.text).toBe('My Hero Academia is popular.');
   });
 
   it('honors abort signal', async () => {

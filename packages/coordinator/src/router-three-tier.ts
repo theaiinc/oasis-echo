@@ -2,6 +2,7 @@ import { type Intent, type RouterOutput, type DialogueState } from '@oasis-echo/
 import { alwaysEscalate, buildRouterPrompt, type Router } from './router.js';
 import { ArchRouter, type ArchRouterOpts } from './router-arch.js';
 import { OllamaRouter, type OllamaRouterOpts } from './router-ollama.js';
+import { classifyQuestion } from './postprocess/context-gate.js';
 import type { Logger } from '@oasis-echo/telemetry';
 
 /**
@@ -19,6 +20,22 @@ const LOCAL_INTENTS: ReadonlySet<Intent> = new Set([
   'wait',
   'unknown',
 ]);
+
+const SHORT_REPLY_FILLERS: ReadonlySet<string> = new Set([
+  'the',
+  'a',
+  'an',
+  'uh',
+  'um',
+  'yeah',
+  'yes',
+  'no',
+  'ok',
+  'okay',
+  'please',
+]);
+
+const LOW_CONFIDENCE_LOCAL_THRESHOLD = 0.65;
 
 export type ThreeTierRouterOpts = {
   archBaseUrl?: string;
@@ -116,9 +133,29 @@ export class ThreeTierRouter implements Router {
         };
       }
 
+      const pendingAnswer = this.pendingQuestionAnswerFallback(input.text, input.state);
+      if (pendingAnswer) return pendingAnswer;
+
+      const repair = this.repairContinuationFallback(input.text, input.state);
+      if (repair) return repair;
+
       // Step 1: Quick classification with Arch-Router-1.5B
       const archOutput = await this.archRouter.route(input);
       const classifyMs = Date.now() - startedAt;
+
+      const lowConfidenceArchFallback = this.lowConfidenceLocalFallback(
+        archOutput,
+        input.text,
+        input.state,
+      );
+      if (lowConfidenceArchFallback) {
+        this.logger?.warn('three-tier: low-confidence local classifier result escalated', {
+          intent: archOutput.intent,
+          confidence: archOutput.confidence,
+          classifyMs,
+        });
+        return lowConfidenceArchFallback;
+      }
 
       // Step 2: If NOT a local intent, escalate immediately with filler
       if (!LOCAL_INTENTS.has(archOutput.intent)) {
@@ -156,6 +193,20 @@ export class ThreeTierRouter implements Router {
         return this.localFallback(archOutput.intent, input.text);
       }
       const totalMs = Date.now() - startedAt;
+
+      const lowConfidenceSlmFallback = this.lowConfidenceLocalFallback(
+        slmOutput,
+        input.text,
+        input.state,
+      );
+      if (lowConfidenceSlmFallback) {
+        this.logger?.warn('three-tier: low-confidence local SLM result escalated', {
+          intent: slmOutput.intent,
+          confidence: slmOutput.confidence,
+          totalMs,
+        });
+        return lowConfidenceSlmFallback;
+      }
 
       this.logger?.debug('three-tier slm reply', {
         intent: slmOutput.intent,
@@ -248,6 +299,112 @@ export class ThreeTierRouter implements Router {
         filler: this.questionFallbackFiller(compact),
       },
     };
+  }
+
+  private pendingQuestionAnswerFallback(text: string, state: DialogueState): RouterOutput | null {
+    const compact = text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!compact) return null;
+    if (/\b(by the way|actually|never mind|forget that|different question)\b/.test(compact)) {
+      return null;
+    }
+    const tokens = compact.split(' ').filter(Boolean);
+    if (tokens.length > 8) return null;
+    if (!state.allowedIntents.includes('question_simple')) return null;
+
+    const lastAgentTurn = [...state.turns].reverse().find((turn) => turn.agentText?.trim());
+    const lastAgentText = lastAgentTurn?.agentText ?? '';
+    const pendingQuestion = classifyQuestion(lastAgentText);
+    if (!pendingQuestion) return null;
+
+    const hasContentToken = tokens.some((token) =>
+      token.length >= 3 && !SHORT_REPLY_FILLERS.has(token),
+    );
+    if (!hasContentToken) return null;
+
+    if (pendingQuestion.kind === 'yes-no' && tokens.length <= 3) return null;
+
+    if (pendingQuestion.kind === 'choice' && pendingQuestion.options?.length) {
+      const matchedOption = pendingQuestion.options.some((option) => {
+        const head = option.toLowerCase().split(/\s+/)[0];
+        return Boolean(head && tokens.includes(head));
+      });
+      if (!matchedOption && tokens.length <= 3) return null;
+    }
+
+    return {
+      intent: 'question_simple',
+      confidence: 0.6,
+      decision: {
+        kind: 'escalate',
+        intent: 'question_simple',
+        reason: 'pending-question-answer',
+        filler: 'Got it.',
+      },
+    };
+  }
+
+  private repairContinuationFallback(text: string, state: DialogueState): RouterOutput | null {
+    const compact = text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!compact) return null;
+    if (
+      !/^(i meant|no\b|actually\b|instead\b|sorry\b|correction\b|what i meant|i said|not\b)/.test(
+        compact,
+      )
+    ) {
+      return null;
+    }
+    if (!this.hasRecentSubstantiveTurn(state)) return null;
+    const intent = state.allowedIntents.includes('question_complex')
+      ? 'question_complex'
+      : state.allowedIntents.includes('question_simple')
+      ? 'question_simple'
+      : null;
+    if (!intent) return null;
+    return {
+      intent,
+      confidence: 0.82,
+      decision: {
+        kind: 'escalate',
+        intent,
+        reason: 'continue-previous-task',
+        filler: 'Got it, correcting that.',
+      },
+    };
+  }
+
+  private lowConfidenceLocalFallback(
+    output: RouterOutput,
+    text: string,
+    state: DialogueState,
+  ): RouterOutput | null {
+    if (
+      output.confidence >= LOW_CONFIDENCE_LOCAL_THRESHOLD ||
+      output.decision.kind !== 'local' ||
+      output.intent !== 'smalltalk'
+    ) {
+      return null;
+    }
+    const repair = this.repairContinuationFallback(text, state);
+    if (repair) return repair;
+    return this.substantiveQuestionFallback(text, state);
+  }
+
+  private hasRecentSubstantiveTurn(state: DialogueState): boolean {
+    return [...state.turns].reverse().some((turn) =>
+      turn.tier === 'escalated' ||
+      turn.intent === 'question_simple' ||
+      turn.intent === 'question_complex' ||
+      turn.intent === 'command_local' ||
+      turn.intent === 'command_tool',
+    );
   }
 
   private questionFallbackFiller(normalizedText: string): string {

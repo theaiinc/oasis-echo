@@ -66,8 +66,6 @@ final class ServerAutoLauncher {
 
     /// Starts the server (Docker or npm) and waits until `/config` succeeds or timeout.
     func ensureServerRunning(client: OasisClient, state: AppState) async {
-        guard state.autoStartServer else { return }
-
         if state.useDocker {
             await ensureDockerRunning(client: client, state: state)
             return

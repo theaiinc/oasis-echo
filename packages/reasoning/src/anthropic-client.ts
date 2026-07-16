@@ -24,6 +24,7 @@ export type ReasoningOpts = {
 
 export type ReasoningStreamEvent =
   | { type: 'token'; text: string }
+  | { type: 'heartbeat'; atMs: number }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; id: string; output: unknown }
   | { type: 'done'; stopReason: string | null; inputTokens: number; outputTokens: number };
@@ -33,6 +34,11 @@ export interface Reasoner {
     userText: string;
     state: DialogueState;
     signal?: AbortSignal;
+    /**
+     * Optional per-turn model override. Backends that cannot switch
+     * models per request may ignore it.
+     */
+    model?: string;
     /**
      * When false the reasoner suppresses tool-calling even if a
      * registry is configured. Used by speculation pre-compute so
@@ -91,6 +97,7 @@ export class AnthropicReasoner implements Reasoner {
     userText: string;
     state: DialogueState;
     signal?: AbortSignal;
+    model?: string;
   }): AsyncIterable<ReasoningStreamEvent> {
     if (!this.breaker.canAttempt()) {
       throw new Error(`circuit ${this.breaker.status}: cloud unavailable`);

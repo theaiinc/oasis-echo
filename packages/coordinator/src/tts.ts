@@ -96,6 +96,30 @@ export class SentenceChunker {
   }
 }
 
+export function sanitizeMarkdownForSpeech(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/```[\s\S]*?```/g, (block) =>
+      block
+        .replace(/```[a-zA-Z0-9_-]*\n?/g, '')
+        .replace(/```/g, ''),
+    )
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s*[-+*]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+    .replace(/(\*|_)(.*?)\1/g, '$2')
+    .replace(/~~(.*?)~~/g, '$1')
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
@@ -151,11 +175,13 @@ export class PassthroughTts implements StreamingTts {
     text: string,
     opts: { signal?: AbortSignal; voice?: string; speed?: number } = {},
   ): AsyncIterable<TtsChunk> {
+    const speechText = sanitizeMarkdownForSpeech(text);
+    if (!speechText) return;
     const chunker = new SentenceChunker();
-    const sentences = chunker.feed(text);
+    const sentences = chunker.feed(speechText);
     const flushed = chunker.flush();
     if (flushed) sentences.push(flushed);
-    const all = sentences.length > 0 ? sentences : [text];
+    const all = sentences.length > 0 ? sentences : [speechText];
     for (let i = 0; i < all.length; i++) {
       if (opts.signal?.aborted) return;
       yield { text: all[i] ?? '', sampleRate: this.sampleRate, final: i === all.length - 1 };

@@ -15,6 +15,14 @@ export type RouteDecisionEvent = {
 };
 export type LlmTokenEvent = { type: 'llm.token'; turnId: string; token: string; atMs: number };
 export type LlmDoneEvent = { type: 'llm.done'; turnId: string; atMs: number };
+export type TurnTimelineEvent = {
+  type: 'turn.timeline';
+  turnId: string;
+  stage: string;
+  elapsedMs: number;
+  atMs: number;
+  detail?: string;
+};
 /**
  * Emitted when the pipeline's thinking filter captures a <think> block.
  * Conveys the raw reasoning text so the UI can display it in a dedi-
@@ -75,6 +83,7 @@ export type PipelineEvent =
   | RouteDecisionEvent
   | LlmTokenEvent
   | LlmDoneEvent
+  | TurnTimelineEvent
   | ThinkTokenEvent
   | ToolUseEvent
   | ToolResultEvent

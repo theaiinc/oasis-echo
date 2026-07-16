@@ -3,6 +3,7 @@ import {
   PhraseMatcherStage,
   PostProcessPipeline,
   RuleStage,
+  EchoedAgentQuestionStage,
   SemanticCorrectionStage,
   combinedSimilarity,
   levenshtein,
@@ -98,6 +99,42 @@ describe('PhraseMatcherStage', () => {
   it('returns info.bestScore when no match wins', () => {
     const out = stage.run({ text: 'completely unrelated command' });
     expect(out.info).toHaveProperty('bestScore');
+  });
+});
+
+/* -----------------------------------------------------------------
+ * EchoedAgentQuestionStage — strips assistant prompt echo
+ * ----------------------------------------------------------------- */
+describe('EchoedAgentQuestionStage', () => {
+  const stage = new EchoedAgentQuestionStage();
+
+  it('extracts a short user answer after an echoed assistant question', () => {
+    const out = stage.run({
+      text: "a specific genre you're looking for comedy or fantasy the fantasy",
+      agentContext: {
+        lastUtterance:
+          "Do you have a specific genre you're looking for, like comedy or fantasy?",
+        pendingQuestion: { kind: 'open' },
+      },
+    });
+
+    expect(out.changed).toBe(true);
+    expect(out.text).toBe('fantasy');
+  });
+
+  it('does not strip when there is no trailing user answer', () => {
+    const text = "a specific genre you're looking for comedy or fantasy";
+    const out = stage.run({
+      text,
+      agentContext: {
+        lastUtterance:
+          "Do you have a specific genre you're looking for, like comedy or fantasy?",
+        pendingQuestion: { kind: 'open' },
+      },
+    });
+
+    expect(out.changed).toBe(false);
+    expect(out.text).toBe(text);
   });
 });
 

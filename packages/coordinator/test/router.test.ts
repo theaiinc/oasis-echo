@@ -252,6 +252,78 @@ describe('ThreeTierRouter', () => {
     });
   });
 
+  it('routes correction repairs as continuation of the previous substantive task', async () => {
+    const state = newDialogueState('s', 0);
+    state.turns.push({
+      id: 't-prev',
+      startedAtMs: 0,
+      endedAtMs: 1,
+      userText: 'I am looking for a calm animated show on Apple TV.',
+      intent: 'question_simple',
+      agentText: 'Here is a suggestion.',
+      tier: 'escalated',
+      interrupted: false,
+    });
+    let archCalls = 0;
+    const archRouter: Router = {
+      async route() {
+        archCalls++;
+        return {
+          intent: 'smalltalk',
+          confidence: 0.9,
+          decision: { kind: 'local', intent: 'smalltalk', reply: 'wrong path' },
+        };
+      },
+    };
+    const router = new ThreeTierRouter({ archRouter, slmRouter: archRouter });
+
+    const output = await router.route({
+      text: 'I meant animation, not image. Can you correct that?',
+      state,
+    });
+
+    expect(archCalls).toBe(0);
+    expect(output).toMatchObject({
+      intent: 'question_complex',
+      decision: {
+        kind: 'escalate',
+        reason: 'continue-previous-task',
+      },
+    });
+  });
+
+  it('does not allow low-confidence smalltalk to answer substantive turns locally', async () => {
+    const state = newDialogueState('s', 0);
+    const archRouter: Router = {
+      async route() {
+        return {
+          intent: 'smalltalk',
+          confidence: 0.41,
+          decision: { kind: 'local', intent: 'smalltalk', reply: "I'm doing well." },
+        };
+      },
+    };
+    const slmRouter: Router = {
+      async route() {
+        throw new Error('SLM should not run after low-confidence fallback');
+      },
+    };
+    const router = new ThreeTierRouter({ archRouter, slmRouter });
+
+    const output = await router.route({
+      text: 'What practical step would improve response delay?',
+      state,
+    });
+
+    expect(output).toMatchObject({
+      intent: 'question_simple',
+      decision: {
+        kind: 'escalate',
+        reason: 'substantive-question-fallback',
+      },
+    });
+  });
+
   it('escalates substantive corrections while confirming', async () => {
     const state = newDialogueState('s', 0);
     state.phase = 'confirming';
@@ -295,6 +367,60 @@ describe('ThreeTierRouter', () => {
       decision: {
         kind: 'escalate',
         intent: 'question_complex',
+      },
+    });
+  });
+
+  it('escalates short answers to the agent pending open question', async () => {
+    const state = newDialogueState('s', 0);
+    state.phase = 'collecting';
+    state.allowedIntents = ['smalltalk', 'question_simple', 'question_complex', 'command_local', 'command_tool', 'cancel'];
+    state.turns.push({
+      id: 't-prev',
+      startedAtMs: 1,
+      endedAtMs: 2,
+      userText: 'recommend me some light anime',
+      intent: 'question_complex',
+      agentText:
+        "I can suggest some. Do you have a specific genre you're looking for, like comedy or fantasy?",
+      tier: 'escalated',
+      interrupted: false,
+    });
+    let archCalls = 0;
+    let slmCalls = 0;
+    const archRouter: Router = {
+      async route() {
+        archCalls++;
+        return {
+          intent: 'unknown',
+          confidence: 0.4,
+          decision: { kind: 'local', intent: 'unknown' },
+        };
+      },
+    };
+    const slmRouter: Router = {
+      async route() {
+        slmCalls++;
+        return {
+          intent: 'unknown',
+          confidence: 0.4,
+          decision: { kind: 'local', intent: 'unknown', reply: "I'm here. What would you like to do?" },
+        };
+      },
+    };
+    const router = new ThreeTierRouter({ archRouter, slmRouter });
+
+    const output = await router.route({ text: 'fantasy', state });
+
+    expect(archCalls).toBe(0);
+    expect(slmCalls).toBe(0);
+    expect(output).toMatchObject({
+      intent: 'question_simple',
+      confidence: 0.6,
+      decision: {
+        kind: 'escalate',
+        intent: 'question_simple',
+        reason: 'pending-question-answer',
       },
     });
   });

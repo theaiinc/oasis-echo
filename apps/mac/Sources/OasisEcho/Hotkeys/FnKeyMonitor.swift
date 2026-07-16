@@ -34,13 +34,12 @@ final class FnKeyMonitor {
 
         installEventTap()
 
-        // If the CGEvent tap cannot be created (usually missing
-        // Accessibility trust), keep the old AppKit monitor as a
-        // best-effort fallback so users still get local events.
-        if eventTap == nil {
-            fallbackMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-                Task { @MainActor in self?.handle(modifierFlags: event.modifierFlags) }
-            }
+        // Keep an AppKit global monitor active even when the CGEvent tap
+        // exists. macOS can disable an otherwise valid tap in response to
+        // user input; the fallback must already be installed to preserve
+        // Fn while another app has focus.
+        fallbackMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            Task { @MainActor in self?.handle(modifierFlags: event.modifierFlags) }
         }
 
         // A session event tap sees our app too, but the local monitor is
@@ -111,7 +110,10 @@ final class FnKeyMonitor {
     private func handle(type: CGEventType, event: CGEvent) {
         switch type {
         case .flagsChanged:
-            handle(modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue)))
+            // Read the native CGEvent flag directly. On newer macOS
+            // versions the Fn/Globe key is reported as secondaryFn, and
+            // converting through NSEvent.ModifierFlags can lose that bit.
+            handle(fnDown: event.flags.contains(.maskSecondaryFn))
         case .tapDisabledByTimeout:
             recoverDisabledTap(reason: "timeout")
         case .tapDisabledByUserInput:
@@ -136,7 +138,10 @@ final class FnKeyMonitor {
     }
 
     private func handle(modifierFlags: NSEvent.ModifierFlags) {
-        let down = modifierFlags.contains(.function)
+        handle(fnDown: modifierFlags.contains(.function))
+    }
+
+    private func handle(fnDown down: Bool) {
         if down && !isDown {
             isDown = true
             log.debug("Fn down")

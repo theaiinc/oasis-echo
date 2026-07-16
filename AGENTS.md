@@ -56,8 +56,18 @@
 
 - Aha: the live local LLM stack can run from Avalon (`/Users/stevetran/llama-dash`) instead of separate LM Studio/Ollama servers. Current `.env` maps the OpenAI reasoner to `http://localhost:8787/v1` model `google_gemma-4-E4B-it-qat-q4_0-gguf`, the Arch classifier to `katanemo_Arch-Router-1.5B.gguf`, and the SLM/filler Ollama-compatible path to `http://localhost:8787` model `Qwen_Qwen3-4B-GGUF`.
 - Aha: Avalon currently serves GGUF through `llama-cli` subprocess calls, not a resident LM Studio server, so router timeouts must be higher than the old hot-model defaults. Use `OASIS_ARCH_TIMEOUT_MS=15000` and `OASIS_SLM_TIMEOUT_MS=20000` for this setup.
+- Aha: medium-complexity Oasis turns should prefer Qwen for speed while preserving Gemma for harder reasoning. `OASIS_MEDIUM_REASONER_MODEL=Qwen_Qwen3-4B-GGUF` makes the pipeline pass a per-turn model override for `question_simple` / `factual-lookup` escalations only; complex/tool turns keep `OPENAI_MODEL=google_gemma-4-E4B-it-qat-q4_0-gguf`.
+
+## Speech Text
+
+- Aha: user-facing model text may contain markdown (`*anime title*`, `**bold**`, bullets, links). Do not pass raw markdown to TTS, because the R1/Kokoro path can literally read punctuation such as `asterisk`. `sanitizeMarkdownForSpeech()` now strips common markdown before `PassthroughTts` and before `Pipeline.streamTts()` calls any backend, while preserving the spoken words.
+- Aha: Gemma can emit its hidden reasoning in normal content as `[Start thinking] ... [End thinking]` or markdown-wrapped `**Thought:** ... **Answer:**`, not only OpenAI-style `reasoning_content` or `<think>` tags. The pipeline `ThinkingFilter` now routes those bracketed/markdown thought blocks to `think.token` diagnostics and strips leading `Final Answer:` labels before TTS. Live Gemma smoke for `what is two plus two?` emitted TTS `Two plus two is four.` while the reasoning stayed out of speech.
+- Default policy: keep model thinking off unless the user explicitly asks for reasoning. `OpenAIReasoner` now injects a reasoning policy system message that forbids hidden scratchpad output (`Thought`, `Thinking Process`, `[Start thinking]`, etc.) and asks for direct final answers by default. If reasoning is explicitly requested, the model should provide only a concise user-facing rationale, not private chain-of-thought. Live Gemma smoke emitted `Two plus two equals four.` to TTS with no spoken thinking.
 
 ## STT Backends
+
+### API startup
+- Aha: the macOS app must always probe `/config` during launch and start the local API when it is unavailable; do not gate this recovery path on the legacy `autoStartServer` preference. Docker vs `npm run server` remains selectable.
 
 ### Whisper (default)
 - Uses `@huggingface/transformers` with `Xenova/whisper-base.en` ONNX model.
@@ -72,6 +82,7 @@
 - The buffer is sent to Python per-inference (bridge is stateless between feeds).
 - Virtual environment at repo root `.venv-funasr/` with Python 3.14.5.
 - Set `OASIS_STT_BACKEND=funasr` env var to use FunASR instead of Whisper.
+- Aha: manual live restart commands must include `OASIS_STT_BACKEND=funasr`, or Oasis silently falls back to Whisper because `config.ts` defaults unknown/missing values to `whisper`. `/config` now exposes `stt.backend`; verify it says `funasr` after restarts, and watch for `funasr-stt ready` rather than `streaming-stt ready ... Xenova/whisper-base.en`.
 - **Key files**:
   - `packages/coordinator/src/funasr-bridge.py` — Python bridge script
   - `packages/coordinator/src/funasr-streaming-stt.ts` — TypeScript wrapper

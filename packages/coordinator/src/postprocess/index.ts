@@ -3,6 +3,7 @@ export * from './rules.js';
 export * from './phrases.js';
 export * from './phonetic.js';
 export * from './context-gate.js';
+export * from './echoed-agent-question.js';
 export * from './context-bias.js';
 export * from './semantic.js';
 export * from './pipeline.js';

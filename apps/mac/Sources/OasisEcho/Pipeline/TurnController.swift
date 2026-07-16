@@ -252,10 +252,11 @@ final class TurnController: ObservableObject {
 
         if await connectToFirstReachableServer() { return }
 
-        if state.autoStartServer {
-            await ServerAutoLauncher.shared.ensureServerRunning(client: client, state: state)
-            if state.serverReachable { return }
-        }
+        // Startup and heartbeat recovery always bring up the local API when
+        // it is unavailable. The app cannot perform server-backed STT or
+        // Echo turns without it, so this is intentionally not user-opt-out.
+        await ServerAutoLauncher.shared.ensureServerRunning(client: client, state: state)
+        if state.serverReachable { return }
 
         state.serverReachable = false
     }

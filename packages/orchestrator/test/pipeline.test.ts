@@ -15,12 +15,17 @@ import { Pipeline } from '../src/pipeline.js';
  * production bundle, so tests define their own fakes.
  */
 class FakeReasoner implements Reasoner {
+  readonly models: Array<string | undefined> = [];
+
   constructor(private readonly opts: { tokens: string[]; delayMs?: number }) {}
+
   async *stream(input: {
     userText: string;
     state: DialogueState;
     signal?: AbortSignal;
+    model?: string;
   }): AsyncIterable<ReasoningStreamEvent> {
+    this.models.push(input.model);
     const delay = this.opts.delayMs ?? 5;
     for (const tok of this.opts.tokens) {
       if (input.signal?.aborted) return;
@@ -50,6 +55,7 @@ function makeRouter(intent: Intent, reason: string): Router {
 }
 
 const escalateComplex = makeRouter('question_complex', 'complex-reasoning');
+const escalateMedium = makeRouter('question_simple', 'factual-lookup');
 
 describe('Pipeline', () => {
   it('runs a reflex turn without calling the reasoner', async () => {
@@ -92,6 +98,30 @@ describe('Pipeline', () => {
     expect(joined).toContain('cloud answer');
   });
 
+  it('uses the medium reasoner model for factual/simple escalations only', async () => {
+    const mediumReasoner = new FakeReasoner({ tokens: ['Fast ', 'answer.'] });
+    const medium = new Pipeline({
+      sessionId: 't',
+      router: escalateMedium,
+      reasoner: mediumReasoner,
+      tts: new PassthroughTts(),
+      mediumReasonerModel: 'Qwen_Qwen3-4B-GGUF',
+    });
+    await medium.handleTurn('what is Apple TV Plus');
+    expect(mediumReasoner.models).toEqual(['Qwen_Qwen3-4B-GGUF']);
+
+    const complexReasoner = new FakeReasoner({ tokens: ['Deep ', 'answer.'] });
+    const complex = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: complexReasoner,
+      tts: new PassthroughTts(),
+      mediumReasonerModel: 'Qwen_Qwen3-4B-GGUF',
+    });
+    await complex.handleTurn('why do transformers generalize');
+    expect(complexReasoner.models).toEqual([undefined]);
+  });
+
   it('routes literal leading thought output to thinking events instead of TTS', async () => {
     const p = new Pipeline({
       sessionId: 't',
@@ -112,6 +142,86 @@ describe('Pipeline', () => {
     expect(chunks.join(' ')).toContain('Clean answer');
     expect(chunks.join(' ')).not.toContain('thought');
     expect(turn.agentText).toBe('Clean answer.');
+  });
+
+  it('routes markdown-wrapped Gemma thought output away from TTS', async () => {
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: [
+          '**Th',
+          'ought:** I should reason privately before speaking. ',
+          '**Answer:** Clean Gemma answer.',
+        ],
+      }),
+      tts: new PassthroughTts(),
+    });
+    const chunks: string[] = [];
+    const thinking: string[] = [];
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
+    p.bus.on('think.token', (e) => void thinking.push(e.token));
+
+    const turn = await p.handleTurn('answer with gemma');
+
+    expect(thinking.join('')).toContain('I should reason privately');
+    expect(chunks.join(' ')).toContain('Clean Gemma answer');
+    expect(chunks.join(' ').toLowerCase()).not.toContain('thought');
+    expect(turn.agentText).toBe('Clean Gemma answer.');
+  });
+
+  it('routes Gemma start-thinking blocks away from TTS', async () => {
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: [
+          '[Start thinking]\n\nThinking Process:\n\n1. Analyze privately. ',
+          '2. Work out the answer. ',
+          '[End thinking]\n\nFinal Answer: Two plus two is four.',
+        ],
+      }),
+      tts: new PassthroughTts(),
+    });
+    const chunks: string[] = [];
+    const thinking: string[] = [];
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
+    p.bus.on('think.token', (e) => void thinking.push(e.token));
+
+    const turn = await p.handleTurn('what is two plus two');
+
+    expect(thinking.join('')).toContain('Analyze privately');
+    expect(chunks.join(' ')).toContain('Two plus two is four.');
+    expect(chunks.join(' ').toLowerCase()).not.toContain('thinking');
+    expect(chunks.join(' ').toLowerCase()).not.toContain('process');
+    expect(turn.agentText).toBe('Two plus two is four.');
+  });
+
+  it('keeps internal answers inside Gemma start/end thinking blocks out of TTS', async () => {
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({
+        tokens: [
+          '[Start thinking]\n\nThe user asks a simple arithmetic question. ',
+          'Constraint: one short sentence. ',
+          'Answer: Four. ',
+          '[End thinking]\n\nTwo plus two equals four.',
+        ],
+      }),
+      tts: new PassthroughTts(),
+    });
+    const chunks: string[] = [];
+    const thinking: string[] = [];
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
+    p.bus.on('think.token', (e) => void thinking.push(e.token));
+
+    const turn = await p.handleTurn('what is two plus two');
+
+    expect(thinking.join('')).toContain('Constraint: one short sentence');
+    expect(chunks.join(' ')).toBe('Two plus two equals four.');
+    expect(chunks.join(' ')).not.toContain('Answer: Four');
+    expect(turn.agentText).toBe('Two plus two equals four.');
   });
 
   it('plays a filler chunk first when the reasoner is slow', async () => {
@@ -305,6 +415,44 @@ describe('Pipeline', () => {
     await p.handleTurn('why is gravity a thing');
     expect(decisions.length).toBeGreaterThan(0);
     expect(completions).toContain('escalated');
+  });
+
+  it('emits turn timeline marks for escalated turns', async () => {
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({ tokens: ['Timeline ', 'answer.'] }),
+      tts: new PassthroughTts(),
+    });
+    const stages: string[] = [];
+    p.bus.on('turn.timeline', (e) => void stages.push(e.stage));
+
+    await p.handleTurn('why is timing useful');
+
+    expect(stages).toContain('tts.start');
+    expect(stages).toContain('llm.first_token');
+    expect(stages).toContain('tts.first_answer_chunk');
+    expect(stages).toContain('llm.done');
+    expect(stages).toContain('tts.done');
+  });
+
+  it('does not store truncated incomplete model responses as successful history', async () => {
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner: new FakeReasoner({ tokens: ['The most practical step is to keep requests focused. When you'] }),
+      tts: new PassthroughTts(),
+    });
+    const chunks: string[] = [];
+    p.bus.on('tts.chunk', (e) => {
+      if (e.filler !== true) chunks.push(e.text);
+    });
+
+    const turn = await p.handleTurn('how can latency improve');
+
+    expect(turn.agentText).toBe('Sorry, I got cut off there. Please try again.');
+    expect(p.state.snapshot().turns.at(-1)?.agentText).toBe(turn.agentText);
+    expect(chunks.join(' ')).toContain('Sorry, I got cut off there');
   });
 
   it('barge-in aborts the turn mid-flight', async () => {
