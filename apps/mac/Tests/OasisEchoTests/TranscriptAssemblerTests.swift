@@ -59,3 +59,12 @@ final class TranscriptAssemblerTests: XCTestCase {
         )
     }
 }
+
+
+final class ServerAutoLauncherTests: XCTestCase {
+    func testLaunchesServerDirectlyWithoutNpmWrapper() {
+        let arguments = ServerLaunchCommand.arguments(port: 9187)
+        XCTAssertEqual(arguments, ["-l", "-c", "PORT=9187 exec node --import tsx packages/app/src/server.ts"])
+        XCTAssertFalse(arguments.joined(separator: " ").contains("npm run server"))
+    }
+}

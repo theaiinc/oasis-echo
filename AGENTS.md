@@ -80,6 +80,7 @@
 
 ### API startup
 - Aha: a Finder-launched app may no longer be adjacent to the checkout; `make-app.sh` embeds the build checkout in `OasisEchoServerRepoRoot`, while `RepoRoot` still validates configured, current-directory, and bundle candidates before spawning the local API.
+- Aha: launching through `npm run server` can leave the npm parent alive for minutes before the workspace child starts when invoked from the GUI; the Mac launcher now executes the workspace server entrypoint directly with Node and logs spawn/exit diagnostics.
 - Aha: the macOS app must always probe `/config` during launch and start the local API when it is unavailable; do not gate this recovery path on the legacy `autoStartServer` preference. Docker vs `npm run server` remains selectable.
 - Aha: heartbeat recovery must probe `/config` even when `serverReachable` is already true; otherwise an API process can die behind a stale SSE state and never reach `ServerAutoLauncher`.
 - Aha: Echo mode initially displays raw STT text, so the Mac client must apply the server's `stt.postprocess` event to the latest user message; otherwise spacing and phonetic corrections are only used for reasoning while malformed text remains visible.

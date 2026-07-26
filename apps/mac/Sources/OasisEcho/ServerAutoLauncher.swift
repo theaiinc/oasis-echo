@@ -36,6 +36,12 @@ enum RepoRoot {
     }
 }
 
+enum ServerLaunchCommand {
+    static func arguments(port: Int = 9187) -> [String] {
+        ["-l", "-c", "PORT=\(port) exec node --import tsx packages/app/src/server.ts"]
+    }
+}
+
 /// Spawns the server when the API is down.
 ///
 /// Two modes:
@@ -73,7 +79,10 @@ final class ServerAutoLauncher {
             return
         }
 
-        guard let repo = RepoRoot.resolve(customPath: state.serverRepoRootPath) else { return }
+        guard let repo = RepoRoot.resolve(customPath: state.serverRepoRootPath) else {
+            NSLog("ServerAutoLauncher: no oasis-echo checkout found; set Repository folder in Settings")
+            return
+        }
 
         if child?.isRunning == true {
             await waitForReachable(client: client, state: state)
@@ -82,7 +91,7 @@ final class ServerAutoLauncher {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["-l", "-c", "PORT=9187 npm run server"]
+        p.arguments = ServerLaunchCommand.arguments()
         p.currentDirectoryURL = repo
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "dumb"
@@ -93,10 +102,14 @@ final class ServerAutoLauncher {
         }
 
         do {
+            NSLog("ServerAutoLauncher: starting API from \(repo.path)")
             try p.run()
             child = p
+            p.terminationHandler = { process in
+                NSLog("ServerAutoLauncher: API process exited with status \(process.terminationStatus)")
+            }
         } catch {
-            NSLog("ServerAutoLauncher: failed to spawn npm run server: \(error.localizedDescription)")
+            NSLog("ServerAutoLauncher: failed to spawn API: \(error.localizedDescription)")
             return
         }
 
@@ -105,7 +118,10 @@ final class ServerAutoLauncher {
 
     /// Starts the Docker container via `docker compose up -d`.
     private func ensureDockerRunning(client: OasisClient, state: AppState) async {
-        guard let repo = RepoRoot.resolve(customPath: state.serverRepoRootPath) else { return }
+        guard let repo = RepoRoot.resolve(customPath: state.serverRepoRootPath) else {
+            NSLog("ServerAutoLauncher: no oasis-echo checkout found for Docker; set Repository folder in Settings")
+            return
+        }
 
         guard dockerAvailable() else {
             NSLog("ServerAutoLauncher: Docker is not available (docker info failed)")
