@@ -137,6 +137,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Replace the latest raw user message with its server-formatted text.
+    /// Assign the array as a whole so SwiftUI observers reliably receive the
+    /// change; mutating a nested array element can bypass @Published updates.
+    @discardableResult
+    func replaceLatestUserMessage(original: String?, with corrected: String) -> Bool {
+        guard let index = agentMessages.lastIndex(where: { $0.role == .user }),
+              original == nil || agentMessages[index].text == original
+        else { return false }
+        var updated = agentMessages
+        updated[index].text = corrected
+        agentMessages = updated
+        return true
+    }
+
     func enqueueCorrectionReview(original: String, corrected: String) {
         guard original != corrected,
               !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

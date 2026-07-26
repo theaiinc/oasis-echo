@@ -68,3 +68,26 @@ final class ServerAutoLauncherTests: XCTestCase {
         XCTAssertFalse(arguments.joined(separator: " ").contains("npm run server"))
     }
 }
+
+
+@MainActor
+final class AppStateTranscriptTests: XCTestCase {
+    func testFormattedTranscriptPublishesWholeMessageArray() {
+        let state = AppState()
+        state.agentMessages = [
+            AgentMessage(role: .user, text: "hello  ,world", partial: false),
+            AgentMessage(role: .echo, text: "", partial: true),
+        ]
+
+        XCTAssertTrue(state.replaceLatestUserMessage(original: "hello  ,world", with: "hello, world"))
+        XCTAssertEqual(state.agentMessages[0].text, "hello, world")
+    }
+
+    func testStaleFormattedTranscriptDoesNotReplaceNewerMessage() {
+        let state = AppState()
+        state.agentMessages = [AgentMessage(role: .user, text: "new turn", partial: false)]
+
+        XCTAssertFalse(state.replaceLatestUserMessage(original: "old turn", with: "formatted old turn"))
+        XCTAssertEqual(state.agentMessages[0].text, "new turn")
+    }
+}

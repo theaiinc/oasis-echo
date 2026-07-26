@@ -84,6 +84,7 @@
 - Aha: the macOS app must always probe `/config` during launch and start the local API when it is unavailable; do not gate this recovery path on the legacy `autoStartServer` preference. Docker vs `npm run server` remains selectable.
 - Aha: heartbeat recovery must probe `/config` even when `serverReachable` is already true; otherwise an API process can die behind a stale SSE state and never reach `ServerAutoLauncher`.
 - Aha: Echo mode initially displays raw STT text, so the Mac client must apply the server's `stt.postprocess` event to the latest user message; otherwise spacing and phonetic corrections are only used for reasoning while malformed text remains visible.
+- Aha: applying a postprocess result by mutating `agentMessages[index]` in place can bypass SwiftUI `@Published` notification; replace the whole message array when formatting the latest user transcript.
 - Aha: short STT artifacts such as `u`, `ur`, and `r` should trigger semantic correction; the local Ollama-compatible SLM can repair ambiguous transcripts even when the primary dialogue reasoner is OpenAI or Anthropic.
 - Aha: Avalon exposes the correction model through OpenAI-compatible `/v1/chat/completions`, not Ollama `/api/generate`; when `OPENAI_BASE_URL` points at Avalon, semantic STT correction must use that protocol or it silently falls back to raw text.
 - Aha: transcript corrections must never block dictation; deliver the raw transcript immediately, surface semantic proposals as a bounded non-blocking review queue, and persist only explicitly accepted phrase-level mappings.

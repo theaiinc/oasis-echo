@@ -745,10 +745,8 @@ final class TurnController: ObservableObject {
                 // conversation feels responsive. Replace it once the server
                 // finishes its spacing/phonetic/context correction instead
                 // of leaving malformed STT text visible in the transcript.
-                if e.reviewCandidate != true,
-                   let index = state.agentMessages.lastIndex(where: { $0.role == .user }),
-                   e.original == nil || state.agentMessages[index].text == e.original {
-                    state.agentMessages[index].text = e.final
+                if e.reviewCandidate != true {
+                    state.replaceLatestUserMessage(original: e.original, with: e.final)
                 }
                 if e.reviewCandidate == true, let original = e.original, original != e.final {
                     state.enqueueCorrectionReview(original: original, corrected: e.final)
