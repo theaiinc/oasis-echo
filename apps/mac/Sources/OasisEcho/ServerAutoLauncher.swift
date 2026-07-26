@@ -3,32 +3,34 @@ import Foundation
 /// Finds the monorepo root (directory whose `package.json` has `"name": "oasis-echo"`).
 enum RepoRoot {
     static func resolve(customPath: String) -> URL? {
+        var candidates: [URL] = []
         let trimmed = customPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            let expanded = (trimmed as NSString).expandingTildeInPath
-            let u = URL(fileURLWithPath: expanded, isDirectory: true)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue else {
-                return nil
-            }
-            let pkg = u.appendingPathComponent("package.json")
-            guard let data = try? Data(contentsOf: pkg),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  (json["name"] as? String) == "oasis-echo"
-            else { return nil }
-            return u
+            candidates.append(URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath, isDirectory: true))
         }
-        var url = Bundle.main.bundleURL
-        for _ in 0 ..< 16 {
-            let pkg = url.appendingPathComponent("package.json")
-            if let data = try? Data(contentsOf: pkg),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               (json["name"] as? String) == "oasis-echo" {
-                return url
+        if let bundled = Bundle.main.object(forInfoDictionaryKey: "OasisEchoServerRepoRoot") as? String,
+           !bundled.isEmpty {
+            candidates.append(URL(fileURLWithPath: bundled, isDirectory: true))
+        }
+        candidates.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true))
+        candidates.append(Bundle.main.bundleURL)
+        if let executable = Bundle.main.executableURL {
+            candidates.append(executable.deletingLastPathComponent())
+        }
+
+        for candidate in candidates {
+            var url = candidate
+            for _ in 0 ..< 16 {
+                let pkg = url.appendingPathComponent("package.json")
+                if let data = try? Data(contentsOf: pkg),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   (json["name"] as? String) == "oasis-echo" {
+                    return url
+                }
+                let parent = url.deletingLastPathComponent()
+                if parent.path == url.path { break }
+                url = parent
             }
-            let parent = url.deletingLastPathComponent()
-            if parent.path == url.path { break }
-            url = parent
         }
         return nil
     }

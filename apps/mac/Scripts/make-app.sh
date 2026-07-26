@@ -35,6 +35,7 @@ APP="OasisEcho.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/OasisEcho"
 cp Info.plist "$APP/Contents/Info.plist"
+"/usr/libexec/PlistBuddy" -c "Add :OasisEchoServerRepoRoot string $(pwd)" "$APP/Contents/Info.plist"
 
 # SwiftPM places processed target resources in a generated bundle next to
 # the executable. Embed that bundle in the app so Bundle.module assets are

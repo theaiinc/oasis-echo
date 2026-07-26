@@ -14,6 +14,7 @@
   <string>OasisEcho</string>
   <key>CFBundleIconName</key>
   <string>OasisEcho</string>
+  <!-- Replaced by make-app.sh with the checkout used to build the app. -->
   <key>LSUIElement</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
