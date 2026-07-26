@@ -105,6 +105,13 @@ struct MeetingNotesRequestBody: Encodable {
     let startedAt: Int64
 }
 
+struct MeetingDraftRequestBody: Encodable {
+    let transcript: [MeetingSegment]
+    let userNotes: String
+    let startedAt: Int64
+    let durationSec: Int
+}
+
 struct MeetingNotesResponse: Decodable {
     let id: String
     let notes: String

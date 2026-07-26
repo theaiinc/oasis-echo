@@ -53,6 +53,7 @@ final class AppState: ObservableObject {
     @Published var mode: Mode = .transcribe
     @Published var pill: PillState = .idle
     @Published var liveTranscript: String = ""
+    @Published var brainstormingActive: Bool = false
     @Published var agentMessages: [AgentMessage] = []
     @Published var autoPaste: Bool = true
     @Published var showMenuBarLevel: Bool = false

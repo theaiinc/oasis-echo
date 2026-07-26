@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import os.log
+import Carbon.HIToolbox
 
 // Detects Fn (fn/globe) key press and release system-wide by observing
 // a CGEvent tap for flagsChanged events. The KeyboardShortcuts library
@@ -23,14 +24,18 @@ final class FnKeyMonitor {
     private var fallbackMonitor: Any?
     private var localMonitor: Any?
     private var isDown = false
+    private var spaceIsDown = false
     private var onDown: (@MainActor () -> Void)?
     private var onUp: (@MainActor () -> Void)?
+    private var onSpacePress: (@MainActor () -> Void)?
 
     func install(onDown: @escaping @MainActor () -> Void,
-                 onUp:   @escaping @MainActor () -> Void) {
+                 onUp:   @escaping @MainActor () -> Void,
+                 onSpacePress: @escaping @MainActor () -> Void = {}) {
         uninstall()
         self.onDown = onDown
         self.onUp = onUp
+        self.onSpacePress = onSpacePress
 
         installEventTap()
 
@@ -65,14 +70,20 @@ final class FnKeyMonitor {
         fallbackMonitor = nil
         localMonitor = nil
         isDown = false
+        spaceIsDown = false
+        onSpacePress = nil
     }
 
     private func installEventTap() {
-        let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        let mask = CGEventMask(
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue)
+        )
         let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: mask,
             callback: Self.eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -100,6 +111,17 @@ final class FnKeyMonitor {
         guard let userInfo else { return Unmanaged.passUnretained(event) }
         let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
 
+        // Fn+Space is a control gesture. Consume it so Space does not leak
+        // into the focused chat/editor while brainstorming is toggled.
+        if type == .keyDown,
+           event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Space),
+           event.flags.contains(.maskSecondaryFn) {
+            Task { @MainActor in
+                monitor.handle(type: type, event: event)
+            }
+            return nil
+        }
+
         Task { @MainActor in
             monitor.handle(type: type, event: event)
         }
@@ -114,6 +136,21 @@ final class FnKeyMonitor {
             // versions the Fn/Globe key is reported as secondaryFn, and
             // converting through NSEvent.ModifierFlags can lose that bit.
             handle(fnDown: event.flags.contains(.maskSecondaryFn))
+        case .keyDown:
+            // Fn+Space is a secondary gesture, not a normal push-to-talk
+            // shortcut. Ignore key repeats so holding Space does not toggle
+            // brainstorming more than once.
+            if event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Space),
+               event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
+               isDown,
+               !spaceIsDown {
+                spaceIsDown = true
+                onSpacePress?()
+            }
+        case .keyUp:
+            if event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Space) {
+                spaceIsDown = false
+            }
         case .tapDisabledByTimeout:
             recoverDisabledTap(reason: "timeout")
         case .tapDisabledByUserInput:
@@ -148,6 +185,7 @@ final class FnKeyMonitor {
             onDown?()
         } else if !down && isDown {
             isDown = false
+            spaceIsDown = false
             log.debug("Fn up")
             onUp?()
         }

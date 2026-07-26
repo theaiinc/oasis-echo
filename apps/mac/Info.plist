@@ -12,6 +12,8 @@
   <string>1</string>
   <key>CFBundleIconFile</key>
   <string>OasisEcho</string>
+  <key>CFBundleIconName</key>
+  <string>OasisEcho</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>

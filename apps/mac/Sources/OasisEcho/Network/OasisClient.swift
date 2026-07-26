@@ -114,6 +114,35 @@ actor OasisClient {
         return try JSONDecoder().decode(MeetingNotesResponse.self, from: data)
     }
 
+    func saveMeetingDraft(
+        transcript: [MeetingSegment],
+        userNotes: String,
+        startedAt: Int64,
+        durationSec: Int
+    ) async {
+        do {
+            var req = URLRequest(url: baseURL.appending(path: "/meeting/draft"))
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONEncoder().encode(MeetingDraftRequestBody(
+                transcript: transcript,
+                userNotes: userNotes,
+                startedAt: startedAt,
+                durationSec: durationSec
+            ))
+            _ = try await session.data(for: req)
+        } catch {
+            // The local draft in MeetingController remains the source of truth
+            // when the server is unavailable.
+        }
+    }
+
+    func clearMeetingDraft() async {
+        var req = URLRequest(url: baseURL.appending(path: "/meeting/draft"))
+        req.httpMethod = "DELETE"
+        _ = try? await session.data(for: req)
+    }
+
     func listMeetings() async throws -> [MeetingListItem] {
         let (data, resp) = try await session.data(from: baseURL.appending(path: "/meetings"))
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {

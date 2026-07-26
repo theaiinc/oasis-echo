@@ -46,7 +46,8 @@ final class HotkeyManager {
         if state.useFnKey {
             fn.install(
                 onDown: { [weak controller] in controller?.startPushToTalk() },
-                onUp:   { [weak controller] in controller?.endPushToTalk() }
+                onUp:   { [weak controller] in controller?.endPushToTalk() },
+                onSpacePress: { [weak controller] in controller?.toggleFnBrainstorming() }
             )
         }
     }
@@ -55,7 +56,8 @@ final class HotkeyManager {
         if enabled {
             fn.install(
                 onDown: { [weak controller] in controller?.startPushToTalk() },
-                onUp:   { [weak controller] in controller?.endPushToTalk() }
+                onUp:   { [weak controller] in controller?.endPushToTalk() },
+                onSpacePress: { [weak controller] in controller?.toggleFnBrainstorming() }
             )
         } else {
             fn.uninstall()

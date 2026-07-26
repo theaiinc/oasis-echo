@@ -96,6 +96,13 @@ private struct MeetingWindowView: View {
             Text("No active meeting").font(.headline)
             Button("Start Recording") { controller.start() }
                 .buttonStyle(.borderedProminent)
+            if controller.hasDraft {
+                Button("Resume Saved Meeting") { controller.resumeDraft() }
+                    .buttonStyle(.bordered)
+                Text("Your interrupted transcript is saved locally.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Button("Show History", action: onShowHistory).buttonStyle(.link)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -112,6 +119,9 @@ private struct MeetingWindowView: View {
             recordingFooter
         }
         .padding(16)
+        .onChange(of: controller.userNotes) { _ in
+            controller.saveCurrentDraft()
+        }
     }
 
     private var recordingHeader: some View {

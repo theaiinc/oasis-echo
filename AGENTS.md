@@ -1,5 +1,13 @@
 # Oasis Echo — Agent Guidelines
 
+## Recent implementation notes
+
+- **2026-07-17 — Optional Echo speaker verification**
+  - FunASR transcription remains SenseVoice; speaker verification is a separate CAM++/CAMPPlus embedding model (`iic/speech_campplus_sv_zh-cn_16k-common`).
+  - The coordinator enrolls a bounded bank of recent Kokoro answer PCM clips and returns an `echoMatchScore` with `stt.final` for R1 command captures.
+  - The bridge rejects a whole candidate only for a high-confidence match during the recent assistant playback window; `r1-barge-in-command` remains trusted and bypasses this transcript/speaker filter.
+  - Set `R1_SPEAKER_VERIFY_REJECTION=0` for diagnostics-only rollout. Thresholds are `R1_SPEAKER_VERIFY_THRESHOLD` (default `0.78`) and `R1_SPEAKER_VERIFY_HIGH_THRESHOLD` (default `0.88`).
+
 ## macOS App Development
 
 ### Code signing & TCC (Accessibility / Automation)
@@ -32,6 +40,8 @@
 - `FnKeyMonitor` owns a `CGEventTap` for `.flagsChanged` because Fn is a modifier and cannot be bound by KeyboardShortcuts.
 - macOS can disable event taps mid-session (`tapDisabledByTimeout` / `tapDisabledByUserInput`); re-enable the tap and synthesize a release if Fn was down so push-to-talk state does not get stuck.
 - Fn still requires Accessibility trust, and System Settings → Keyboard → "Press 🌐 key to" should be "Do Nothing" if macOS consumes the key.
+- Fn+Space brainstorming: Fn starts push-to-talk; pressing Space while Fn is held toggles a capture into brainstorming mode, so releasing Fn keeps recording. A second Fn+Space commits the capture. Space key repeats are ignored.
+- The Fn event tap must use `.defaultTap` and consume Fn+Space key-down events; `.listenOnly` detects the gesture but leaks Space into the focused chat/editor.
 
 ### Wake word ("Hey Echo")
 
@@ -57,6 +67,8 @@
 - Aha: the live local LLM stack can run from Avalon (`/Users/stevetran/llama-dash`) instead of separate LM Studio/Ollama servers. Current `.env` maps the OpenAI reasoner to `http://localhost:8787/v1` model `google_gemma-4-E4B-it-qat-q4_0-gguf`, the Arch classifier to `katanemo_Arch-Router-1.5B.gguf`, and the SLM/filler Ollama-compatible path to `http://localhost:8787` model `Qwen_Qwen3-4B-GGUF`.
 - Aha: Avalon currently serves GGUF through `llama-cli` subprocess calls, not a resident LM Studio server, so router timeouts must be higher than the old hot-model defaults. Use `OASIS_ARCH_TIMEOUT_MS=15000` and `OASIS_SLM_TIMEOUT_MS=20000` for this setup.
 - Aha: medium-complexity Oasis turns should prefer Qwen for speed while preserving Gemma for harder reasoning. `OASIS_MEDIUM_REASONER_MODEL=Qwen_Qwen3-4B-GGUF` makes the pipeline pass a per-turn model override for `question_simple` / `factual-lookup` escalations only; complex/tool turns keep `OPENAI_MODEL=google_gemma-4-E4B-it-qat-q4_0-gguf`.
+- Aha: Avalon currently exposes `ewinregirgojr_MiniCPM5-1B-Agentic-Tooluse-GGUF`, `google_gemma-4-E4B-it-qat-q4_0-gguf`, `ankk98_dspark-gemma4-12b-block7-Q4_0-GGUF`, `Qwen_Qwen3-4B-GGUF`, and `katanemo_Arch-Router-1.5B.gguf`. For the router's strict JSON/reply call, MiniCPM5-1B is the first smaller replacement to benchmark; Arch-Router remains the fastest option for classification but does not generate JSON replies.
+- Aha: for a new local formatting/JSON model, Qwen3.5-2B Instruct in non-thinking mode is a better current target than Qwen3-4B: it is much smaller while retaining stronger instruction/structured-output behavior. Qwen3.5-0.8B is the speed-first fallback; Ministral 3 3B Instruct is the quality-first structured-output alternative.
 
 ## Speech Text
 
@@ -68,6 +80,7 @@
 
 ### API startup
 - Aha: the macOS app must always probe `/config` during launch and start the local API when it is unavailable; do not gate this recovery path on the legacy `autoStartServer` preference. Docker vs `npm run server` remains selectable.
+- Aha: heartbeat recovery must probe `/config` even when `serverReachable` is already true; otherwise an API process can die behind a stale SSE state and never reach `ServerAutoLauncher`.
 - Aha: Echo mode initially displays raw STT text, so the Mac client must apply the server's `stt.postprocess` event to the latest user message; otherwise spacing and phonetic corrections are only used for reasoning while malformed text remains visible.
 - Aha: short STT artifacts such as `u`, `ur`, and `r` should trigger semantic correction; the local Ollama-compatible SLM can repair ambiguous transcripts even when the primary dialogue reasoner is OpenAI or Anthropic.
 - Aha: Avalon exposes the correction model through OpenAI-compatible `/v1/chat/completions`, not Ollama `/api/generate`; when `OPENAI_BASE_URL` points at Avalon, semantic STT correction must use that protocol or it silently falls back to raw text.

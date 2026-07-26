@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -685,6 +685,7 @@ async function main(): Promise<void> {
   // Active directives per in-flight turn, so chunked tts.chunk events
   // can be decorated with the same emotion envelope for the whole turn.
   const activeDirectives = new Map<string, AdaptedReply>();
+  let speakerEnrollmentChain: Promise<void> = Promise.resolve();
 
   // Log high-signal turn events to the server stdout so the live log
   // is actually useful (not just GET /state polling).
@@ -727,6 +728,17 @@ async function main(): Promise<void> {
         // Real PCM — base64-encode the bytes so it survives JSON.
         const bytes = new Uint8Array(event.pcm.buffer, event.pcm.byteOffset, event.pcm.byteLength);
         payload['audio'] = Buffer.from(bytes).toString('base64');
+        if (cfg.sttBackend === 'funasr' && event.filler !== true) {
+          speakerEnrollmentChain = speakerEnrollmentChain
+            .then(async () => {
+              if (sharedStt instanceof FunasrStreamingStt) {
+                await sharedStt.enrollSpeakerPcm(event.pcm!, event.sampleRate);
+              }
+            })
+            .catch((err) => {
+              logger.debug('speaker reference enrollment skipped', { error: String(err) });
+            });
+        }
       }
       hub.broadcast('tts.chunk', payload);
     } else if (event.type === 'audio.frame') {
@@ -1414,7 +1426,7 @@ async function main(): Promise<void> {
       let meetings: Pick<MeetingRecord, 'id' | 'startedAt' | 'endedAt' | 'durationSec'>[] = [];
       if (existsSync(dir)) {
         meetings = readdirSync(dir)
-          .filter((f) => f.endsWith('.json'))
+          .filter((f) => f.endsWith('.json') && f !== 'current-draft.json')
           .map((f) => {
             try {
               const m = JSON.parse(readFileSync(join(dir, f), 'utf8')) as MeetingRecord;
@@ -1517,6 +1529,53 @@ async function main(): Promise<void> {
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ id, notes }));
+      return;
+    }
+
+    // Keep the in-progress meeting durable as well as the completed notes.
+    // This is deliberately excluded from /meetings so an interrupted meeting
+    // does not appear as a completed history item.
+    if (req.method === 'POST' && url.pathname === '/meeting/draft') {
+      const body = await readBody(req);
+      try {
+        const parsed = JSON.parse(body) as {
+          startedAt?: unknown;
+          durationSec?: unknown;
+          transcript?: unknown;
+          userNotes?: unknown;
+        };
+        const dir = join(process.cwd(), '.oasis-meetings');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'current-draft.json'),
+          JSON.stringify({
+            startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : Date.now(),
+            durationSec: typeof parsed.durationSec === 'number' ? parsed.durationSec : 0,
+            transcript: Array.isArray(parsed.transcript) ? parsed.transcript : [],
+            userNotes: String(parsed.userNotes ?? ''),
+            updatedAt: Date.now(),
+          }, null, 2),
+        );
+        res.writeHead(204);
+        res.end();
+      } catch (err) {
+        logger.error('meeting draft save failed', { error: String(err) });
+        res.writeHead(400);
+        res.end('invalid draft');
+      }
+      return;
+    }
+
+    if (req.method === 'DELETE' && url.pathname === '/meeting/draft') {
+      const path = join(process.cwd(), '.oasis-meetings', 'current-draft.json');
+      try {
+        if (existsSync(path)) unlinkSync(path);
+        res.writeHead(204);
+      } catch (err) {
+        logger.error('meeting draft delete failed', { error: String(err) });
+        res.writeHead(500);
+      }
+      res.end();
       return;
     }
 
@@ -1712,12 +1771,22 @@ async function main(): Promise<void> {
           finalizingUtteranceId = endingUtteranceId ?? null;
           stopPartialLoop();
           const finalText = await stt.transcribeAll();
+          const speakerMatch =
+            stt instanceof FunasrStreamingStt ? stt.getLastSpeakerMatch() : null;
           emit({
             type: 'stt.final',
             text: finalText,
             speculationId: sessionSpeculationId,
             utteranceId: endingUtteranceId,
             atMs: Date.now(),
+            ...(speakerMatch !== null
+              ? {
+                  speakerVerification: {
+                    echoMatchScore: speakerMatch,
+                    referenceSource: 'kokoro-tts',
+                  },
+                }
+              : {}),
           });
           if (sessionUtteranceId === endingUtteranceId) {
             stt.reset();

@@ -49,6 +49,9 @@ final class TurnController: ObservableObject {
     // not paste on the 700 ms grace timer while that inference runs.
     private var awaitingServerFinal: Bool = false
     private var handsFreeActive: Bool = false
+    // Fn+Space puts the current capture into brainstorming mode: releasing
+    // Fn no longer commits, and another Fn+Space commits explicitly.
+    private var fnBrainstormingActive: Bool = false
     private var lastStartMs: Int64 = 0
     private var pillCancellable: AnyCancellable?
     private var wakeWordCancellable: AnyCancellable?
@@ -210,7 +213,11 @@ final class TurnController: ObservableObject {
                 //       `didCompleteWithError` for a silently dropped
                 //       peer, so we'd otherwise stare at a dead socket
                 //       forever.
-                if !self.state.serverReachable {
+                // Always probe HTTP, even when the previous connection was
+                // healthy. A dead SSE socket can leave serverReachable true
+                // after the API process itself has exited.
+                if !(await self.connectToFirstReachableServer()) {
+                    self.state.serverReachable = false
                     await self.reconnect()
                     continue
                 }
@@ -301,8 +308,33 @@ final class TurnController: ObservableObject {
 
     // MARK: - Hotkey entry points
 
-    func startPushToTalk() { beginCapture() }
-    func endPushToTalk()   { commitCapture() }
+    func startPushToTalk() {
+        fnBrainstormingActive = false
+        beginCapture()
+    }
+
+    func endPushToTalk() {
+        guard !fnBrainstormingActive else {
+            log.debug("Fn released while brainstorming; keeping capture alive")
+            return
+        }
+        commitCapture()
+    }
+
+    func toggleFnBrainstorming() {
+        guard case .listening = state.pill else { return }
+        if fnBrainstormingActive {
+            fnBrainstormingActive = false
+            state.brainstormingActive = false
+            commitCapture()
+            log.notice("Fn+Space: brainstorming capture committed")
+        } else {
+            fnBrainstormingActive = true
+            state.brainstormingActive = true
+            state.statusLine = "Brainstorming — hold Fn + Space to finish"
+            log.notice("Fn+Space: brainstorming mode enabled")
+        }
+    }
 
     func toggleHandsFree() {
         if handsFreeActive { commitCapture(); handsFreeActive = false }
@@ -376,6 +408,7 @@ final class TurnController: ObservableObject {
         graceTask?.cancel();     graceTask = nil
         longCaptureTimer?.cancel(); longCaptureTimer = nil
         longCaptureFired = false
+        state.brainstormingActive = false
         savePasteTarget()
         transcriptAssembler.reset()
         committedForEcho = false
@@ -467,6 +500,8 @@ final class TurnController: ObservableObject {
 
     private func commitCapture() {
         guard case .listening = state.pill else { return }
+        fnBrainstormingActive = false
+        state.brainstormingActive = false
         disarmLongCaptureTimer()
         state.pill = .processing
         mic.stop()
@@ -496,6 +531,8 @@ final class TurnController: ObservableObject {
 
     private func cancelCapture() {
         log.debug("cancelCapture: cancelling (pill was \(self.pillLabel(self.state.pill)))")
+        fnBrainstormingActive = false
+        state.brainstormingActive = false
         safetyNetTask?.cancel(); safetyNetTask = nil
         graceTask?.cancel();     graceTask = nil
         disarmLongCaptureTimer()

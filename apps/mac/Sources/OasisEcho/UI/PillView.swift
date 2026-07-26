@@ -32,6 +32,12 @@ struct PillView: View {
             if hasToast {
                 toastBubble.transition(.opacity.combined(with: .scale(scale: 0.94)))
             }
+            if state.brainstormingActive {
+                bubble(systemImage: "lightbulb.fill",
+                       color: .yellow,
+                       text: "Brainstorming · Fn + Space to finish")
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
             orb(t: t)
         }
         .onReceive(tick) { now = $0 }

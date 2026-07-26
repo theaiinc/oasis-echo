@@ -10,7 +10,8 @@ struct OasisEchoApp: App {
             MenuBarContent(
                 onShowMeetingWindow: { delegate.meetingWindowController?.show() },
                 onShowMeetingHistory: { delegate.meetingHistoryWindowController?.show() },
-                onStartNewMeeting: { delegate.startNewMeetingFromMenu() }
+                onStartNewMeeting: { delegate.startNewMeetingFromMenu() },
+                onOpenSettings: { delegate.showSettingsWindow() }
             )
                 .environmentObject(delegate.state)
                 .environmentObject(delegate.controller)
@@ -41,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var meetingWindowController: MeetingWindowController?
     var meetingHistoryWindowController: MeetingHistoryWindowController?
     var meetingToastController: MeetingToastWindowController?
+    private var settingsWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // menu bar only, no Dock icon
@@ -88,6 +90,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         controller.shutdown()
         meetingController.cancel()
+    }
+
+    func showSettingsWindow() {
+        if let window = settingsWindowController?.window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let rootView = SettingsView()
+            .environmentObject(state)
+            .environmentObject(controller)
+            .frame(width: 560, height: 540)
+        let hosting = NSHostingController(rootView: rootView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 540),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Oasis Echo Settings"
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        // Give AppKit an explicit document height. A SwiftUI hosting view
+        // has no reliable intrinsic height inside NSScrollView; constraining
+        // all four edges made the document exactly viewport-sized and left
+        // the initial scroll position centered.
+        hosting.view.translatesAutoresizingMaskIntoConstraints = true
+        hosting.view.frame = NSRect(x: 0, y: 0, width: 520, height: 900)
+        scrollView.documentView = hosting.view
+        window.contentView = scrollView
+        window.minSize = NSSize(width: 480, height: 360)
+        window.center()
+        window.isReleasedWhenClosed = false
+        settingsWindowController = NSWindowController(window: window)
+        settingsWindowController?.showWindow(nil)
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Meeting actions wired to menu/toast

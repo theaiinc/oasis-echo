@@ -36,6 +36,7 @@ type BridgeResponse =
   | { type: 'ack' }
   | { type: 'partial'; text: string }
   | { type: 'final'; text: string }
+  | { type: 'speaker'; ok: boolean; operation?: string; score?: number; references?: number; reason?: string }
   | { type: 'error'; message: string };
 
 /**
@@ -69,6 +70,7 @@ export class FunasrStreamingStt {
   }> = [];
   private lineBuffer = '';
   private processExited = false;
+  private lastSpeakerMatch: number | null = null;
 
   constructor(opts: FunasrStreamingSttOpts = {}) {
     this.maxBufferSamples = (opts.maxBufferSeconds ?? 30) * SAMPLE_RATE;
@@ -166,7 +168,28 @@ export class FunasrStreamingStt {
     if (!ok) return this.joinCommitted(this.lastPartialText);
     const text = await this.runInference(this.buffer, 'finalize');
     this.lastPartialText = text;
+    this.lastSpeakerMatch = await this.compareCurrentSpeaker();
     return this.joinCommitted(text);
+  }
+
+  /** Enroll Echo playback PCM as a recent speaker reference. */
+  async enrollSpeakerPcm(pcm: Int16Array | Float32Array, sampleRate: number): Promise<boolean> {
+    const samples =
+      pcm instanceof Int16Array
+        ? Float32Array.from(pcm, (value) => value / 32768)
+        : pcm;
+    const response = await this.sendCommand({
+      type: 'speaker',
+      op: 'enroll',
+      samples: Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength).toString('base64'),
+      sampleRate,
+    });
+    return response.type === 'speaker' && response.ok === true;
+  }
+
+  /** Match the last finalized command against Echo's recent playback. */
+  getLastSpeakerMatch(): number | null {
+    return this.lastSpeakerMatch;
   }
 
   /** Drop the rolling buffer — start fresh for a new utterance. */
@@ -174,12 +197,25 @@ export class FunasrStreamingStt {
     this.buffer = new Float32Array(0);
     this.lastPartialAt = 0;
     this.lastPartialText = '';
+    this.lastSpeakerMatch = null;
     this.committedSegments = '';
     this.headCommitPromise = null;
     // Also tell the Python bridge to reset its buffer.
     this.sendCommand({ type: 'reset' }).catch(() => {
       /* ignore — process may not be alive yet */
     });
+  }
+
+  private async compareCurrentSpeaker(): Promise<number | null> {
+    try {
+      const response = await this.sendCommand({ type: 'speaker', op: 'compare' });
+      return response.type === 'speaker' && response.ok === true &&
+        typeof response.score === 'number'
+        ? response.score
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   // ------------------------------------------------------------------

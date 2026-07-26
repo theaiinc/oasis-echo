@@ -36,10 +36,20 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/OasisEcho"
 cp Info.plist "$APP/Contents/Info.plist"
 
-# Generate .icns from the repo-root logo.png (engineer provides it).
-LOGO="$(dirname "$0")/../../../logo.png"
+# SwiftPM places processed target resources in a generated bundle next to
+# the executable. Embed that bundle in the app so Bundle.module assets are
+# available when launched from Finder/open.
+RESOURCE_BUNDLE=".build/arm64-apple-macosx/$CONFIG/OasisEcho_OasisEcho.bundle"
+if [[ -d "$RESOURCE_BUNDLE" ]]; then
+  rm -rf "$APP/Contents/Resources/OasisEcho_OasisEcho.bundle"
+  cp -R "$RESOURCE_BUNDLE" "$APP/Contents/Resources/OasisEcho_OasisEcho.bundle"
+fi
+
+# Generate .icns from the requested rounded Oasis Echo logo.
+LOGO="$(dirname "$0")/../Resources/OasisEchoAppIcon.png"
 if [[ -f "$LOGO" ]]; then
-  ICONSET="$(mktemp -d)"
+  ICONSET="$(mktemp -d).iconset"
+  mkdir -p "$ICONSET"
   for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$LOGO" --out "$ICONSET/icon_${size}x${size}.png" &>/dev/null
     sips -z "$((size*2))" "$((size*2))" "$LOGO" --out "$ICONSET/icon_${size}x${size}@2x.png" &>/dev/null

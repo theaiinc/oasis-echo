@@ -30,17 +30,33 @@ struct MenuBarLabel: View {
         } else {
             switch state.pill {
             case .listening:
-                Image(systemName: "mic.fill").foregroundStyle(.red)
+                trayLogo
             case .processing:
                 Image(systemName: "arrow.triangle.2.circlepath")
             case .speaking:
-                Image(systemName: "waveform").foregroundStyle(.purple)
+                trayLogo
             case .error:
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             default:
-                Image(systemName: "mic")   // templated by MenuBarExtra
+                trayLogo
             }
         }
+    }
+
+    private var trayLogo: some View {
+        Group {
+            if let url = Bundle.module.url(forResource: "OasisEchoTray", withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                Image(nsImage: image)
+                    .renderingMode(.original)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "mic")
+            }
+        }
+        .frame(width: 18, height: 18)
+        .clipped()
     }
 }
 
@@ -52,6 +68,7 @@ struct MenuBarContent: View {
     let onShowMeetingWindow: () -> Void
     let onShowMeetingHistory: () -> Void
     let onStartNewMeeting: () -> Void
+    let onOpenSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -95,7 +112,7 @@ struct MenuBarContent: View {
             }
 
             Button {
-                openSettingsWindow()
+                onOpenSettings()
             } label: {
                 Label("Settings…", systemImage: "gear").frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain).keyboardShortcut(",")
@@ -200,13 +217,4 @@ struct MenuBarContent: View {
         state.setMode(next)
     }
 
-    private func openSettingsWindow() {
-        // Works on macOS 13+ without `openSettings` environment key.
-        if #available(macOS 14, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-    }
 }

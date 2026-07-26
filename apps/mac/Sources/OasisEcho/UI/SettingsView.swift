@@ -110,6 +110,8 @@ struct ShortcutsTab: View {
                 ))
                 Text("If Fn doesn't trigger anything, open System Settings → Keyboard → \"Press 🌐 key to…\" and set it to \"Do Nothing\" so macOS stops intercepting it.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Brainstorming: while holding Fn, press Space once to keep recording after releasing Fn; press Fn+Space again to commit.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section("Modes") {
                 KeyboardShortcuts.Recorder("Switch mode", name: .toggleMode)

@@ -69,6 +69,11 @@ export class RuleStage implements PostProcessStage {
 
     if (this.normalizeWs) {
       text = text
+        // STT can occasionally join a number to an adjacent word
+        // ("maximum15", "15days"). Restore the natural boundary before
+        // applying the remaining whitespace normalization.
+        .replace(/([A-Za-z])(\d)/g, '$1 $2')
+        .replace(/(\d)([A-Za-z])/g, '$1 $2')
         .replace(/\s+([,;.!?])/g, '$1') // no space before punctuation
         .replace(/([,;.!?])(?=\S)/g, '$1 ') // ensure space after
         .replace(/\s{2,}/g, ' ')

@@ -17,6 +17,9 @@ let package = Package(
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
             ],
             path: "Sources/OasisEcho",
+            resources: [
+                .process("Resources")
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
