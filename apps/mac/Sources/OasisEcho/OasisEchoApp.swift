@@ -99,10 +99,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let contentWidth: CGFloat = 520
+        // Only fix the WIDTH here. The previous code also pinned
+        // .frame(height: 540) on the SwiftUI content while separately
+        // giving the AppKit hosting view a hardcoded 900pt-tall frame
+        // below — two different, conflicting sizes for the same view.
+        // NSHostingView centers SwiftUI content that's smaller than its
+        // own frame, so that mismatch alone produced a large empty gap
+        // above AND below every tab, regardless of what was in it.
         let rootView = SettingsView()
             .environmentObject(state)
             .environmentObject(controller)
-            .frame(width: 560, height: 540)
+            .frame(width: contentWidth)
         let hosting = NSHostingController(rootView: rootView)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 540),
@@ -116,12 +124,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
-        // Give AppKit an explicit document height. A SwiftUI hosting view
-        // has no reliable intrinsic height inside NSScrollView; constraining
-        // all four edges made the document exactly viewport-sized and left
-        // the initial scroll position centered.
+        // A SwiftUI hosting view has no reliable intrinsic height inside
+        // NSScrollView (constraining all four edges made the document
+        // exactly viewport-sized, defeating scroll entirely), so ask it
+        // directly: lay out at the target width, then read back the
+        // height SwiftUI actually wants at that width instead of
+        // guessing a constant.
         hosting.view.translatesAutoresizingMaskIntoConstraints = true
-        hosting.view.frame = NSRect(x: 0, y: 0, width: 520, height: 900)
+        hosting.view.frame = NSRect(x: 0, y: 0, width: contentWidth, height: 1)
+        let fittingHeight = max(hosting.view.fittingSize.height, 540)
+        hosting.view.frame = NSRect(x: 0, y: 0, width: contentWidth, height: fittingHeight)
         scrollView.documentView = hosting.view
         window.contentView = scrollView
         window.minSize = NSSize(width: 480, height: 360)

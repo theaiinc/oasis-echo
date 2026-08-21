@@ -74,14 +74,18 @@ private struct MeetingHistoryView: View {
                     Text("Couldn't load meetings").font(.subheadline)
                     Text(err).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     Button("Retry", action: load).buttonStyle(.bordered)
-                }.padding(20)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(20)
                 Spacer()
             } else if meetings.isEmpty {
                 Spacer()
                 VStack(spacing: 6) {
                     Image(systemName: "tray").font(.system(size: 28)).foregroundStyle(.secondary)
                     Text("No past meetings yet").font(.subheadline).foregroundStyle(.secondary)
-                }.padding(20)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(20)
                 Spacer()
             } else {
                 List(meetings) { m in
