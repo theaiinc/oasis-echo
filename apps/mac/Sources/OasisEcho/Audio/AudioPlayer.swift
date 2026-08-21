@@ -18,11 +18,18 @@ import os
 
 final class AudioPlayer: @unchecked Sendable {
     private let log = Logger(subsystem: "ai.oasis.echo.mac", category: "audio")
-    private let engine = AVAudioEngine()
+    private let engine: AVAudioEngine
     private let player = AVAudioPlayerNode()
     private var started = false
     private var currentRate: Float = 1.0
     private var currentGain: Float = 1.0
+
+    /// Pass an engine shared with a `MicCapture` (with Voice-Processing I/O
+    /// already enabled on it) so this player's own output can be cancelled
+    /// out of that mic's input. Defaults to a private engine otherwise.
+    init(engine: AVAudioEngine = AVAudioEngine()) {
+        self.engine = engine
+    }
 
     // Tracks how much audio is still scheduled but not yet finished
     // playing back. When `inFlight` hits zero AFTER at least one buffer

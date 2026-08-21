@@ -37,15 +37,38 @@ enum RepoRoot {
 }
 
 enum ServerLaunchCommand {
-    static func arguments(port: Int = 9187) -> [String] {
-        ["-l", "-c", "PORT=\(port) exec node --import tsx packages/app/src/server.ts"]
+    /// Finder/launched apps inherit launchd's minimal PATH, which usually
+    /// excludes Homebrew's Node installation. Resolve Node before spawning
+    /// the shell instead of relying on the interactive terminal's PATH.
+    static func nodeExecutable(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        var candidates: [String] = []
+        if let path = environment["PATH"] {
+            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/node" })
+        }
+        candidates.append(contentsOf: [
+            "/opt/homebrew/bin/node",
+            "/usr/local/bin/node",
+            "/usr/bin/node"
+        ])
+
+        for candidate in candidates {
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    static func arguments(port: Int = 9187, nodePath: String) -> [String] {
+        let quotedNodePath = "'" + nodePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return ["-l", "-c", "PORT=\(port) exec \(quotedNodePath) --import tsx packages/app/src/server.ts"]
     }
 }
 
 /// Spawns the server when the API is down.
 ///
 /// Two modes:
-///   - `useDocker = false` → runs `npm run server` from the repo root
+///   - `useDocker = false` → runs the workspace server entrypoint directly
 ///   - `useDocker = true`  → runs `docker compose up -d` and waits for the container
 @MainActor
 final class ServerAutoLauncher {
@@ -89,9 +112,14 @@ final class ServerAutoLauncher {
             return
         }
 
+        guard let nodePath = ServerLaunchCommand.nodeExecutable() else {
+            NSLog("ServerAutoLauncher: Node.js not found; install Node or add it to PATH")
+            return
+        }
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ServerLaunchCommand.arguments()
+        p.arguments = ServerLaunchCommand.arguments(nodePath: nodePath)
         p.currentDirectoryURL = repo
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "dumb"
@@ -102,7 +130,7 @@ final class ServerAutoLauncher {
         }
 
         do {
-            NSLog("ServerAutoLauncher: starting API from \(repo.path)")
+            NSLog("ServerAutoLauncher: starting API from \(repo.path) using Node \(nodePath)")
             try p.run()
             child = p
             p.terminationHandler = { process in

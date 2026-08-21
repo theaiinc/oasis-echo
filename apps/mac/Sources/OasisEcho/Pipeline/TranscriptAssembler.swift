@@ -7,6 +7,16 @@ import Foundation
 /// than text that should be appended. The merge below keeps true continuations
 /// while letting later overlapping hypotheses rewrite the unstable suffix.
 struct TranscriptAssembler {
+    /// Whether incoming hypotheses are cumulative full-utterance
+    /// re-transcriptions (server rolling-buffer STT: each partial/final
+    /// already contains the whole utterance so far) rather than
+    /// incremental segments (Apple Speech). When a cumulative hypothesis
+    /// shares no detectable overlap with the previous one it is a
+    /// re-hearing of the same audio, so it must REPLACE the previous
+    /// text — appending it duplicates the whole utterance and produces
+    /// "The The …"-style mangled transcripts.
+    var cumulativeHypotheses = false
+
     private var committedTranscript = ""
     private var pendingHypothesis = ""
 
@@ -30,8 +40,12 @@ struct TranscriptAssembler {
 
         let merged = Self.merge(pendingHypothesis, with: trimmed)
         if merged.kind == .appended {
-            commitPending()
-            pendingHypothesis = trimmed
+            if cumulativeHypotheses {
+                pendingHypothesis = trimmed
+            } else {
+                commitPending()
+                pendingHypothesis = trimmed
+            }
         } else {
             pendingHypothesis = merged.text
         }
@@ -40,6 +54,17 @@ struct TranscriptAssembler {
     mutating func ingestFinal(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        if cumulativeHypotheses {
+            // The server final covers the entire buffered utterance
+            // (transcribeAll awaits head commits and re-infers the whole
+            // buffer), so it is authoritative. Attempting to "rescue"
+            // earlier partial hypotheses here is what used to interleave
+            // stale re-hearings into the pasted text.
+            committedTranscript = trimmed
+            pendingHypothesis = ""
+            return
+        }
 
         commitPending()
         committedTranscript = Self.merge(committedTranscript, with: trimmed).text

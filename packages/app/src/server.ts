@@ -522,6 +522,49 @@ async function main(): Promise<void> {
     slmBaseUrl: cfg.routerBaseUrl,
   });
 
+  // Local model servers (Avalon / LM Studio) change their model list
+  // between restarts. A configured model that no longer exists fails
+  // every downstream call with an instant 404 — most visibly the STT
+  // formatting stage, which then silently never applies. Probe
+  // /v1/models once at startup and shout about any mismatch.
+  if (cfg.backend === 'openai' && !cfg.openaiBaseUrl.includes('api.openai.com')) {
+    void (async () => {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5000);
+        const res = await fetch(`${cfg.openaiBaseUrl.replace(/\/$/, '')}/models`, {
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+        if (!res.ok) return;
+        const data = (await res.json()) as { data?: Array<{ id?: string }> };
+        const available = new Set(
+          (data.data ?? []).map((m) => m.id).filter((id): id is string => !!id),
+        );
+        if (available.size === 0) return;
+        const wanted: Array<[string, string | undefined]> = [
+          ['OPENAI_MODEL', cfg.model],
+          ['OASIS_MEDIUM_REASONER_MODEL', cfg.mediumReasonerModel],
+          ['OASIS_STT_CORRECT_MODEL', cfg.sttCorrectModel],
+          ['OASIS_ROUTER_MODEL', cfg.routerModel],
+          ['OASIS_ARCH_MODEL', cfg.archModel],
+        ];
+        for (const [envVar, model] of wanted) {
+          if (model && !available.has(model)) {
+            logger.error('configured model missing from model server', {
+              envVar,
+              model,
+              baseUrl: cfg.openaiBaseUrl,
+              available: [...available],
+            });
+          }
+        }
+      } catch {
+        /* best-effort — server may not be up yet */
+      }
+    })();
+  }
+
   let tts: StreamingTts;
   let kokoroInstance: KokoroTts | null = null;
   let kokoroWarmResolve: (() => void) | null = null;
@@ -649,13 +692,17 @@ async function main(): Promise<void> {
       new SemanticCorrectionStage({
         correct: makeOllamaCorrector({
           baseUrl: cfg.backend === 'openai' ? cfg.openaiBaseUrl : cfg.ollamaBaseUrl,
-          model: cfg.backend === 'openai'
-            ? (cfg.mediumReasonerModel ?? cfg.model)
-            : cfg.routerModel,
+          model: cfg.sttCorrectModel
+            ?? (cfg.backend === 'openai'
+              ? (cfg.mediumReasonerModel ?? cfg.model)
+              : cfg.routerModel),
           logger,
         }),
         minConfidenceToRun: 0.6,
-        timeoutMs: 2500,
+        // Avalon serves GGUF via llama-cli subprocess calls, so cold
+        // corrections routinely take >2.5s; a tight timeout means the
+        // formatting stage silently never applies.
+        timeoutMs: cfg.sttCorrectTimeoutMs,
       }),
     ]);
   }
@@ -1120,6 +1167,9 @@ async function main(): Promise<void> {
             text,
             ...(agentContext.lastUtterance ? { agentContext } : {}),
           });
+          if (pp.errors.length > 0) {
+            logger.warn('stt.postprocess stage failed', { turnId, errors: pp.errors });
+          }
           if (pp.stagesApplied.length > 0) {
             logger.info('stt.postprocess', {
               turnId,
@@ -1390,8 +1440,25 @@ async function main(): Promise<void> {
       const started = Date.now();
       const pp = await postprocess.process({
         text: rawText,
+        // The Mac client's on-device STT (Apple Speech / server engines)
+        // never reports a real confidence score here, so omitting this
+        // left `SemanticCorrectionStage.shouldRun` treat every call as
+        // fully confident (default 1.0) and skip the LLM unless the text
+        // happened to contain a filler-word marker. A misheard proper
+        // noun or technical term reads as a perfectly ordinary sentence
+        // to that regex, so the semantic pass — and therefore the
+        // correction-review bubble that lets a user teach it — almost
+        // never fired. This is a synchronous one-shot HTTP round-trip
+        // that already runs AFTER the raw text is pasted (fire-and-
+        // forget from the user's perspective), so force the low-
+        // confidence path unconditionally rather than gating on a
+        // signal we don't actually have.
+        confidence: 0,
         ...(agentContext.lastUtterance ? { agentContext } : {}),
       });
+      if (pp.errors.length > 0) {
+        logger.warn('stt.postprocess stage failed', { source: '/transcribe', errors: pp.errors });
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({

@@ -32,7 +32,6 @@ import base64
 import contextlib
 import json
 import os
-import os
 import re
 import sys
 import traceback
@@ -44,16 +43,18 @@ SPEAKER_MODEL_ID = os.environ.get(
     "OASIS_FUNASR_SPK_MODEL",
     "iic/speech_campplus_sv_zh-cn_16k-common",
 )
-SPEAKER_MODEL_ID = os.environ.get(
-    "OASIS_FUNASR_SPK_MODEL",
-    "iic/speech_campplus_sv_zh-cn_16k-common",
-)
 SENSEVOICE_TAG_RE = re.compile(r"<\|[^|]+\|>")
 
 
 def _strip_internal_tags(text: str) -> str:
-    """Remove SenseVoiceSmall special tokens like <|en|>, <|NEUTRAL|>, etc."""
-    return SENSEVOICE_TAG_RE.sub("", text).strip()
+    """Remove SenseVoiceSmall special tokens like <|en|>, <|NEUTRAL|>, etc.
+
+    Tags can sit directly between words ("...word<|en|>Next..."), so they
+    must be replaced with a space — substituting the empty string welds
+    the neighboring words together and corrupts the transcript.
+    """
+    text = SENSEVOICE_TAG_RE.sub(" ", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
 
 
 class FunasrBridge:
@@ -61,8 +62,6 @@ class FunasrBridge:
         self.model = None  # type: ignore[assignment]
         self._buffer: np.ndarray = np.array([], dtype=np.float32)
         self._model_loaded = False
-        self.speaker_model = None  # type: ignore[assignment]
-        self._speaker_references: list[np.ndarray] = []
         self.speaker_model = None  # type: ignore[assignment]
         self._speaker_references: list[np.ndarray] = []
 
@@ -109,83 +108,6 @@ class FunasrBridge:
     def cmd_reset(self) -> dict:
         self._buffer = np.array([], dtype=np.float32)
         return {"type": "ack"}
-
-    def cmd_speaker(
-        self,
-        op: str,
-        samples_b64: str = "",
-        sample_rate: int = SAMPLE_RATE,
-    ) -> dict:
-        """Enroll or compare a voice embedding without changing ASR state."""
-        try:
-            if op == "enroll":
-                samples = self._decode_samples(samples_b64, sample_rate)
-                embedding = self._speaker_embedding(samples)
-                if embedding is None:
-                    return {"type": "speaker", "ok": False, "reason": "no embedding"}
-                self._speaker_references.append(embedding)
-                self._speaker_references = self._speaker_references[-12:]
-                return {
-                    "type": "speaker",
-                    "ok": True,
-                    "operation": "enroll",
-                    "references": len(self._speaker_references),
-                }
-            if op == "compare":
-                if not self._speaker_references:
-                    return {"type": "speaker", "ok": False, "reason": "no reference"}
-                embedding = self._speaker_embedding(self._buffer)
-                if embedding is None:
-                    return {"type": "speaker", "ok": False, "reason": "no embedding"}
-                scores = [
-                    float(np.dot(embedding, reference))
-                    for reference in self._speaker_references
-                ]
-                return {
-                    "type": "speaker",
-                    "ok": True,
-                    "operation": "compare",
-                    "score": max(scores),
-                    "references": len(scores),
-                }
-            return {"type": "error", "message": f"unknown speaker operation: {op}"}
-        except Exception:
-            return {"type": "error", "message": traceback.format_exc()}
-
-    def _decode_samples(self, samples_b64: str, sample_rate: int) -> np.ndarray:
-        raw = base64.b64decode(samples_b64)
-        samples = np.frombuffer(raw, dtype=np.float32).copy()
-        if sample_rate == SAMPLE_RATE:
-            return samples
-        if len(samples) < 2 or sample_rate <= 0:
-            return np.array([], dtype=np.float32)
-        target_len = max(1, round(len(samples) * SAMPLE_RATE / sample_rate))
-        source_x = np.linspace(0.0, 1.0, num=len(samples), endpoint=False)
-        target_x = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
-        return np.interp(target_x, source_x, samples).astype(np.float32)
-
-    def _speaker_embedding(self, samples: np.ndarray) -> np.ndarray | None:
-        if len(samples) < int(SAMPLE_RATE * 0.7):
-            return None
-        if self.speaker_model is None:
-            from funasr import AutoModel  # type: ignore[import-untyped]
-
-            self.speaker_model = AutoModel(
-                model=SPEAKER_MODEL_ID,
-                device="cpu",
-                disable_update=True,
-            )
-        with contextlib.redirect_stdout(sys.stderr):
-            result = self.speaker_model.generate(input=samples)
-        item = result[0] if isinstance(result, list) and result else result
-        embedding = item.get("spk_embedding") if isinstance(item, dict) else None
-        if embedding is None:
-            return None
-        if hasattr(embedding, "detach"):
-            embedding = embedding.detach().cpu().numpy()
-        vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
-        norm = float(np.linalg.norm(vector))
-        return vector / norm if norm > 1e-8 else None
 
     def cmd_speaker(self, op: str, samples_b64: str = "", sample_rate: int = SAMPLE_RATE) -> dict:
         """Enroll or compare a voice embedding without affecting ASR state."""
@@ -275,8 +197,13 @@ class FunasrBridge:
             # FunASR/modelscope may emit progress bars or timing summaries to
             # stdout. Stdout is our line-delimited JSON protocol, so route that
             # library noise to stderr while inference runs.
+            # use_itn=True asks SenseVoice for punctuation + inverse text
+            # normalization; without it the raw output has no punctuation
+            # or casing, which reads as a corrupted transcript downstream.
             with contextlib.redirect_stdout(sys.stderr):
-                result = self.model.generate(input=self._buffer, language="auto")
+                result = self.model.generate(
+                    input=self._buffer, language="auto", use_itn=True
+                )
             text = ""
             if isinstance(result, list):
                 parts: list[str] = []

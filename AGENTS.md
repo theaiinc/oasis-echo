@@ -20,13 +20,22 @@
 ### Auto-paste
 
 - Paster.swift tries these paths in order:
-  1. **CGEventPostToPid** (private SPI) — posts Cmd+V directly to target PID.
-  2. **AppleScript** (`osascript` with System Events `keystroke`).
-  3. **CGEventPost to `.cghidEventTap`** — only if `AXIsProcessTrusted()`.
-  4. **AX insertion** (`AXUIElementSetAttributeValue` on focused element) — final fallback only.
+  1. **AppleScript** (`osascript` with System Events `keystroke`).
+  2. **CGEventPost to `.cghidEventTap`** — only if `AXIsProcessTrusted()`.
+  3. **AX insertion** (`AXUIElementSetAttributeValue` on focused element) — final fallback only.
+- Direct `CGEventPostToPid` injection was removed after it produced duplicate pastes in Electron targets despite a single `Paster.paste` call and successful API results.
 - Do not run another paste strategy after a direct AX insertion attempt; some apps mutate the focused element even when AX reports a non-success result, which can duplicate text if followed by Cmd+V.
+- Aha (2026-07-29): keep the paste boundary idempotent too. Duplicate hotkey/STT lifecycle callbacks can invoke `Paster.paste` twice even when `finishCommitted` is intended to guard the turn; suppress an identical successful transcript repeated within one second and log the suppression.
 - On macOS 14+, all paths require Accessibility permission. Without it, auto-paste falls back to clipboard-only.
 - The permission gate window shows Automation (System Events) instructions, but `keystroke` in System Events also requires Accessibility.
+
+### Audio engine lifecycle (mic-in-use indicator)
+
+- `TurnController` shares ONE `AVAudioEngine` between `mic` (`MicCapture`) and `player` (`AudioPlayer`), with Voice-Processing I/O enabled on both nodes for AEC (`player`'s TTS/backchannel output gets cancelled out of `mic`'s input). `MicCapture(engine:)` with an external engine never calls `engine.start()`/`.stop()` itself — see the comment on `ownsEngine` — that's deliberately left to whoever else uses the engine (`AudioPlayer`).
+- Aha (2026-08-21): `bootstrap()` used to call `try? player.prepare()` unconditionally at app launch to "warm up the audio graph." Since `prepare()` calls `engine.start()`, this opened a live microphone stream (Voice-Processing I/O reads the mic continuously for its echo-cancellation reference, independent of whether a tap is installed) the moment the app launched — and nothing ever called `player.stop()` except full app shutdown. Result: the macOS mic-in-use indicator turned on with the first capture/Echo turn and **never went dark again** until the app quit, regardless of how many meetings/calls/dictations had long since finished. Fixed by making the engine lazy + reference-released: `beginCapture()` now calls `try? player.prepare()` (idempotent, guarded by `AudioPlayer`'s own `started` flag) instead of `bootstrap()`, and a new `releaseSharedEngineIfIdle()` calls `player.stop()` once both `state.pill == .idle` AND `player.isQueueIdle` — wired from both the `state.$pill` idle sink and `player.onQueueDrained` (need both hooks: the pill can settle to idle while trailing TTS/backchannel audio is still draining, and that sink won't fire again on its own).
+- `MeetingController` is unaffected by the above — it owns a fully separate `MicCapture()` with its OWN private (non-shared, non-voice-processing) `AVAudioEngine`, and already correctly calls `engine.stop()` on every `stop()`/`cancel()`/`fail()` path (`ownsEngine == true` there).
+- If wake word ("Hey Echo") is enabled, `WakeWordDetector` holds its own separate always-on `AVAudioEngine` for VAD — the mic indicator will legitimately stay lit continuously while it's active. That's expected/by-design for an always-listening feature, not the bug above.
+- Restarting the same shared engine object (stop, then prepare+start again later) does NOT need voice-processing to be re-enabled — `setVoiceProcessingEnabled` is set once at construction, before the engine's first ever `start()`, and persists across subsequent stop/start cycles.
 - AppleScript error `1002` = "not allowed to send keystrokes" = no AX permission.
 
 ### Permission gate
@@ -54,6 +63,7 @@
 
 - Treat STT finals as potentially repeated or overlapping hypotheses; merge idempotently in `TurnController` before paste/echo instead of blindly appending.
 - Rolling-buffer STT partials/finals can rewrite earlier words with near-overlap substitutions (not just exact suffix/prefix matches); use `TranscriptAssembler`-style token overlap merging before paste/echo.
+- Aha (2026-07-28): the merge rules above apply to SEGMENT engines (Apple Speech). Server STT hypotheses are CUMULATIVE — every partial/final already covers the whole utterance — so `TranscriptAssembler.cumulativeHypotheses` must be set for `ServerSTTEngine`: unrelated re-hearings replace the pending hypothesis (append duplicates the utterance: "Current Re The The enrollment …"), and the server final replaces the assembled text outright. Committing partial fragments and overlap-merging the final back in is what mangled pasted transcripts.
 - Server `/audio` messages carry `utteranceId`; the Mac client must ignore partial/final STT messages whose id does not match the active/finishing capture.
 
 ## Docker
@@ -69,6 +79,8 @@
 - Aha: medium-complexity Oasis turns should prefer Qwen for speed while preserving Gemma for harder reasoning. `OASIS_MEDIUM_REASONER_MODEL=Qwen_Qwen3-4B-GGUF` makes the pipeline pass a per-turn model override for `question_simple` / `factual-lookup` escalations only; complex/tool turns keep `OPENAI_MODEL=google_gemma-4-E4B-it-qat-q4_0-gguf`.
 - Aha: Avalon currently exposes `ewinregirgojr_MiniCPM5-1B-Agentic-Tooluse-GGUF`, `google_gemma-4-E4B-it-qat-q4_0-gguf`, `ankk98_dspark-gemma4-12b-block7-Q4_0-GGUF`, `Qwen_Qwen3-4B-GGUF`, and `katanemo_Arch-Router-1.5B.gguf`. For the router's strict JSON/reply call, MiniCPM5-1B is the first smaller replacement to benchmark; Arch-Router remains the fastest option for classification but does not generate JSON replies.
 - Aha: for a new local formatting/JSON model, Qwen3.5-2B Instruct in non-thinking mode is a better current target than Qwen3-4B: it is much smaller while retaining stronger instruction/structured-output behavior. Qwen3.5-0.8B is the speed-first fallback; Ministral 3 3B Instruct is the quality-first structured-output alternative.
+- Aha (2026-07-28): Avalon's model list drifts between restarts — `Qwen_Qwen3-4B-GGUF` and `google_gemma-4-E4B-it-qat-q4_0-gguf` were replaced by `unsloth_Qwen3.5-4B-GGUF`, `lmstudio-community_gemma-4-E4B-it-GGUF`, and `mradermacher_Qwen3.5-2B-GPT-5.1-HighIQ-INSTRUCT-GGUF`. A stale model name 404s instantly and the STT semantic/formatting stage silently never applies ("always failed to format"). The server now probes `/v1/models` at startup and logs `configured model missing from model server`; check that log line first when formatting or routing degrades.
+- Aha (2026-07-28): the STT correction model and timeout are now `OASIS_STT_CORRECT_MODEL` / `OASIS_STT_CORRECT_TIMEOUT_MS` (default: medium-reasoner model, 10s). The old hardcoded 2.5s timeout aborted nearly every correction on Avalon's llama-cli cold starts. Postprocess stage failures surface in `PostProcessResult.errors` and are logged as `stt.postprocess stage failed`.
 
 ## Speech Text
 
@@ -78,16 +90,21 @@
 
 ## STT Backends
 
+- Aha (2026-07-28): SenseVoice emits internal tags (`<|en|>`, `<|NEUTRAL|>`, …) that can sit directly between words; stripping them with an empty string welds the neighboring words together ("word<|en|>Next" → "wordNext"). `funasr-bridge.py` must replace tags with a space and collapse runs. Also pass `use_itn=True` to `model.generate` or the transcript has no punctuation/casing.
+
 ### API startup
 - Aha: a Finder-launched app may no longer be adjacent to the checkout; `make-app.sh` embeds the build checkout in `OasisEchoServerRepoRoot`, while `RepoRoot` still validates configured, current-directory, and bundle candidates before spawning the local API.
 - Aha: launching through `npm run server` can leave the npm parent alive for minutes before the workspace child starts when invoked from the GUI; the Mac launcher now executes the workspace server entrypoint directly with Node and logs spawn/exit diagnostics.
+- Aha (2026-08-01): Finder-launched macOS apps inherit launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so bare `node` exits with status 127 even when Node works in Terminal. `ServerLaunchCommand` must resolve executable Node paths such as `/opt/homebrew/bin/node` before spawning the API.
 - Aha: the macOS app must always probe `/config` during launch and start the local API when it is unavailable; do not gate this recovery path on the legacy `autoStartServer` preference. Docker vs `npm run server` remains selectable.
 - Aha: heartbeat recovery must probe `/config` even when `serverReachable` is already true; otherwise an API process can die behind a stale SSE state and never reach `ServerAutoLauncher`.
 - Aha: Echo mode initially displays raw STT text, so the Mac client must apply the server's `stt.postprocess` event to the latest user message; otherwise spacing and phonetic corrections are only used for reasoning while malformed text remains visible.
 - Aha: applying a postprocess result by mutating `agentMessages[index]` in place can bypass SwiftUI `@Published` notification; replace the whole message array when formatting the latest user transcript.
 - Aha: short STT artifacts such as `u`, `ur`, and `r` should trigger semantic correction; the local Ollama-compatible SLM can repair ambiguous transcripts even when the primary dialogue reasoner is OpenAI or Anthropic.
 - Aha: Avalon exposes the correction model through OpenAI-compatible `/v1/chat/completions`, not Ollama `/api/generate`; when `OPENAI_BASE_URL` points at Avalon, semantic STT correction must use that protocol or it silently falls back to raw text.
-- Aha: transcript corrections must never block dictation; deliver the raw transcript immediately, surface semantic proposals as a bounded non-blocking review queue, and persist only explicitly accepted phrase-level mappings.
+- Aha: transcript corrections must never block dictation; deliver the raw transcript immediately, surface semantic proposals as a bounded non-blocking review queue, and persist only explicitly accepted corrections.
+- Aha (2026-08-21): "Accept" on the correction review bubble used to force `phraseOnly: true`, so `CorrectionStore.addCorrection` skipped word-pair extraction entirely — an accepted fix only persisted as a fuzzy match on the WHOLE accepted sentence (`PhraseMatcherStage` compares full-string similarity, not substrings). A misheard name/term corrected once never generalized to a different sentence containing the same word — this is what "vocabulary correction doesn't work" reports were about. `TurnController.acceptCorrectionReview` now omits `phraseOnly`, letting the server's `analyzeDiff` decide: it only promotes to a global word rule when exactly one token differs between original/corrected (same safety guarantee the note above intended — multi-word LLM rewrites still fall back to phrase-only).
+- Aha (2026-08-21): the correction-review bubble itself almost never appeared for ordinary misheard words. `client.transcribe(_:)` never sends STT confidence (nothing in the Mac client tracks it), so `/transcribe`'s `postprocess.process()` call left `confidence` undefined; `SemanticCorrectionStage.shouldRun` then defaults `ctx.confidence ?? 1` to full confidence and only runs the LLM when text matches a fixed filler-word/duplicate-word regex. A misheard proper noun or technical term ("cubernetes" for "kubernetes") reads as a perfectly ordinary sentence to that regex, so the semantic pass — and the `reviewCandidate` flag that drives the bubble — silently never fired. Verified A/B: identical request against the pre-fix code returned `stagesApplied: [], reviewCandidate: false`; post-fix returns the LLM correction with `reviewCandidate: true`. Fix: `/transcribe` now passes `confidence: 0` unconditionally — it's a fire-and-forget background call that runs after paste already happened, so there's no latency cost to always checking. Do NOT do this for the live `/turn` path (Echo mode) — that one is genuinely latency-sensitive and should keep the confidence gate.
 
 ### Whisper (default)
 - Uses `@huggingface/transformers` with `Xenova/whisper-base.en` ONNX model.

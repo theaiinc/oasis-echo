@@ -8,12 +8,26 @@ import Foundation
 // pill waveform can animate off the live signal.
 
 final class MicCapture: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    private let engine: AVAudioEngine
+    // When an external engine is supplied, its start/stop lifecycle belongs
+    // to whoever else is using it (e.g. AudioPlayer, so its Voice-Processing
+    // I/O has a live reference to cancel) — we only ever touch our own tap.
+    private let ownsEngine: Bool
     private var onBuffer: ((AVAudioPCMBuffer) -> Void)?
     private var onLevel: ((Float) -> Void)?
     private var isRunning = false
 
     var format: AVAudioFormat { engine.inputNode.outputFormat(forBus: 0) }
+
+    init(engine: AVAudioEngine? = nil) {
+        if let engine {
+            self.engine = engine
+            self.ownsEngine = false
+        } else {
+            self.engine = AVAudioEngine()
+            self.ownsEngine = true
+        }
+    }
 
     func start(
         onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
@@ -31,15 +45,19 @@ final class MicCapture: @unchecked Sendable {
             self.onBuffer?(buf)
             if let level = Self.rms(buf) { self.onLevel?(level) }
         }
-        engine.prepare()
-        try engine.start()
+        if ownsEngine {
+            engine.prepare()
+            try engine.start()
+        }
         isRunning = true
     }
 
     func stop() {
         guard isRunning else { return }
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        if ownsEngine {
+            engine.stop()
+        }
         isRunning = false
     }
 

@@ -25,6 +25,7 @@ export class PostProcessPipeline {
     let text = input.text;
     const stagesApplied: string[] = [];
     const history: PostProcessResult['history'] = [];
+    const errors: PostProcessResult['errors'] = [];
 
     for (const stage of this.stages) {
       const ctx: PostProcessContext = {
@@ -33,6 +34,9 @@ export class PostProcessPipeline {
       };
       if (!stage.shouldRun(ctx)) continue;
       const result = await stage.run(ctx);
+      if (typeof result.info?.['error'] === 'string') {
+        errors.push({ stage: stage.name, error: result.info['error'] });
+      }
       if (!result.changed) continue;
       history.push({
         stage: stage.name,
@@ -55,6 +59,7 @@ export class PostProcessPipeline {
       reviewCandidate: history.some(
         (entry) => entry.stage === 'semantic' && entry.before !== entry.after,
       ),
+      errors,
       latencyMs: Date.now() - startedAt,
     };
   }

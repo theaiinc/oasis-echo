@@ -301,6 +301,26 @@ describe('PostProcessPipeline', () => {
     const out = await pipeline.process({ text: 'real input' });
     expect(out.text).toBe('real input');
   });
+
+  it('surfaces stage errors so callers can log them', async () => {
+    const pipeline = new PostProcessPipeline([
+      new SemanticCorrectionStage({
+        correct: async () => { throw new Error('ollama corrector 404: model not found'); },
+        minConfidenceToRun: null,
+      }),
+    ]);
+    const out = await pipeline.process({ text: 'u hold up what is that' });
+    expect(out.text).toBe('u hold up what is that');
+    expect(out.errors).toHaveLength(1);
+    expect(out.errors[0]!.stage).toBe('semantic');
+    expect(out.errors[0]!.error).toContain('404');
+  });
+
+  it('reports no errors on a clean run', async () => {
+    const pipeline = new PostProcessPipeline([new RuleStage()]);
+    const out = await pipeline.process({ text: 'uh hello there' });
+    expect(out.errors).toEqual([]);
+  });
 });
 
 /* -----------------------------------------------------------------

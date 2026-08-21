@@ -26,6 +26,10 @@ export type RuntimeConfig = {
   routerBaseUrl: string;
   routerModel: string;
   mediumReasonerModel: string | undefined;
+  /** Model for STT semantic correction / transcript formatting. */
+  sttCorrectModel: string | undefined;
+  /** Timeout for the STT semantic correction LLM call. */
+  sttCorrectTimeoutMs: number;
   reasonerTimeoutMs: number;
   /** LM Studio base URL for Arch-Router classifier (OpenAI-compatible). */
   archBaseUrl: string;
@@ -95,6 +99,8 @@ export function loadConfig(): RuntimeConfig {
     routerBaseUrl,
     routerModel: process.env['OASIS_ROUTER_MODEL'] ?? (backend === 'ollama' ? model : 'qwen3:4b'),
     mediumReasonerModel: process.env['OASIS_MEDIUM_REASONER_MODEL']?.trim() || undefined,
+    sttCorrectModel: process.env['OASIS_STT_CORRECT_MODEL']?.trim() || undefined,
+    sttCorrectTimeoutMs: Number(process.env['OASIS_STT_CORRECT_TIMEOUT_MS'] ?? 10_000),
     reasonerTimeoutMs: Number(process.env['OASIS_REASONER_TIMEOUT_MS'] ?? 120_000),
     // Arch-Router 1.5B runs on LM Studio (OpenAI-compatible API).
     // Default to localhost:1234/v1 with model ID as loaded in LM Studio.

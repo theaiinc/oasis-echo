@@ -23,8 +23,23 @@ final class TurnController: ObservableObject {
     private let log = Logger(subsystem: "ai.oasis.echo.mac", category: "controller")
     private let state: AppState
     private var client: OasisClient
-    private let mic = MicCapture()
-    private let player = AudioPlayer()
+    // Shared so Apple's Voice-Processing I/O (AEC) can cancel `player`'s own
+    // TTS/backchannel output out of `mic`'s input — both must enable it on
+    // the SAME engine, before that engine's first start(), for the AEC's
+    // adaptive filter to have a live digital reference to subtract.
+    private let audioEngine: AVAudioEngine = {
+        let engine = AVAudioEngine()
+        do {
+            try engine.inputNode.setVoiceProcessingEnabled(true)
+            try engine.outputNode.setVoiceProcessingEnabled(true)
+        } catch {
+            Logger(subsystem: "ai.oasis.echo.mac", category: "audio")
+                .error("Voice-Processing I/O (AEC) unavailable: \(String(describing: error), privacy: .public)")
+        }
+        return engine
+    }()
+    private let mic: MicCapture
+    private let player: AudioPlayer
     private var stt: STTEngine?
     private var persistentServerSTT: ServerSTTEngine?
     private let wakeWord = WakeWordDetector()
@@ -100,6 +115,8 @@ final class TurnController: ObservableObject {
     init(state: AppState) {
         self.state = state
         self.client = OasisClient(baseURL: URL(string: state.serverBaseURL) ?? URL(string: "http://127.0.0.1:3000")!)
+        self.mic = MicCapture(engine: audioEngine)
+        self.player = AudioPlayer(engine: audioEngine)
 
         // When "Hey Echo" is detected, switch to echo mode AND
         // immediately start capture (hands-free). Manual mode switch
@@ -129,6 +146,7 @@ final class TurnController: ObservableObject {
                     Task { @MainActor in
                         MediaControl.resumeIfPaused()
                         self?.wakeWord.resume()
+                        self?.releaseSharedEngineIfIdle()
                     }
                 }
             }
@@ -139,6 +157,13 @@ final class TurnController: ObservableObject {
         player.onQueueDrained = { [weak self] in
             Task { @MainActor [weak self] in
                 self?.audioQueueDrained()
+                // Also check here, not just from the pill→idle sink:
+                // the pill can already BE idle while a trailing
+                // backchannel/TTS clip is still draining (e.g. an
+                // error mid-turn), in which case that sink never fires
+                // again and this is the only remaining signal that
+                // we're now truly at rest.
+                self?.releaseSharedEngineIfIdle()
             }
         }
     }
@@ -161,10 +186,14 @@ final class TurnController: ObservableObject {
         // prompts on every launch are especially annoying when ad-hoc
         // signing changes the app identity, making macOS forget grants.
 
-        // Warm up the audio graph on launch so the first backchannel
-        // plays with no perceptible gap. Logs to Console.app on
-        // failure; there's nothing useful the user can do about it.
-        try? player.prepare()
+        // Do NOT warm the shared mic/speaker engine here. It has
+        // Voice-Processing I/O enabled, so starting it opens a live
+        // microphone stream — macOS shows this as mic-in-use for as
+        // long as it runs. Priming it at launch (before the user has
+        // done anything) meant the indicator never went dark until the
+        // app quit. It's started lazily in beginCapture() instead and
+        // released by releaseSharedEngineIfIdle() once both capture
+        // and TTS playback are done.
 
         await reconnect()
         startHeartbeat()
@@ -425,7 +454,18 @@ final class TurnController: ObservableObject {
         if state.pauseOtherMedia { MediaControl.pauseIfPlaying() }
 
         do {
+            // Bring the shared mic/speaker engine back up if a prior
+            // idle period released it. Idempotent — AudioPlayer guards
+            // on its own `started` flag, so this is a no-op if the
+            // engine is already running (e.g. mid-Echo-turn playback).
+            try? player.prepare()
+
             let transcriber: STTEngine = makeEngine()
+            // Server STT re-transcribes its rolling buffer, so every
+            // partial/final already covers the whole utterance; the
+            // assembler must replace mismatched hypotheses instead of
+            // appending them (append duplicates the whole utterance).
+            transcriptAssembler.cumulativeHypotheses = transcriber is ServerSTTEngine
             try transcriber.start(
                 onPartial: { [weak self] text in
                     Task { @MainActor [weak self] in
@@ -789,6 +829,20 @@ final class TurnController: ObservableObject {
         }
     }
 
+    // Stops the shared mic/speaker engine — and with it the macOS
+    // microphone-in-use indicator — once nothing needs it. Guarded on
+    // BOTH conditions independently (not just "this call site implies
+    // idle") because this is invoked from two different settle points
+    // that can race: the pill reaching .idle, and the audio queue
+    // separately draining. Only safe to stop when both are true —
+    // stopping while a capture is listening kills dictation, and
+    // stopping while TTS/backchannel audio is still queued cuts off
+    // playback mid-sentence.
+    private func releaseSharedEngineIfIdle() {
+        guard case .idle = state.pill, player.isQueueIdle else { return }
+        player.stop()
+    }
+
     // Called from AudioPlayer.onQueueDrained on the main actor. Runs
     // finalizeEcho only if the server has also signalled turn.complete;
     // otherwise we keep waiting (more chunks may still arrive).
@@ -843,10 +897,18 @@ final class TurnController: ObservableObject {
             state.agentMessages[index].text = review.corrected
         }
         Task {
+            // Let the server's diff analyzer decide word-rule vs.
+            // phrase-only (see CorrectionStore.addCorrection /
+            // analyzeDiff): it only ever promotes a clean single-word
+            // swap to a global rule, so this stays safe. Forcing
+            // phraseOnly here used to mean an accepted correction only
+            // matched if a FUTURE utterance was near-identical to this
+            // whole sentence — a misheard name or term never generalized
+            // to other phrasings, which is what "vocabulary correction
+            // doesn't work" reports were about.
             try? await client.learnCorrection(
                 original: review.original,
-                corrected: review.corrected,
-                phraseOnly: true
+                corrected: review.corrected
             )
         }
     }

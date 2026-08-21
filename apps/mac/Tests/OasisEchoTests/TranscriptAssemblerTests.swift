@@ -58,14 +58,82 @@ final class TranscriptAssemblerTests: XCTestCase {
             "I talked to Sam to confirm the booking"
         )
     }
+
+    // Server STT (rolling-buffer re-inference) sends cumulative
+    // hypotheses: each partial already covers the whole utterance.
+    // When a re-hearing shares no detectable overlap with the previous
+    // hypothesis it must replace it — appending duplicates the whole
+    // utterance ("Current Re The The enrollment …").
+    func testCumulativeRehearingReplacesInsteadOfAppending() {
+        var assembler = TranscriptAssembler()
+        assembler.cumulativeHypotheses = true
+
+        assembler.ingestPartial("Current Re")
+        assembler.ingestPartial("The enrollment")
+        assembler.ingestPartial("Right now the enrollment requirements")
+        assembler.ingestFinal("Right now the enrollment requirements are great")
+
+        XCTAssertEqual(
+            assembler.text,
+            "Right now the enrollment requirements are great"
+        )
+    }
+
+    func testCumulativeFinalIsAuthoritative() {
+        var assembler = TranscriptAssembler()
+        assembler.cumulativeHypotheses = true
+
+        // Partials drift as the rolling buffer re-infers; the final
+        // covers the whole utterance and must win outright — mixing it
+        // with stale hypotheses is what produced mangled paste output.
+        assembler.ingestPartial("Yeah, sure. I actually am testing an order")
+        assembler.ingestPartial("Actually I'm testing another route to where to")
+        assembler.ingestFinal("Yeah sure, actually I'm testing an order out of whether this was good.")
+
+        XCTAssertEqual(
+            assembler.text,
+            "Yeah sure, actually I'm testing an order out of whether this was good."
+        )
+    }
+
+    func testCumulativeEmptyFinalKeepsLastHypothesis() {
+        var assembler = TranscriptAssembler()
+        assembler.cumulativeHypotheses = true
+
+        assembler.ingestPartial("send the report tomorrow morning")
+        assembler.ingestFinal("   ")
+
+        XCTAssertEqual(assembler.text, "send the report tomorrow morning")
+    }
+
+    func testSegmentModeStillAppendsUnrelatedContinuations() {
+        var assembler = TranscriptAssembler()
+        // Default (Apple Speech) mode: unrelated text is new speech.
+        assembler.ingestPartial("I need to schedule a meeting")
+        assembler.ingestPartial("and send the notes afterward")
+
+        XCTAssertEqual(
+            assembler.text,
+            "I need to schedule a meeting and send the notes afterward"
+        )
+    }
 }
 
 
 final class ServerAutoLauncherTests: XCTestCase {
     func testLaunchesServerDirectlyWithoutNpmWrapper() {
-        let arguments = ServerLaunchCommand.arguments(port: 9187)
-        XCTAssertEqual(arguments, ["-l", "-c", "PORT=9187 exec node --import tsx packages/app/src/server.ts"])
+        let arguments = ServerLaunchCommand.arguments(port: 9187, nodePath: "/opt/homebrew/bin/node")
+        XCTAssertEqual(arguments, ["-l", "-c", "PORT=9187 exec '/opt/homebrew/bin/node' --import tsx packages/app/src/server.ts"])
         XCTAssertFalse(arguments.joined(separator: " ").contains("npm run server"))
+    }
+
+    func testFindsNodeOutsideLaunchdPath() {
+        let node = ServerLaunchCommand.nodeExecutable(environment: [
+            "PATH": "/usr/bin:/bin"
+        ])
+        XCTAssertEqual(node, ["/opt/homebrew/bin/node", "/usr/local/bin/node"].first(where: {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }))
     }
 }
 

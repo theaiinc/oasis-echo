@@ -24,9 +24,21 @@ enum Paster {
     private static var alertShown = false
     /// Strong ref so the gate window's timer keeps running.
     private static var gateController: PermissionGateController?
+    /// Protects the target app from duplicate lifecycle callbacks. A second
+    /// paste request with the same transcript immediately after a successful
+    /// one is the same user action, not a new dictation.
+    private static var lastSuccessfulText: String?
+    private static var lastSuccessfulAt: Date = .distantPast
+    private static let duplicateWindow: TimeInterval = 1.0
 
     static func paste(_ text: String, activateTarget: NSRunningApplication? = nil) -> Outcome {
         guard !text.isEmpty else { return .empty }
+        let now = Date()
+        if lastSuccessfulText == text,
+           now.timeIntervalSince(lastSuccessfulAt) < duplicateWindow {
+            log.warning("paste: suppressed duplicate request (textLen=\(text.count, privacy: .public))")
+            return .pasted
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
@@ -47,33 +59,35 @@ enum Paster {
         let axTrusted = isAccessibilityTrusted()
         log.notice("paste: started (AX=\(axTrusted, privacy: .public), textLen=\(text.count, privacy: .public))")
 
-        // Path 1: CGEventPostToPid — posts Cmd+V directly to the target PID.
-        if let pid, sendCmdVViaPostToPid(pid) {
-            log.notice("paste: CGEventPostToPid OK")
-            consecutiveFailures = 0; alertShown = false
-            return .pasted
-        }
-
-        // Path 2: AppleScript — System Events keystroke.
+        // Path 1: AppleScript — System Events keystroke. This emits one
+        // normal Cmd+V gesture. Direct PID injection below is intentionally
+        // not used: on some Electron targets it is reported successful but
+        // results in the paste gesture being handled twice.
         if sendCmdVViaAppleScript() {
             log.notice("paste: AppleScript OK")
+            lastSuccessfulText = text
+            lastSuccessfulAt = Date()
             consecutiveFailures = 0; alertShown = false
             return .pasted
         }
 
-        // Path 3: HID tap (only when AX trusted).
+        // Path 2: HID tap (only when AX trusted).
         if axTrusted {
             log.notice("paste: HID tap")
             sendCmdVViaHIDTap()
+            lastSuccessfulText = text
+            lastSuccessfulAt = Date()
             consecutiveFailures = 0; alertShown = false
             return .pasted
         }
 
-        // Path 4: AX insertion fallback. This is intentionally last so
+        // Path 3: AX insertion fallback. This is intentionally last so
         // an ambiguous AX side effect is never followed by another paste
         // strategy for the same request.
         if insertViaAX(text) {
             log.notice("paste: AX insertion OK")
+            lastSuccessfulText = text
+            lastSuccessfulAt = Date()
             consecutiveFailures = 0; alertShown = false
             return .pasted
         }

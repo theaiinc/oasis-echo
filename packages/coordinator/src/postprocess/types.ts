@@ -68,6 +68,12 @@ export type PostProcessResult = {
   history: Array<{ stage: string; before: string; after: string; info?: Record<string, unknown> }>;
   /** True when a semantic rewrite is worth showing as a non-blocking review. */
   reviewCandidate?: boolean;
+  /**
+   * Stages that ran but failed internally (LLM 404/timeout/abort).
+   * They leave the text untouched, so without this the failure is
+   * invisible — callers should log these.
+   */
+  errors: Array<{ stage: string; error: string }>;
   /** Wall-clock ms for the entire pipeline. */
   latencyMs: number;
 };
