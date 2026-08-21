@@ -182,9 +182,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .generating = meetingController.state {
             meetingWindowController?.show(); return
         }
-        meetingController.reset()
-        meetingController.start()
-        meetingWindowController?.show()
+        // This action runs from a button INSIDE the MenuBarExtra's own
+        // popover, which also needs to dismiss itself as part of
+        // handling the same click. meetingController.start() does
+        // heavy synchronous work (AVAudioEngine setup, mic/permission
+        // calls, opening a server WebSocket) — running that directly
+        // in the button's action closure meant it executed while
+        // SwiftUI's gesture-dispatch machinery for that same click was
+        // still unwinding, and crashed with SIGSEGV inside it
+        // (MainActor.assumeIsolated, deep in SwiftUI/Swift-Concurrency
+        // internals — confirmed via crash report, and reproducible
+        // every time via this specific button, never via the
+        // equivalent in-window "Start Recording" button or the toast
+        // path, both of which don't share a call stack with a
+        // dismissing popover). Deferring to the next run loop tick
+        // lets that unwind fully first.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.meetingController.reset()
+            self.meetingController.start()
+            self.meetingWindowController?.show()
+        }
     }
 
     func startNewMeetingFromToast() {
