@@ -95,6 +95,21 @@ final class ServerAutoLauncher {
         refreshLock.unlock()
     }
 
+    /// Terminates the server process this launcher spawned, if any. Call
+    /// on app quit — nothing else ever did, so every previous quit
+    /// (including a plain `kill` of the app, e.g. during development)
+    /// silently orphaned the Node process and its FunASR/Whisper STT
+    /// subprocess: reparented to launchd, still bound to the port,
+    /// still consuming a loaded speech model's worth of memory,
+    /// invisible from the app's own process list. The launch command
+    /// uses `exec`, so the bash wrapper is replaced in-place by the
+    /// node process at the SAME pid — `child.terminate()` reaches the
+    /// real server, not a dead shell.
+    func stop() {
+        guard let child, child.isRunning else { return }
+        child.terminate()
+    }
+
     /// Starts the server (Docker or npm) and waits until `/config` succeeds or timeout.
     func ensureServerRunning(client: OasisClient, state: AppState) async {
         if state.useDocker {

@@ -85,11 +85,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotkeyManager.shared.install(controller: controller, state: state)
         LaunchAtLogin.apply(state.launchAtLogin)
         Task { await controller.bootstrap() }
+        installTerminationSignalHandler()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         controller.shutdown()
         meetingController.cancel()
+        ServerAutoLauncher.shared.stop()
+    }
+
+    // AppKit does not install a SIGTERM handler by default, so a plain
+    // `kill <pid>` (as opposed to Cmd+Q / NSApp.terminate, which go
+    // through the normal application-termination sequence) bypasses
+    // applicationWillTerminate entirely — the kernel's default SIGTERM
+    // action just ends the process immediately, with no chance for our
+    // cleanup to run. That's how the locally-spawned Node/FunASR server
+    // process kept getting silently orphaned (reparented to launchd,
+    // still bound to the port, still holding a loaded speech model)
+    // across every restart during development. Route SIGTERM through
+    // the same clean-quit path so both cases converge.
+    private var sigtermSource: DispatchSourceSignal?
+
+    private func installTerminationSignalHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            exit(0)
+        }
+        source.resume()
+        sigtermSource = source
     }
 
     func showSettingsWindow() {
