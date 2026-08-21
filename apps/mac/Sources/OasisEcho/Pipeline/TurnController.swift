@@ -43,6 +43,10 @@ final class TurnController: ObservableObject {
     private var stt: STTEngine?
     private var persistentServerSTT: ServerSTTEngine?
     private let wakeWord = WakeWordDetector()
+    // Watches the destination app's text field after a Transcribe-mode
+    // paste and surfaces self-made edits as correction candidates,
+    // without the user having to copy anything or open a menu.
+    private let postPasteWatcher = PostPasteWatcher()
     private var pill: PillWindowController?
     private var eventsOpen = false
     // Server Whisper/FunASR partials are rolling-buffer hypotheses, so
@@ -157,6 +161,13 @@ final class TurnController: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.audioQueueDrained()
             }
+        }
+
+        // Route a detected self-made edit through the same
+        // Accept/Keep/Later bubble already used for server-proposed
+        // corrections — one click to teach it, or let it fade away.
+        postPasteWatcher.onCorrectionDetected = { [weak self] original, corrected in
+            self?.state.enqueueCorrectionReview(original: original, corrected: corrected)
         }
     }
 
@@ -295,6 +306,7 @@ final class TurnController: ObservableObject {
         stt?.cancel()
         persistentServerSTT?.shutdown()
         player.stop()
+        postPasteWatcher.stop()
         Task { await client.closeEventStream() }
     }
 
@@ -675,10 +687,12 @@ final class TurnController: ObservableObject {
         let words = raw.split(whereSeparator: { $0.isWhitespace }).count
         let totalMs = Int(Self.nowMs() - startMs)
         state.lastPastedText = raw
+        postPasteWatcher.stop()
         if state.autoPaste {
             switch Paster.paste(raw, activateTarget: pasteTargetApp()) {
             case .pasted:
                 state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
+                watchForSelfEdit(original: raw)
             case .copiedOnly:
                 state.flashPill(.copiedOnly(words: words), after: 2.4)
                 Paster.showPermissionGate()
@@ -703,6 +717,18 @@ final class TurnController: ObservableObject {
             } catch {
                 // The raw transcript has already been delivered; review is best-effort.
             }
+        }
+    }
+
+    /// Starts watching the destination field for a self-made edit, a
+    /// beat after the paste so the target app has had a moment to
+    /// process the keystroke and update its Accessibility tree — grabbing
+    /// the focused element too early can race the app's own paste
+    /// handling and read a stale/empty value.
+    private func watchForSelfEdit(original: String) {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            self?.postPasteWatcher.start(originalText: original)
         }
     }
 
