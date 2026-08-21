@@ -125,8 +125,25 @@ final class PillWindowController {
         }
     }
 
+    // `NSScreen.main` means "the screen containing the currently KEY
+    // window" — not "the primary display". This panel is a
+    // .nonactivatingPanel that never becomes key, so NSScreen.main at
+    // any moment reflects whichever OTHER app currently has focus.
+    // Paster.paste() explicitly activates the paste target right
+    // before a resize/reposition can fire (e.g. the .pasted toast, or
+    // a correction-review bubble appearing) — on a multi-monitor setup
+    // where that target lives on a different display than the one the
+    // user is actually looking at, the orb (and any bubble on it) would
+    // silently jump there. Anchor to `NSScreen.screens.first` instead —
+    // Apple documents index 0 as the screen holding the menu bar, i.e.
+    // the system's actual designated primary display (what System
+    // Settings / system_profiler call "Main Display"), which is stable
+    // and does NOT follow focus the way NSScreen.main does. Only
+    // NSScreen.main as a last-resort fallback if .screens is ever empty.
+    private var homeScreen: NSScreen?
+
     private func applyResizeFrame(_ target: CGSize) {
-        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let screen = (homeScreen ?? NSScreen.main)?.visibleFrame ?? .zero
         let x = screen.midX - target.width / 2
         let bottomY: CGFloat = state.pillAtBottom
             ? screen.minY + 18
@@ -141,6 +158,7 @@ final class PillWindowController {
     }
 
     func show() {
+        homeScreen = NSScreen.screens.first ?? NSScreen.main
         reposition()
         panel.orderFrontRegardless()
         NotificationCenter.default.addObserver(
@@ -155,11 +173,17 @@ final class PillWindowController {
     func window() -> NSPanel { panel }
 
     @objc nonisolated private func screensChanged() {
-        Task { @MainActor in self.reposition() }
+        Task { @MainActor in
+            // A genuine display reconfiguration (monitor connected/
+            // disconnected/resolution changed) — re-anchor in case the
+            // home screen was removed, or just to reflect the new setup.
+            self.homeScreen = NSScreen.screens.first ?? NSScreen.main
+            self.reposition()
+        }
     }
 
     func reposition() {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = homeScreen ?? NSScreen.main else { return }
         let frame = screen.visibleFrame
         let size = panel.frame.size
         let x = frame.midX - size.width / 2
