@@ -146,7 +146,6 @@ final class TurnController: ObservableObject {
                     Task { @MainActor in
                         MediaControl.resumeIfPaused()
                         self?.wakeWord.resume()
-                        self?.releaseSharedEngineIfIdle()
                     }
                 }
             }
@@ -157,13 +156,6 @@ final class TurnController: ObservableObject {
         player.onQueueDrained = { [weak self] in
             Task { @MainActor [weak self] in
                 self?.audioQueueDrained()
-                // Also check here, not just from the pill→idle sink:
-                // the pill can already BE idle while a trailing
-                // backchannel/TTS clip is still draining (e.g. an
-                // error mid-turn), in which case that sink never fires
-                // again and this is the only remaining signal that
-                // we're now truly at rest.
-                self?.releaseSharedEngineIfIdle()
             }
         }
     }
@@ -186,14 +178,22 @@ final class TurnController: ObservableObject {
         // prompts on every launch are especially annoying when ad-hoc
         // signing changes the app identity, making macOS forget grants.
 
-        // Do NOT warm the shared mic/speaker engine here. It has
-        // Voice-Processing I/O enabled, so starting it opens a live
-        // microphone stream — macOS shows this as mic-in-use for as
-        // long as it runs. Priming it at launch (before the user has
-        // done anything) meant the indicator never went dark until the
-        // app quit. It's started lazily in beginCapture() instead and
-        // released by releaseSharedEngineIfIdle() once both capture
-        // and TTS playback are done.
+        // Warm up the audio graph on launch so the first backchannel
+        // plays with no perceptible gap. Logs to Console.app on
+        // failure; there's nothing useful the user can do about it.
+        //
+        // Reverted (2026-08-21): tried starting this lazily on first
+        // capture + stopping it once idle instead, to release the mic
+        // indicator between captures. That broke recording entirely —
+        // Voice-Processing I/O (AEC) apparently does not reliably
+        // support a stop()-then-start() cycle on the same engine
+        // instance; the second start silently failed (or the tap never
+        // produced buffers) with no error surfaced to the user, just a
+        // dead mic. Reverting to "start once, never stop until quit"
+        // until that can be verified against real hardware — a
+        // continuously-lit mic indicator is a much smaller problem
+        // than dictation silently not working at all.
+        try? player.prepare()
 
         await reconnect()
         startHeartbeat()
@@ -454,12 +454,6 @@ final class TurnController: ObservableObject {
         if state.pauseOtherMedia { MediaControl.pauseIfPlaying() }
 
         do {
-            // Bring the shared mic/speaker engine back up if a prior
-            // idle period released it. Idempotent — AudioPlayer guards
-            // on its own `started` flag, so this is a no-op if the
-            // engine is already running (e.g. mid-Echo-turn playback).
-            try? player.prepare()
-
             let transcriber: STTEngine = makeEngine()
             // Server STT re-transcribes its rolling buffer, so every
             // partial/final already covers the whole utterance; the
@@ -827,20 +821,6 @@ final class TurnController: ObservableObject {
         } else {
             state.agentMessages.append(.init(role: .echo, text: piece, partial: !final))
         }
-    }
-
-    // Stops the shared mic/speaker engine — and with it the macOS
-    // microphone-in-use indicator — once nothing needs it. Guarded on
-    // BOTH conditions independently (not just "this call site implies
-    // idle") because this is invoked from two different settle points
-    // that can race: the pill reaching .idle, and the audio queue
-    // separately draining. Only safe to stop when both are true —
-    // stopping while a capture is listening kills dictation, and
-    // stopping while TTS/backchannel audio is still queued cuts off
-    // playback mid-sentence.
-    private func releaseSharedEngineIfIdle() {
-        guard case .idle = state.pill, player.isQueueIdle else { return }
-        player.stop()
     }
 
     // Called from AudioPlayer.onQueueDrained on the main actor. Runs
