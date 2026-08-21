@@ -85,6 +85,28 @@ struct CorrectionRequestBody: Encodable {
     let phraseOnly: Bool
 }
 
+enum CorrectionKind: String {
+    case word
+    case phrase
+}
+
+struct DeleteCorrectionRequestBody: Encodable {
+    let type: String
+    let value: String
+}
+
+struct CorrectionsListResponse: Decodable {
+    let wordRules: [String: String]
+    let phrases: [String]
+    let history: [CorrectionHistoryEntry]
+}
+
+struct CorrectionHistoryEntry: Decodable {
+    let original: String
+    let corrected: String
+    let atMs: Int64
+}
+
 struct ConfigResponse: Decodable {
     let backend: String?
     let model: String?

@@ -21,8 +21,46 @@ describe('analyzeDiff', () => {
     expect(out.addAsPhrase).toBe(true);
   });
 
-  it('does not extract for multi-word substitutions of equal length', () => {
+  it('extracts a multi-word span pair by trimming the common prefix/suffix', () => {
+    // "turn"/"the" are shared context; only the middle span changed.
+    // A same-length-only heuristic would miss this (2 tokens mismatch
+    // on each side), but the prefix/suffix trim isolates it cleanly.
     const out = analyzeDiff('turn off the lights', 'turn on the monitor');
+    expect(out.wordPairs).toEqual([{ wrong: 'off the lights', right: 'on the monitor' }]);
+  });
+
+  it('extracts a span pair even when the token count changes', () => {
+    // The real motivating case: "P, N, L" collapses into "PNL" — a
+    // strict same-token-count check can never match this, since three
+    // tokens become one, but prefix/suffix trimming isolates the
+    // changed middle regardless of how many tokens are on each side.
+    const out = analyzeDiff(
+      'the keyword is P, N, L, A to Z',
+      'the keyword is PNL, A to Z',
+    );
+    expect(out.wordPairs).toEqual([{ wrong: 'P, N, L', right: 'PNL' }]);
+  });
+
+  it('strips leading/trailing punctuation from an extracted span', () => {
+    // The trailing sentence comma (attached to the token by the simple
+    // whitespace tokenizer) gets stripped along with it — an inherent
+    // limit of not being punctuation-aware, acceptable for a
+    // best-effort learned rule.
+    const out = analyzeDiff('call the p.n.l., today', 'call the PNL, today');
+    expect(out.wordPairs).toEqual([{ wrong: 'p.n.l', right: 'PNL' }]);
+  });
+
+  it('does not extract a pair for a pure insertion (nothing replaced)', () => {
+    const out = analyzeDiff('turn on lights', 'turn on the lights');
+    expect(out.wordPairs).toEqual([]);
+    expect(out.addAsPhrase).toBe(true);
+  });
+
+  it('does not extract a pair when the changed span is too long', () => {
+    // Shared "start"/"end" trims to a 7-word replacement span — over
+    // the 6-word cap, so this reads as an unrelated rewrite rather
+    // than a plausible "this word/phrase is always mis-heard" rule.
+    const out = analyzeDiff('start a b end', 'start w1 w2 w3 w4 w5 w6 w7 end');
     expect(out.wordPairs).toEqual([]);
     expect(out.addAsPhrase).toBe(true);
   });
@@ -85,12 +123,16 @@ describe('CorrectionStore', () => {
     expect(store.phrases()).toEqual(['schedule a meeting']);
   });
 
-  it('does both on a single-word diff inside a phrase', async () => {
+  it('promotes the targeted span only, not the whole sentence, when one is found', async () => {
+    // Once analyzeDiff isolates "meting" -> "meeting" as a clean
+    // targeted span, adding the whole sentence as a phrase too would
+    // just be redundant clutter that will essentially never match
+    // anything else verbatim.
     const store = new CorrectionStore(file);
     await store.load();
     await store.addCorrection('schedule a meting', 'schedule a meeting');
     expect(store.wordRules()).toEqual({ meting: 'meeting' });
-    expect(store.phrases()).toContain('schedule a meeting');
+    expect(store.phrases()).toEqual([]);
   });
 
   it('survives a reload from disk', async () => {

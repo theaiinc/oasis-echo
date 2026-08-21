@@ -169,6 +169,25 @@ actor OasisClient {
         _ = try await session.data(for: req)
     }
 
+    func listCorrections() async throws -> CorrectionsListResponse {
+        let (data, resp) = try await session.data(from: baseURL.appending(path: "/corrections"))
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw ServerError(status: (resp as? HTTPURLResponse)?.statusCode ?? 0, body: "")
+        }
+        return try JSONDecoder().decode(CorrectionsListResponse.self, from: data)
+    }
+
+    func deleteCorrection(type: CorrectionKind, value: String) async throws {
+        var req = URLRequest(url: baseURL.appending(path: "/correction"))
+        req.httpMethod = "DELETE"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(DeleteCorrectionRequestBody(type: type.rawValue, value: value))
+        let (_, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw ServerError(status: (resp as? HTTPURLResponse)?.statusCode ?? 0, body: "")
+        }
+    }
+
     // MARK: - SSE
 
     func openEventStream(

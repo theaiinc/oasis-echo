@@ -692,7 +692,9 @@ final class TurnController: ObservableObject {
             switch Paster.paste(raw, activateTarget: pasteTargetApp()) {
             case .pasted:
                 state.flashPill(.pasted(words: words, ms: totalMs), after: 1.2)
-                watchForSelfEdit(original: raw)
+                if let targetPID = pasteTargetPID {
+                    watchForSelfEdit(original: raw, targetPID: targetPID)
+                }
             case .copiedOnly:
                 state.flashPill(.copiedOnly(words: words), after: 2.4)
                 Paster.showPermissionGate()
@@ -725,10 +727,10 @@ final class TurnController: ObservableObject {
     /// process the keystroke and update its Accessibility tree — grabbing
     /// the focused element too early can race the app's own paste
     /// handling and read a stale/empty value.
-    private func watchForSelfEdit(original: String) {
+    private func watchForSelfEdit(original: String, targetPID: pid_t) {
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
-            self?.postPasteWatcher.start(originalText: original)
+            self?.postPasteWatcher.start(originalText: original, targetPID: targetPID)
         }
     }
 
@@ -913,6 +915,14 @@ final class TurnController: ObservableObject {
 
     func teachCorrection(original: String, corrected: String) async throws {
         try await client.learnCorrection(original: original, corrected: corrected)
+    }
+
+    func listCorrections() async throws -> CorrectionsListResponse {
+        try await client.listCorrections()
+    }
+
+    func deleteCorrection(type: CorrectionKind, value: String) async throws {
+        try await client.deleteCorrection(type: type, value: value)
     }
 
     /// Diffs the last thing Transcribe mode pasted against whatever is

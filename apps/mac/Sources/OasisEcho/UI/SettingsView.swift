@@ -128,6 +128,11 @@ struct DictionaryTab: View {
     @State private var corrected: String = ""
     @State private var message: String = ""
 
+    @State private var wordRules: [(wrong: String, right: String)] = []
+    @State private var phrases: [String] = []
+    @State private var loading = true
+    @State private var loadError: String?
+
     var body: some View {
         Form {
             Section("Teach a correction") {
@@ -147,6 +152,7 @@ struct DictionaryTab: View {
                                     message = "Saved — post-process pipeline updated."
                                     original = ""; corrected = ""
                                 }
+                                await load()
                             } catch {
                                 await MainActor.run { message = "Failed: \(error.localizedDescription)" }
                             }
@@ -156,10 +162,96 @@ struct DictionaryTab: View {
                     if !message.isEmpty { Text(message).foregroundStyle(.secondary).font(.caption) }
                 }
             }
+
+            Section {
+                HStack {
+                    Text("Learned corrections").font(.headline)
+                    Spacer()
+                    Button {
+                        Task { await load() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Refresh")
+                }
+                if loading {
+                    HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
+                } else if let err = loadError {
+                    Text("Couldn't load: \(err)").font(.caption).foregroundStyle(.secondary)
+                } else if wordRules.isEmpty && phrases.isEmpty {
+                    Text("Nothing learned yet. Corrections you accept — from the review bubble, the auto-detected edit, or the form above — show up here.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    if !wordRules.isEmpty {
+                        Text("Word / phrase rules").font(.caption).foregroundStyle(.secondary)
+                        ForEach(wordRules, id: \.wrong) { rule in
+                            HStack {
+                                Text(rule.wrong).strikethrough().foregroundStyle(.secondary)
+                                Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
+                                Text(rule.right)
+                                Spacer()
+                                Button {
+                                    Task { await remove(.word, rule.wrong) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                    if !phrases.isEmpty {
+                        Text("Whole-sentence phrase matches").font(.caption).foregroundStyle(.secondary)
+                        ForEach(phrases, id: \.self) { phrase in
+                            HStack {
+                                Text(phrase).lineLimit(2)
+                                Spacer()
+                                Button {
+                                    Task { await remove(.phrase, phrase) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
+
             Section {
                 Text("Corrections are stored server-side and feed the same STT post-process pipeline used by the voice agent. New rules apply to the next utterance.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        loading = true
+        loadError = nil
+        do {
+            let resp = try await controller.listCorrections()
+            await MainActor.run {
+                wordRules = resp.wordRules
+                    .map { (wrong: $0.key, right: $0.value) }
+                    .sorted { $0.wrong < $1.wrong }
+                phrases = resp.phrases.sorted()
+                loading = false
+            }
+        } catch {
+            await MainActor.run {
+                loadError = error.localizedDescription
+                loading = false
+            }
+        }
+    }
+
+    private func remove(_ kind: CorrectionKind, _ value: String) async {
+        do {
+            try await controller.deleteCorrection(type: kind, value: value)
+            await load()
+        } catch {
+            await MainActor.run { message = "Couldn't remove: \(error.localizedDescription)" }
         }
     }
 }

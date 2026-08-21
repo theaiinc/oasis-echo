@@ -1397,18 +1397,56 @@ async function main(): Promise<void> {
         return;
       }
       const analysis = await correctionStore.addCorrection(original, corrected, { phraseOnly });
+      // analysis.addAsPhrase is the diff analyzer's raw recommendation,
+      // not necessarily what happened — addCorrection skips adding the
+      // phrase when a targeted word/span pair was already found (see
+      // its comment). Report what actually landed in the store.
+      const addedAsPhrase = correctionStore.phrases().includes(corrected.trim());
       logger.info('correction', {
         original,
         corrected,
         wordPairs: analysis.wordPairs,
-        addedAsPhrase: analysis.addAsPhrase,
+        addedAsPhrase,
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
           accepted: true,
           wordPairs: analysis.wordPairs,
-          addedAsPhrase: analysis.addAsPhrase,
+          addedAsPhrase,
+          wordRules: correctionStore.wordRules(),
+          phrases: correctionStore.phrases(),
+        }),
+      );
+      return;
+    }
+
+    // Lets the Settings dictionary UI remove a learned word rule or
+    // phrase the user reviews and decides was wrong/unwanted.
+    if (req.method === 'DELETE' && url.pathname === '/correction') {
+      const body = await readBody(req);
+      let kind = '';
+      let value = '';
+      try {
+        const parsed = JSON.parse(body) as { type?: unknown; value?: unknown };
+        kind = String(parsed.type ?? '');
+        value = String(parsed.value ?? '');
+      } catch {
+        // fall through to validation below
+      }
+      if ((kind !== 'word' && kind !== 'phrase') || !value) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'expected {type: "word"|"phrase", value}' }));
+        return;
+      }
+      const removed =
+        kind === 'word'
+          ? await correctionStore.removeWordRule(value)
+          : await correctionStore.removePhrase(value);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          removed,
           wordRules: correctionStore.wordRules(),
           phrases: correctionStore.phrases(),
         }),
