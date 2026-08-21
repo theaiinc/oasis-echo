@@ -179,21 +179,37 @@ final class TurnController: ObservableObject {
         // signing changes the app identity, making macOS forget grants.
 
         // Warm up the audio graph on launch so the first backchannel
-        // plays with no perceptible gap. Logs to Console.app on
-        // failure; there's nothing useful the user can do about it.
+        // plays with no perceptible gap, and so `mic`'s tap (installed
+        // later in beginCapture, on a shared engine it doesn't own the
+        // start/stop lifecycle for) has a running engine to attach to.
         //
         // Reverted (2026-08-21): tried starting this lazily on first
         // capture + stopping it once idle instead, to release the mic
-        // indicator between captures. That broke recording entirely —
-        // Voice-Processing I/O (AEC) apparently does not reliably
-        // support a stop()-then-start() cycle on the same engine
-        // instance; the second start silently failed (or the tap never
-        // produced buffers) with no error surfaced to the user, just a
-        // dead mic. Reverting to "start once, never stop until quit"
-        // until that can be verified against real hardware — a
-        // continuously-lit mic indicator is a much smaller problem
-        // than dictation silently not working at all.
-        try? player.prepare()
+        // indicator between captures. That broke recording — but NOT
+        // because of a stop/restart problem as first suspected. The
+        // Console log showed `AVAudioEngine.start failed: ...
+        // kAUInitialize ... PerformCommand(*outputNode, ...)` (error
+        // -10875) on the very FIRST ever start attempt, before any
+        // stop/restart could even be involved. Voice-Processing I/O
+        // (AEC) can simply fail to initialize in some audio-device
+        // states. Since `try? player.prepare()` swallowed that error
+        // silently, the shared engine never started at all — no tap
+        // ever produced buffers, no OS mic indicator, "no mic
+        // detected" regardless of Fn/hotkey state. Losing AEC is far
+        // better than losing capture entirely, so retry once with
+        // Voice-Processing disabled if the first attempt fails.
+        do {
+            try player.prepare()
+        } catch {
+            log.error("shared engine failed with Voice-Processing I/O enabled, retrying without AEC: \(String(describing: error), privacy: .public)")
+            try? audioEngine.inputNode.setVoiceProcessingEnabled(false)
+            try? audioEngine.outputNode.setVoiceProcessingEnabled(false)
+            do {
+                try player.prepare()
+            } catch {
+                log.error("shared engine failed even without Voice-Processing I/O: \(String(describing: error), privacy: .public)")
+            }
+        }
 
         await reconnect()
         startHeartbeat()
