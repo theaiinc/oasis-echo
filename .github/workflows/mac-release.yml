@@ -50,7 +50,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    # See mac-build.yml — Package.swift needs Xcode 16+ (swift-tools-
+    # version:6.0); macos-14 runners default to Xcode 15.x.
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
