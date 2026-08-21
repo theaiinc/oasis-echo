@@ -24,6 +24,10 @@ final class PostPasteWatcher {
     private var lastSeenValue: String = ""
     private var lastChangedAt: Date = .distantPast
     private var deadline: Date = .distantPast
+    // Bumped by every start()/stop() so a still-in-flight retry loop from
+    // an earlier call can tell it's been superseded and quit instead of
+    // clobbering a newer watch (or firing after stop()).
+    private var generation = 0
 
     /// How often to re-read the field's value.
     private let pollInterval: TimeInterval = 0.4
@@ -34,40 +38,55 @@ final class PostPasteWatcher {
     /// Give up watching a field indefinitely — the user may never touch
     /// it, or may navigate away without us noticing a focus change.
     private let maxWatchDuration: TimeInterval = 45
+    /// How many times to retry finding+matching the focused element
+    /// before giving up. Some apps (Electron/Chromium in particular)
+    /// can lag updating their Accessibility tree after receiving a
+    /// paste keystroke, so the very first lookup failing isn't final.
+    private let maxFindAttempts = 8
+    private let findRetryInterval: TimeInterval = 0.35
 
     /// Fired once, with (original, corrected), when a settled edit is
     /// detected. Never fired for a field that was never edited.
     var onCorrectionDetected: ((String, String) -> Void)?
 
-    /// Begin watching. Captures whatever element is CURRENTLY focused as
-    /// the paste target, so this must be called shortly after a
-    /// successful paste while that field still has focus. No-ops
-    /// (silently) if Accessibility isn't trusted, or if the focused
-    /// element's current value doesn't match `originalText` — the
-    /// latter means we've grabbed the wrong element (focus moved, or
-    /// the app doesn't expose a plain-text AXValue for what it just
-    /// received), and diffing against it would be meaningless.
+    /// Begin watching. Captures whatever element is focused once it
+    /// settles on holding exactly `originalText` (retrying briefly, since
+    /// the target app's Accessibility tree may lag a moment after
+    /// receiving the paste). No-ops (silently, after exhausting retries)
+    /// if Accessibility isn't trusted, or the app never exposes a
+    /// matching readable AXValue at all.
     func start(originalText: String) {
         stop()
+        generation += 1
+        let myGeneration = generation
         guard Paster.isAccessibilityTrusted() else {
             log.notice("post-paste watch: skipped, Accessibility not trusted")
             return
         }
+        Task { [weak self] in
+            await self?.findAndAttach(originalText: originalText, generation: myGeneration, attemptsLeft: self?.maxFindAttempts ?? 0)
+        }
+    }
+
+    private func findAndAttach(originalText: String, generation myGeneration: Int, attemptsLeft: Int) async {
+        guard generation == myGeneration else { return }  // superseded by a newer start()/stop()
+
         guard let el = Self.focusedElement() else {
-            log.notice("post-paste watch: skipped, no focused element found")
+            await retryOrGiveUp("no focused element found", originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
         var role: CFTypeRef?
         _ = AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
         guard let value = Self.readValue(of: el) else {
-            log.notice("post-paste watch: skipped, focused element (role=\(role as? String ?? "?", privacy: .public)) has no readable AXValue")
+            await retryOrGiveUp("focused element (role=\(role as? String ?? "?")) has no readable AXValue", originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
         guard value == originalText else {
-            log.notice("post-paste watch: skipped, focused element's value doesn't match what was pasted (role=\(role as? String ?? "?", privacy: .public), gotLen=\(value.count, privacy: .public), wantLen=\(originalText.count, privacy: .public))")
+            await retryOrGiveUp("focused element's value doesn't match what was pasted (role=\(role as? String ?? "?"), gotLen=\(value.count), wantLen=\(originalText.count))", originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
 
+        guard generation == myGeneration else { return }
         element = el
         self.originalText = originalText
         lastSeenValue = value
@@ -79,13 +98,24 @@ final class PostPasteWatcher {
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        log.notice("post-paste watch: started")
+        log.notice("post-paste watch: started (after \(self.maxFindAttempts - attemptsLeft, privacy: .public) attempt(s))")
+    }
+
+    private func retryOrGiveUp(_ reason: String, originalText: String, generation myGeneration: Int, attemptsLeft: Int) async {
+        guard attemptsLeft > 0 else {
+            log.notice("post-paste watch: gave up, \(reason, privacy: .public)")
+            return
+        }
+        try? await Task.sleep(nanoseconds: UInt64(findRetryInterval * 1_000_000_000))
+        guard generation == myGeneration else { return }
+        await findAndAttach(originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft - 1)
     }
 
     /// Stop watching without firing. Call when a new capture begins so a
     /// stale watch from an earlier paste doesn't fire mid-edit of
     /// something else.
     func stop() {
+        generation += 1
         timer?.invalidate()
         timer = nil
         element = nil
@@ -123,17 +153,29 @@ final class PostPasteWatcher {
     // MARK: - Accessibility helpers
 
     private static func focusedElement() -> AXUIElement? {
+        let log = Logger(subsystem: "ai.oasis.echo.mac", category: "post-paste-watch")
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        log.notice("post-paste watch: frontmostApp=\(frontmost?.bundleIdentifier ?? "nil", privacy: .public) pid=\(frontmost?.processIdentifier ?? -1, privacy: .public)")
+
         let systemWide = AXUIElementCreateSystemWide()
         var focusedApp: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        let appResult = AXUIElementCopyAttributeValue(
             systemWide, kAXFocusedApplicationAttribute as CFString, &focusedApp
-        ) == .success, let app = focusedApp else { return nil }
+        )
+        guard appResult == .success, let app = focusedApp else {
+            log.notice("post-paste watch: kAXFocusedApplicationAttribute failed, error=\(appResult.rawValue, privacy: .public)")
+            return nil
+        }
         let appEl = app as! AXUIElement
 
         var focusedEl: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        let elResult = AXUIElementCopyAttributeValue(
             appEl, kAXFocusedUIElementAttribute as CFString, &focusedEl
-        ) == .success, let element = focusedEl else { return nil }
+        )
+        guard elResult == .success, let element = focusedEl else {
+            log.notice("post-paste watch: kAXFocusedUIElementAttribute failed, error=\(elResult.rawValue, privacy: .public)")
+            return nil
+        }
         return (element as! AXUIElement)
     }
 
