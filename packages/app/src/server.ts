@@ -1603,16 +1603,37 @@ async function main(): Promise<void> {
         '## Next Steps',
       ].join('\n');
 
+      const fallbackNotes = (reason: string): string => {
+        let out = `## Notes generation failed\n\nThe reasoner backend didn't return a usable response (${reason.slice(0, 200)}). Showing the raw transcript instead — check that your local model server (e.g. Avalon) is running, then use Retry from the meeting window.\n\n`;
+        out += transcriptText ? `## Transcript\n\n${transcriptText}` : `_No transcript segments were recorded._`;
+        return out;
+      };
+
       let notes = '';
       try {
         const state = { ...pipeline.state.snapshot(), turns: [] as never[] };
         for await (const event of reasoner.stream({ userText: prompt, state, allowTools: false })) {
           if (event.type === 'token') notes += event.text;
         }
+        // A thrown error is the CLEAN failure case (handled below), but
+        // some local model servers (observed with Avalon) don't throw
+        // at all when the underlying model process crashes mid-stream
+        // — they smuggle the error text into the SSE content stream as
+        // if it were a normal token delta, so it arrives here looking
+        // like legitimate output. Our own prompt above explicitly asks
+        // for markdown headings, so real output should contain at
+        // least one; content with none is far more likely leaked
+        // error/garbage text than a valid (if terse) summary.
+        if (!notes.includes('##')) {
+          logger.error('meeting notes generation returned no markdown structure', { notes: notes.slice(0, 200) });
+          notes = fallbackNotes(notes.trim() || 'empty response');
+        }
       } catch (err) {
+        // Falls back to the raw transcript rather than failing the
+        // request outright — the user's recording shouldn't be lost
+        // just because the reasoner backend is down or crashed.
         logger.error('meeting notes generation failed', { error: String(err) });
-        notes = `## Summary\n\nMeeting transcript recorded (${transcript.length} segments).\n\n`;
-        if (transcriptText) notes += `## Transcript\n\n${transcriptText}`;
+        notes = fallbackNotes(String(err));
       }
       notes = notes.trim();
 
