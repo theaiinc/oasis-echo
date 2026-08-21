@@ -90,7 +90,15 @@ final class PillWindowController {
                                    caption: String,
                                    hasReview: Bool) -> CGSize {
         if hasReview {
-            return CGSize(width: 360, height: 150)
+            // The review bubble (title + up to 2 lines of quoted text +
+            // a button row) sits ABOVE the orb in the same VStack, so
+            // this height must fit both. 150 was cut too close — real
+            // font/button chrome metrics could exceed it, and a VStack
+            // that overflows its window pushes the orb (last in the
+            // stack) out of the visible frame entirely rather than
+            // just clipping the bubble. Generous margin here is cheap;
+            // an invisible, unreachable orb is not.
+            return CGSize(width: 360, height: 210)
         }
         // Listening with a partial transcript caption above the orb.
         if case .listening = pill, !caption.isEmpty {

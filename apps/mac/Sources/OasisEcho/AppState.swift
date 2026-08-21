@@ -159,15 +159,26 @@ final class AppState: ObservableObject {
         return true
     }
 
+    /// Un-acted-upon reviews auto-dismiss after this long so a bubble
+    /// the user never noticed doesn't sit there indefinitely.
+    private static let correctionReviewTimeout: UInt64 = 20_000_000_000
+
     func enqueueCorrectionReview(original: String, corrected: String) {
         guard original != corrected,
               !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !corrected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !correctionReviews.contains(where: { $0.original == original && $0.corrected == corrected })
         else { return }
-        correctionReviews.append(CorrectionReview(original: original, corrected: corrected))
+        let review = CorrectionReview(original: original, corrected: corrected)
+        correctionReviews.append(review)
         if correctionReviews.count > 10 {
             correctionReviews.removeFirst(correctionReviews.count - 10)
+        }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.correctionReviewTimeout)
+            // dismissCorrectionReview is a no-op if the user already
+            // accepted/kept/dismissed it by id, so this is always safe.
+            self?.dismissCorrectionReview(review)
         }
     }
 
