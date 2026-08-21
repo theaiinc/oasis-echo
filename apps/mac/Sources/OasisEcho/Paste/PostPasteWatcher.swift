@@ -39,11 +39,18 @@ final class PostPasteWatcher {
     /// it, or may navigate away without us noticing a focus change.
     private let maxWatchDuration: TimeInterval = 45
     /// How many times to retry finding+matching the focused element
-    /// before giving up. Some apps (Electron/Chromium in particular)
-    /// can lag updating their Accessibility tree after receiving a
-    /// paste keystroke, so the very first lookup failing isn't final.
-    private let maxFindAttempts = 8
-    private let findRetryInterval: TimeInterval = 0.35
+    /// before giving up, and how far apart. Two distinct causes have
+    /// been observed for the first attempt(s) failing, both transient:
+    /// Electron/Chromium apps lazily building their accessibility tree
+    /// (AXError -25212, kAXErrorNoValue — resolved within ~2s once
+    /// activateAccessibility() forces it), and Accessibility trust
+    /// having been granted moments ago but the AX server not yet fully
+    /// wired up for this process (AXError -25211, kAXErrorAPIDisabled,
+    /// despite AXIsProcessTrusted() already reporting true — took
+    /// longer than the original 8×0.35s≈3s window to clear in
+    /// practice). 20×0.5s=10s gives real headroom for either.
+    private let maxFindAttempts = 20
+    private let findRetryInterval: TimeInterval = 0.5
 
     /// Fired once, with (original, corrected), when a settled edit is
     /// detected. Never fired for a field that was never edited.
