@@ -28,6 +28,17 @@ final class FnKeyMonitor {
     private var onDown: (@MainActor () -> Void)?
     private var onUp: (@MainActor () -> Void)?
     private var onSpacePress: (@MainActor () -> Void)?
+    // installEventTap() only succeeds if Accessibility trust is already
+    // granted at the moment it runs. If the user grants it moments after
+    // launch (or a TCC grant hasn't fully propagated yet right after
+    // toggling it in System Settings), a one-shot attempt at install()
+    // leaves Fn permanently dead for the rest of this process's life —
+    // there's no OS notification for "trust just changed", so poll for
+    // it instead until the tap installs or we give up.
+    private var retryTimer: Timer?
+    private let retryInterval: TimeInterval = 2.0
+    private let maxRetryDuration: TimeInterval = 300
+    private var retryDeadline: Date?
 
     func install(onDown: @escaping @MainActor () -> Void,
                  onUp:   @escaping @MainActor () -> Void,
@@ -38,6 +49,9 @@ final class FnKeyMonitor {
         self.onSpacePress = onSpacePress
 
         installEventTap()
+        if eventTap == nil {
+            scheduleInstallRetry()
+        }
 
         // Keep an AppKit global monitor active even when the CGEvent tap
         // exists. macOS can disable an otherwise valid tap in response to
@@ -57,6 +71,9 @@ final class FnKeyMonitor {
     }
 
     func uninstall() {
+        retryTimer?.invalidate()
+        retryTimer = nil
+        retryDeadline = nil
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
@@ -72,6 +89,32 @@ final class FnKeyMonitor {
         isDown = false
         spaceIsDown = false
         onSpacePress = nil
+    }
+
+    private func scheduleInstallRetry() {
+        guard retryTimer == nil else { return }
+        let deadline = retryDeadline ?? Date().addingTimeInterval(maxRetryDuration)
+        retryDeadline = deadline
+        let timer = Timer(timeInterval: retryInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.eventTap == nil else { return }
+                if Date() >= deadline {
+                    self.log.warning("Fn event tap: giving up after \(Int(self.maxRetryDuration), privacy: .public)s of retries — grant Accessibility, then quit and relaunch")
+                    self.retryTimer?.invalidate()
+                    self.retryTimer = nil
+                    return
+                }
+                self.installEventTap()
+                if self.eventTap != nil {
+                    self.log.notice("Fn event tap installed on retry")
+                    self.retryTimer?.invalidate()
+                    self.retryTimer = nil
+                    self.retryDeadline = nil
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        retryTimer = timer
     }
 
     private func installEventTap() {
