@@ -49,13 +49,26 @@ final class PostPasteWatcher {
     /// detected. Never fired for a field that was never edited.
     var onCorrectionDetected: ((String, String) -> Void)?
 
-    /// Begin watching. Captures whatever element is focused once it
-    /// settles on holding exactly `originalText` (retrying briefly, since
-    /// the target app's Accessibility tree may lag a moment after
-    /// receiving the paste). No-ops (silently, after exhausting retries)
-    /// if Accessibility isn't trusted, or the app never exposes a
-    /// matching readable AXValue at all.
-    func start(originalText: String) {
+    /// Begin watching. Captures whatever element is focused within
+    /// `targetPID` — the app we just pasted into — once it settles on
+    /// holding exactly `originalText` (retrying briefly, since the
+    /// target app's Accessibility tree may lag a moment after receiving
+    /// the paste). No-ops (silently, after exhausting retries) if
+    /// Accessibility isn't trusted, or the app never exposes a matching
+    /// readable AXValue at all.
+    ///
+    /// Deliberately does NOT use the system-wide `kAXFocusedApplication`
+    /// lookup (asking "who's focused?"), even though that's the more
+    /// common pattern — it consistently failed with AXError -25212
+    /// (`kAXErrorNoValue`) here, apparently because OasisEcho, an
+    /// accessory app with no windows of its own, had just driven the
+    /// target app frontmost via synthetic activation rather than a
+    /// direct user click, and the system's AX-focus tracking didn't
+    /// resolve cleanly from that state. We already know exactly which
+    /// app we pasted into, so build its AXUIElement directly from that
+    /// PID and ask IT which of its own elements is focused — a strictly
+    /// narrower, more reliable question.
+    func start(originalText: String, targetPID: pid_t) {
         stop()
         generation += 1
         let myGeneration = generation
@@ -63,26 +76,41 @@ final class PostPasteWatcher {
             log.notice("post-paste watch: skipped, Accessibility not trusted")
             return
         }
+        Self.activateAccessibility(forPID: targetPID)
         Task { [weak self] in
-            await self?.findAndAttach(originalText: originalText, generation: myGeneration, attemptsLeft: self?.maxFindAttempts ?? 0)
+            await self?.findAndAttach(originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: self?.maxFindAttempts ?? 0)
         }
     }
 
-    private func findAndAttach(originalText: String, generation myGeneration: Int, attemptsLeft: Int) async {
+    /// Chromium/Electron apps (Claude Desktop included) compute their
+    /// accessibility tree lazily — by default a caller asking for
+    /// kAXFocusedUIElement gets AXError -25212 (kAXErrorNoValue) because
+    /// the tree was never built, not because nothing is focused. Setting
+    /// these attributes on the app element is the documented way to force
+    /// Chromium to activate full accessibility support for this process.
+    /// Best-effort: harmless no-op on apps that don't recognize either
+    /// attribute (most non-Electron apps).
+    private static func activateAccessibility(forPID targetPID: pid_t) {
+        let appEl = AXUIElementCreateApplication(targetPID)
+        AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+
+    private func findAndAttach(originalText: String, targetPID: pid_t, generation myGeneration: Int, attemptsLeft: Int) async {
         guard generation == myGeneration else { return }  // superseded by a newer start()/stop()
 
-        guard let el = Self.focusedElement() else {
-            await retryOrGiveUp("no focused element found", originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft)
+        guard let el = Self.focusedElement(inApp: targetPID) else {
+            await retryOrGiveUp("no focused element found in pid \(targetPID)", originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
         var role: CFTypeRef?
         _ = AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
         guard let value = Self.readValue(of: el) else {
-            await retryOrGiveUp("focused element (role=\(role as? String ?? "?")) has no readable AXValue", originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft)
+            await retryOrGiveUp("focused element (role=\(role as? String ?? "?")) has no readable AXValue", originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
         guard value == originalText else {
-            await retryOrGiveUp("focused element's value doesn't match what was pasted (role=\(role as? String ?? "?"), gotLen=\(value.count), wantLen=\(originalText.count))", originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft)
+            await retryOrGiveUp("focused element's value doesn't match what was pasted (role=\(role as? String ?? "?"), gotLen=\(value.count), wantLen=\(originalText.count))", originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
 
@@ -101,14 +129,14 @@ final class PostPasteWatcher {
         log.notice("post-paste watch: started (after \(self.maxFindAttempts - attemptsLeft, privacy: .public) attempt(s))")
     }
 
-    private func retryOrGiveUp(_ reason: String, originalText: String, generation myGeneration: Int, attemptsLeft: Int) async {
+    private func retryOrGiveUp(_ reason: String, originalText: String, targetPID: pid_t, generation myGeneration: Int, attemptsLeft: Int) async {
         guard attemptsLeft > 0 else {
             log.notice("post-paste watch: gave up, \(reason, privacy: .public)")
             return
         }
         try? await Task.sleep(nanoseconds: UInt64(findRetryInterval * 1_000_000_000))
         guard generation == myGeneration else { return }
-        await findAndAttach(originalText: originalText, generation: myGeneration, attemptsLeft: attemptsLeft - 1)
+        await findAndAttach(originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft - 1)
     }
 
     /// Stop watching without firing. Call when a new capture begins so a
@@ -152,28 +180,19 @@ final class PostPasteWatcher {
 
     // MARK: - Accessibility helpers
 
-    private static func focusedElement() -> AXUIElement? {
+    /// Ask the target app itself which of its own elements is focused,
+    /// rather than asking the system-wide element "who's focused?" — see
+    /// the comment on `start(originalText:targetPID:)` for why.
+    private static func focusedElement(inApp targetPID: pid_t) -> AXUIElement? {
         let log = Logger(subsystem: "ai.oasis.echo.mac", category: "post-paste-watch")
-        let frontmost = NSWorkspace.shared.frontmostApplication
-        log.notice("post-paste watch: frontmostApp=\(frontmost?.bundleIdentifier ?? "nil", privacy: .public) pid=\(frontmost?.processIdentifier ?? -1, privacy: .public)")
-
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedApp: CFTypeRef?
-        let appResult = AXUIElementCopyAttributeValue(
-            systemWide, kAXFocusedApplicationAttribute as CFString, &focusedApp
-        )
-        guard appResult == .success, let app = focusedApp else {
-            log.notice("post-paste watch: kAXFocusedApplicationAttribute failed, error=\(appResult.rawValue, privacy: .public)")
-            return nil
-        }
-        let appEl = app as! AXUIElement
+        let appEl = AXUIElementCreateApplication(targetPID)
 
         var focusedEl: CFTypeRef?
         let elResult = AXUIElementCopyAttributeValue(
             appEl, kAXFocusedUIElementAttribute as CFString, &focusedEl
         )
         guard elResult == .success, let element = focusedEl else {
-            log.notice("post-paste watch: kAXFocusedUIElementAttribute failed, error=\(elResult.rawValue, privacy: .public)")
+            log.notice("post-paste watch: kAXFocusedUIElementAttribute (pid=\(targetPID, privacy: .public)) failed, error=\(elResult.rawValue, privacy: .public)")
             return nil
         }
         return (element as! AXUIElement)
