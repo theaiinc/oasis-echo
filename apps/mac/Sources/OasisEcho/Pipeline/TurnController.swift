@@ -424,6 +424,7 @@ final class TurnController: ObservableObject {
         case .copiedOnly: return "copiedOnly"
         case .modeSwitched: return "modeSwitched"
         case .error: return "error"
+        case .taught: return "taught"
         }
     }
 
@@ -673,6 +674,7 @@ final class TurnController: ObservableObject {
         let startMs = Self.nowMs()
         let words = raw.split(whereSeparator: { $0.isWhitespace }).count
         let totalMs = Int(Self.nowMs() - startMs)
+        state.lastPastedText = raw
         if state.autoPaste {
             switch Paster.paste(raw, activateTarget: pasteTargetApp()) {
             case .pasted:
@@ -885,6 +887,44 @@ final class TurnController: ObservableObject {
 
     func teachCorrection(original: String, corrected: String) async throws {
         try await client.learnCorrection(original: original, corrected: corrected)
+    }
+
+    /// Diffs the last thing Transcribe mode pasted against whatever is
+    /// currently on the clipboard, and teaches the correction. Lets the
+    /// user fix a mis-transcription directly in the destination app,
+    /// copy the fixed text, and teach it in one action — Oasis has no
+    /// visibility into edits made in another app otherwise, so without
+    /// this the only way to teach a self-noticed mistake was retyping
+    /// both versions into Settings → Dictionary.
+    func teachFromClipboard() {
+        let original = state.lastPastedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !original.isEmpty else {
+            state.flashPill(.error("Nothing to teach yet"))
+            return
+        }
+        guard let corrected = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !corrected.isEmpty else {
+            state.flashPill(.error("Clipboard is empty"))
+            return
+        }
+        guard corrected != original else {
+            state.flashPill(.error("Clipboard matches original"))
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.client.learnCorrection(original: original, corrected: corrected)
+                await MainActor.run {
+                    self.state.lastPastedText = ""
+                    self.state.flashPill(.taught, after: 1.6)
+                }
+            } catch {
+                await MainActor.run {
+                    self.state.flashPill(.error("Couldn't save correction"))
+                }
+            }
+        }
     }
 
     func acceptCorrectionReview(_ review: CorrectionReview) {

@@ -132,6 +132,10 @@ struct PillView: View {
             bubble(systemImage: "exclamationmark.triangle.fill",
                    color: .orange,
                    text: msg)
+        case .taught:
+            bubble(systemImage: "text.badge.checkmark",
+                   color: .green,
+                   text: "Learned correction")
         case .processing:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
@@ -164,7 +168,7 @@ struct PillView: View {
 
     private var hasToast: Bool {
         switch state.pill {
-        case .pasted, .copiedOnly, .modeSwitched, .error, .processing:
+        case .pasted, .copiedOnly, .modeSwitched, .error, .processing, .taught:
             return true
         default:
             return false

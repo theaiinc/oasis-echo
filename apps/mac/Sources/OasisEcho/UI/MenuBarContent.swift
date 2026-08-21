@@ -92,6 +92,17 @@ struct MenuBarContent: View {
                 Label("Show mic indicator", systemImage: "waveform")
             }
 
+            if !state.lastPastedText.isEmpty {
+                Button {
+                    controller.teachFromClipboard()
+                } label: {
+                    Label("Teach Correction from Clipboard", systemImage: "text.badge.checkmark")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .help("Edited the last pasted transcript in place? Copy the fixed text, then click this to teach it — no need to retype either version.")
+            }
+
             Divider().padding(.vertical, 2)
 
             // Meeting section — always visible. The label changes

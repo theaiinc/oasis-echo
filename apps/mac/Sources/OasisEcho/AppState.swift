@@ -25,6 +25,7 @@ enum PillState: Equatable {
     case copiedOnly(words: Int)       // text on clipboard; paste blocked
     case modeSwitched(Mode)           // brief mode-change toast
     case error(String)                // transient error, auto-dismiss
+    case taught                       // "teach from clipboard" saved, auto-dismiss
 }
 
 struct AgentMessage: Identifiable, Equatable {
@@ -63,6 +64,13 @@ final class AppState: ObservableObject {
     @Published var serverReachable: Bool = false
     @Published var serverModel: String = ""
     @Published var correctionReviews: [CorrectionReview] = []
+    // Raw text from the most recent Transcribe-mode paste. Lets "Teach
+    // Correction from Clipboard" diff it against whatever the user has
+    // since copied (e.g. after editing the pasted text themselves in
+    // the destination app) without making them retype either version.
+    // Empty until the first paste; cleared after a successful teach so
+    // a stale menu click doesn't resubmit the same pair.
+    @Published var lastPastedText: String = ""
 
     // configuration
     @AppStorage("oasis.serverBaseURL") var serverBaseURL: String = "http://127.0.0.1:9187"
