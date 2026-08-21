@@ -21,7 +21,17 @@ final class PostPasteWatcher {
     private var timer: Timer?
     private var element: AXUIElement?
     private var originalText: String = ""
-    private var lastSeenValue: String = ""
+    // The field may hold MORE than just what we pasted — e.g. a chat
+    // composer that accumulates each dictation on top of the last
+    // rather than replacing it. `prefixLength` is however many
+    // characters preceded our pasted text at watch-start; every
+    // subsequent read drops that many characters and treats only the
+    // remainder as "our" text, so this still works after several
+    // dictations have piled up in the same field without a clear
+    // in between. Edits BEFORE that prefix boundary are invisible to
+    // this watcher by design — we only track what we ourselves pasted.
+    private var prefixLength: Int = 0
+    private var lastSeenTail: String = ""
     private var lastChangedAt: Date = .distantPast
     private var deadline: Date = .distantPast
     // Bumped by every start()/stop() so a still-in-flight retry loop from
@@ -57,12 +67,12 @@ final class PostPasteWatcher {
     var onCorrectionDetected: ((String, String) -> Void)?
 
     /// Begin watching. Captures whatever element is focused within
-    /// `targetPID` — the app we just pasted into — once it settles on
-    /// holding exactly `originalText` (retrying briefly, since the
-    /// target app's Accessibility tree may lag a moment after receiving
-    /// the paste). No-ops (silently, after exhausting retries) if
-    /// Accessibility isn't trusted, or the app never exposes a matching
-    /// readable AXValue at all.
+    /// `targetPID` — the app we just pasted into — once its value ENDS
+    /// WITH `originalText` (retrying briefly, since the target app's
+    /// Accessibility tree may lag a moment after receiving the paste).
+    /// No-ops (silently, after exhausting retries) if Accessibility
+    /// isn't trusted, or the app never exposes a matching readable
+    /// AXValue at all.
     ///
     /// Deliberately does NOT use the system-wide `kAXFocusedApplication`
     /// lookup (asking "who's focused?"), even though that's the more
@@ -116,15 +126,20 @@ final class PostPasteWatcher {
             await retryOrGiveUp("focused element (role=\(role as? String ?? "?")) has no readable AXValue", originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
-        guard value == originalText else {
-            await retryOrGiveUp("focused element's value doesn't match what was pasted (role=\(role as? String ?? "?"), gotLen=\(value.count), wantLen=\(originalText.count))", originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft)
+        // The field's current value must END WITH what we just pasted —
+        // not equal it outright — since an app whose composer
+        // accumulates text (rather than clearing between dictations)
+        // will have earlier content still sitting before it.
+        guard value.hasSuffix(originalText) else {
+            await retryOrGiveUp("focused element's value doesn't end with what was pasted (role=\(role as? String ?? "?"), gotLen=\(value.count), wantLen=\(originalText.count))", originalText: originalText, targetPID: targetPID, generation: myGeneration, attemptsLeft: attemptsLeft)
             return
         }
 
         guard generation == myGeneration else { return }
         element = el
         self.originalText = originalText
-        lastSeenValue = value
+        prefixLength = value.count - originalText.count
+        lastSeenTail = originalText
         lastChangedAt = Date()
         deadline = Date().addingTimeInterval(maxWatchDuration)
 
@@ -170,18 +185,27 @@ final class PostPasteWatcher {
             stop()
             return
         }
+        guard value.count >= prefixLength else {
+            // The user deleted back past where our text started (e.g.
+            // selected everything and retyped) — can no longer say
+            // which part, if any, corresponds to what we pasted.
+            log.notice("post-paste watch: stopped, field shrank past our prefix boundary")
+            stop()
+            return
+        }
+        let tail = String(value.dropFirst(prefixLength))
 
-        if value != lastSeenValue {
-            lastSeenValue = value
+        if tail != lastSeenTail {
+            lastSeenTail = tail
             lastChangedAt = Date()
             return
         }
 
         guard Date().timeIntervalSince(lastChangedAt) >= settleDelay else { return }
         stop()
-        if value != originalText, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            log.notice("post-paste watch: detected edit (originalLen=\(self.originalText.count, privacy: .public) newLen=\(value.count, privacy: .public))")
-            onCorrectionDetected?(originalText, value)
+        if tail != originalText, !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log.notice("post-paste watch: detected edit (originalLen=\(self.originalText.count, privacy: .public) newLen=\(tail.count, privacy: .public))")
+            onCorrectionDetected?(originalText, tail)
         }
     }
 
