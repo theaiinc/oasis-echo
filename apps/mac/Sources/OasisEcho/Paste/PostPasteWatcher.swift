@@ -49,9 +49,24 @@ final class PostPasteWatcher {
     /// received), and diffing against it would be meaningless.
     func start(originalText: String) {
         stop()
-        guard Paster.isAccessibilityTrusted() else { return }
-        guard let el = Self.focusedElement(), let value = Self.readValue(of: el) else { return }
-        guard value == originalText else { return }
+        guard Paster.isAccessibilityTrusted() else {
+            log.notice("post-paste watch: skipped, Accessibility not trusted")
+            return
+        }
+        guard let el = Self.focusedElement() else {
+            log.notice("post-paste watch: skipped, no focused element found")
+            return
+        }
+        var role: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
+        guard let value = Self.readValue(of: el) else {
+            log.notice("post-paste watch: skipped, focused element (role=\(role as? String ?? "?", privacy: .public)) has no readable AXValue")
+            return
+        }
+        guard value == originalText else {
+            log.notice("post-paste watch: skipped, focused element's value doesn't match what was pasted (role=\(role as? String ?? "?", privacy: .public), gotLen=\(value.count, privacy: .public), wantLen=\(originalText.count, privacy: .public))")
+            return
+        }
 
         element = el
         self.originalText = originalText
@@ -64,7 +79,7 @@ final class PostPasteWatcher {
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        log.debug("post-paste watch: started")
+        log.notice("post-paste watch: started")
     }
 
     /// Stop watching without firing. Call when a new capture begins so a
@@ -79,13 +94,14 @@ final class PostPasteWatcher {
     private func tick() {
         guard let el = element else { stop(); return }
         if Date() >= deadline {
-            log.debug("post-paste watch: gave up after \(Int(self.maxWatchDuration), privacy: .public)s")
+            log.notice("post-paste watch: gave up after \(Int(self.maxWatchDuration), privacy: .public)s, field never settled on an edit")
             stop()
             return
         }
         guard let value = Self.readValue(of: el) else {
             // Field became unreadable (focus moved to a non-text
             // element, app quit, etc.) — nothing more we can observe.
+            log.notice("post-paste watch: stopped, focused element became unreadable")
             stop()
             return
         }
