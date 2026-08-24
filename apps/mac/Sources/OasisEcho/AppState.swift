@@ -71,10 +71,23 @@ final class AppState: ObservableObject {
     // Empty until the first paste; cleared after a successful teach so
     // a stale menu click doesn't resubmit the same pair.
     @Published var lastPastedText: String = ""
+    // True while the user has "Move Indicator Overlay" active in Settings.
+    // PillWindowController observes this to toggle window dragging and to
+    // suspend its normal auto-repositioning so it doesn't fight the drag.
+    // Not persisted — always starts false on launch.
+    @Published var isMoveModeActive: Bool = false
 
     // configuration
     @AppStorage("oasis.serverBaseURL") var serverBaseURL: String = "http://127.0.0.1:9187"
     @AppStorage("oasis.pillAtBottom") var pillAtBottom: Bool = true
+    // A user-dragged pill position, set once "Move Indicator Overlay" is
+    // confirmed. Stored as the orb's bottom-center point in screen
+    // coordinates (mirrors how the default anchor is already computed:
+    // screen.midX / screen.minY+18) so the same math generalizes to an
+    // arbitrary point instead of always the current screen's edge.
+    @AppStorage("oasis.pillUseCustomPosition") var pillUseCustomPosition: Bool = false
+    @AppStorage("oasis.pillCustomAnchorX") var pillCustomAnchorX: Double = 0
+    @AppStorage("oasis.pillCustomAnchorY") var pillCustomAnchorY: Double = 0
     @AppStorage("oasis.sttEngine") var sttEngineRaw: String = STTEngineKind.serverWhisper.rawValue
     @AppStorage("oasis.pauseOtherMedia") var pauseOtherMedia: Bool = true
     @AppStorage("oasis.useFnKey") var useFnKey: Bool = true

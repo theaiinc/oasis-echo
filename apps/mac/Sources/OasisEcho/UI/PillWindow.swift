@@ -20,6 +20,7 @@ final class PillWindowController {
     private let controller: TurnController
 
     private var hudSubscription: AnyCancellable?
+    private var moveModeSubscription: AnyCancellable?
 
     // Notified after the orb panel's frame changes so a sibling overlay
     // (e.g. the Echo dialog) can reposition relative to it.
@@ -85,6 +86,49 @@ final class PillWindowController {
             }
     }
 
+    // Toggled from Settings' "Move Indicator Overlay" button. While active,
+    // the panel becomes draggable by its background and stops fighting the
+    // drag with its normal auto-repositioning; on confirm (true → false)
+    // the panel's current bottom-center point is captured and persisted as
+    // the new custom anchor.
+    func bindMoveMode() {
+        moveModeSubscription = state.$isMoveModeActive
+            .removeDuplicates()
+            .sink { [weak self] active in
+                guard let self else { return }
+                self.panel.isMovableByWindowBackground = active
+                if !active {
+                    // Only a genuine confirm (was true → now false) should
+                    // persist a position; skip the initial `false` this
+                    // sink fires on subscribe.
+                    guard self.wasMoveModeActive else { return }
+                    let frame = self.panel.frame
+                    self.state.pillCustomAnchorX = frame.midX
+                    self.state.pillCustomAnchorY = frame.minY
+                    self.state.pillUseCustomPosition = true
+                    // @Published publishes from willSet — the backing
+                    // store for `isMoveModeActive` isn't actually false
+                    // yet at this point in the call stack, so
+                    // reposition()'s own `guard !state.isMoveModeActive`
+                    // would read the stale `true` and no-op. Defer one
+                    // run-loop turn so it sees the settled value.
+                    DispatchQueue.main.async { [weak self] in
+                        self?.reposition()
+                    }
+                }
+                self.wasMoveModeActive = active
+            }
+    }
+
+    /// Called from Settings' "Reset to Default Position" button.
+    func resetToDefaultPosition() {
+        state.isMoveModeActive = false
+        state.pillUseCustomPosition = false
+        reposition()
+    }
+
+    private var wasMoveModeActive = false
+
     private static func targetSize(state: AppState,
                                    pill: PillState,
                                    caption: String,
@@ -142,12 +186,53 @@ final class PillWindowController {
     // NSScreen.main as a last-resort fallback if .screens is ever empty.
     private var homeScreen: NSScreen?
 
-    private func applyResizeFrame(_ target: CGSize) {
-        let screen = (homeScreen ?? NSScreen.main)?.visibleFrame ?? .zero
-        let x = screen.midX - target.width / 2
+    // Bottom-center anchor point (screen coordinates) to align a frame of
+    // `target` width against. Prefers the user's dragged custom position —
+    // but only if it still lands on a currently-connected screen, so
+    // unplugging the monitor it was set on self-heals back to the default
+    // anchor instead of parking the orb somewhere unreachable.
+    private func anchor(for target: CGSize) -> (x: CGFloat, bottomY: CGFloat) {
+        // A custom position is a single fixed point, but `target` grows
+        // (idle orb → toast bubble → correction-review card, up to
+        // 360×210) as the pill's content changes. Near a screen edge that
+        // growth can push a bubble off-screen even though the orb itself
+        // never moved — clamp every candidate frame to the screen it's
+        // actually on, not just the default screen-edge anchor.
+        if state.pillUseCustomPosition {
+            let point = NSPoint(x: state.pillCustomAnchorX, y: state.pillCustomAnchorY)
+            if let screen = NSScreen.containing(point) {
+                let raw = NSPoint(x: point.x - target.width / 2, y: point.y)
+                let clamped = screen.clampedOrigin(for: target, from: raw)
+                return (clamped.x, clamped.y)
+            }
+        }
+        let screen = homeScreen ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? .zero
+        let x = visible.midX - target.width / 2
         let bottomY: CGFloat = state.pillAtBottom
-            ? screen.minY + 18
-            : screen.maxY - target.height - 24
+            ? visible.minY + 18
+            : visible.maxY - target.height - 24
+        guard let screen else { return (x, bottomY) }
+        let clamped = screen.clampedOrigin(for: target, from: NSPoint(x: x, y: bottomY))
+        return (clamped.x, clamped.y)
+    }
+
+    private func applyResizeFrame(_ target: CGSize) {
+        // Don't fight an in-progress drag with a resize-triggered snap
+        // back to the anchor — but still grow the panel's own frame
+        // (origin untouched), not just its contentView. contentView
+        // alone doesn't resize the NSPanel's backing store, so content
+        // that grows mid-drag (a toast, a correction-review bubble)
+        // used to render clipped/unclickable outside the window's
+        // still-small bounds until the drag ended.
+        guard !state.isMoveModeActive else {
+            var frame = panel.frame
+            frame.size = target
+            panel.setFrame(frame, display: true)
+            onGeometryChanged?()
+            return
+        }
+        let (x, bottomY) = anchor(for: target)
         panel.setFrame(
             NSRect(x: x, y: bottomY, width: target.width, height: target.height),
             display: true,
@@ -183,13 +268,8 @@ final class PillWindowController {
     }
 
     func reposition() {
-        guard let screen = homeScreen ?? NSScreen.main else { return }
-        let frame = screen.visibleFrame
-        let size = panel.frame.size
-        let x = frame.midX - size.width / 2
-        let y = state.pillAtBottom
-            ? frame.minY + 18
-            : frame.maxY - size.height - 24
+        guard !state.isMoveModeActive else { return }
+        let (x, y) = anchor(for: panel.frame.size)
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         onGeometryChanged?()
     }

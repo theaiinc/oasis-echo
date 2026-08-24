@@ -15,6 +15,7 @@ struct SettingsView: View {
 
 struct GeneralTab: View {
     @EnvironmentObject var state: AppState
+    @EnvironmentObject var controller: TurnController
 
     var body: some View {
         Form {
@@ -61,6 +62,20 @@ struct GeneralTab: View {
                 Toggle("Anchor to bottom of screen", isOn: $state.pillAtBottom)
                 Toggle("Show mic indicator in menu bar", isOn: $state.showMenuBarLevel)
                 Toggle("Auto-paste transcription at cursor", isOn: $state.autoPaste)
+                HStack {
+                    Button(state.isMoveModeActive ? "Confirm Position" : "Move Indicator Overlay") {
+                        state.isMoveModeActive.toggle()
+                    }
+                    if state.pillUseCustomPosition {
+                        Button("Reset to Default Position") {
+                            controller.resetPillPosition()
+                        }
+                    }
+                }
+                if state.isMoveModeActive {
+                    Text("Drag the orb anywhere on screen, then come back here and click Confirm Position.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             Section("Focus") {
                 Toggle("Pause other media while listening", isOn: $state.pauseOtherMedia)

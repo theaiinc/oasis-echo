@@ -173,6 +173,9 @@ final class TurnController: ObservableObject {
 
     func bindPill(_ p: PillWindowController) { self.pill = p }
 
+    /// Settings' "Reset to Default Position" button.
+    func resetPillPosition() { pill?.resetToDefaultPosition() }
+
     // MARK: - Bootstrap
 
     func bootstrap() async {

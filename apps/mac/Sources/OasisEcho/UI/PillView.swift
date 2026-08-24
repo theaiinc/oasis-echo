@@ -69,6 +69,17 @@ struct PillView: View {
     @ViewBuilder
     private func orb(t: Double) -> some View {
         ZStack {
+            // "Move Indicator Overlay" is active in Settings — the panel
+            // is draggable right now. Without this the orb looks identical
+            // to idle and gives no hint it can be picked up.
+            if state.isMoveModeActive {
+                Circle()
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: coreSize + 12, height: coreSize + 12)
+                    .rotationEffect(.degrees(t * 60))
+            }
+
             // Pulse rings — only when actively listening or speaking.
             // Rings emanate FROM the orb; the orb itself stays put.
             if isActive {

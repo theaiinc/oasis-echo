@@ -88,13 +88,35 @@ final class EchoDialogWindowController {
         guard let orbPanel else { return }
         let orbFrame = orbPanel.frame
         let dialogSize = Self.dialogSize
+        let screen = NSScreen.containing(NSPoint(x: orbFrame.midX, y: orbFrame.midY))
+            ?? NSScreen.screens.first ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? .zero
+
         let x = orbFrame.midX - dialogSize.width / 2
-        // Place the dialog visually adjacent to the orb on the side that
-        // points away from the screen edge the orb is anchored to.
-        let y: CGFloat = state.pillAtBottom
+
+        // `pillAtBottom` is a fine default (it mirrors the orb's own
+        // default screen-edge anchor), but once the orb has been dragged
+        // to a custom position that toggle no longer tells us which side
+        // actually has room — prefer whichever side (above/below the orb)
+        // fits the full dialog height, falling back to the toggle only
+        // when neither side does.
+        let roomAbove = visible.maxY - (orbFrame.maxY + gap)
+        let roomBelow = (orbFrame.minY - gap) - visible.minY
+        let placeAbove: Bool
+        if roomAbove >= dialogSize.height {
+            placeAbove = true
+        } else if roomBelow >= dialogSize.height {
+            placeAbove = false
+        } else {
+            placeAbove = state.pillAtBottom
+        }
+        let y: CGFloat = placeAbove
             ? orbFrame.maxY + gap
             : orbFrame.minY - dialogSize.height - gap
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+
+        let raw = NSPoint(x: x, y: y)
+        let clamped = screen?.clampedOrigin(for: dialogSize, from: raw) ?? raw
+        panel.setFrameOrigin(clamped)
     }
 
     func window() -> NSPanel { panel }

@@ -112,6 +112,16 @@ struct MenuBarContent: View {
 
             Divider().padding(.vertical, 2)
 
+            if !MicCapture.isAuthorized {
+                Button {
+                    MicCapture.requestAccessOrOpenSettings()
+                } label: {
+                    Label("Grant Microphone Access", systemImage: "mic.slash")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(.orange)
+                }.buttonStyle(.plain)
+            }
+
             if !Paster.isAccessibilityTrusted() {
                 Button {
                     Paster.openAccessibilitySettings()

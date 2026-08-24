@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pillController = PillWindowController(state: state, controller: controller)
         pillController.show()
         pillController.bindSizeUpdates(state)
+        pillController.bindMoveMode()
         echoDialogController = EchoDialogWindowController(
             state: state,
             orbPanel: pillController.window()

@@ -45,6 +45,29 @@ SPEAKER_MODEL_ID = os.environ.get(
 )
 SENSEVOICE_TAG_RE = re.compile(r"<\|[^|]+\|>")
 
+# ASR backend selection.
+#   "auto" (default)  -- detect the buffer's language with a small generic
+#                         Whisper model, then route to PhoWhisper for
+#                         Vietnamese or SenseVoice for everything else.
+#   "sensevoice"       -- force the FunASR AutoModel path (Mandarin/
+#                         Cantonese/English/Japanese/Korean), skipping LID.
+#   "phowhisper"        -- force VinAI's PhoWhisper, skipping LID.
+# PhoWhisper is a Whisper checkpoint fine-tuned on 844h of Vietnamese across
+# regional accents, state-of-the-art WER on Vietnamese benchmarks
+# (arxiv.org/abs/2406.02555) -- SenseVoice's own language set doesn't
+# include Vietnamese at all, so "auto" is what makes both usable in the
+# same session without the caller having to know which language is coming.
+ASR_BACKEND = os.environ.get("OASIS_ASR_BACKEND", "auto").strip().lower()
+PHOWHISPER_MODEL_ID = os.environ.get("OASIS_PHOWHISPER_MODEL", "vinai/PhoWhisper-medium")
+# Small generic multilingual Whisper used only for language ID in "auto"
+# mode -- deliberately NOT PhoWhisper itself, since fine-tuning it on
+# Vietnamese-only data would skew its own language detection.
+LID_MODEL_ID = os.environ.get("OASIS_LID_MODEL", "openai/whisper-tiny")
+# Detected languages routed to PhoWhisper. Whisper's LID has no separate
+# Cantonese code (it falls under "zh"), which is fine -- SenseVoice covers
+# both "zh" and "yue" already.
+LID_LANGUAGES_FOR_PHOWHISPER = {"vi"}
+
 
 def _strip_internal_tags(text: str) -> str:
     """Remove SenseVoiceSmall special tokens like <|en|>, <|NEUTRAL|>, etc.
@@ -59,9 +82,16 @@ def _strip_internal_tags(text: str) -> str:
 
 class FunasrBridge:
     def __init__(self) -> None:
-        self.model = None  # type: ignore[assignment]
+        self.sensevoice_model = None  # type: ignore[assignment]
+        self.phowhisper_model = None  # type: ignore[assignment]
+        self.lid_processor = None  # type: ignore[assignment]
+        self.lid_model = None  # type: ignore[assignment]
         self._buffer: np.ndarray = np.array([], dtype=np.float32)
-        self._model_loaded = False
+        # Cached per-utterance so "auto" mode doesn't pay for a full LID
+        # forward pass on every partial tick (~every 900ms) — language
+        # doesn't change mid-utterance, so detect once and reuse.
+        # Invalidated in cmd_reset.
+        self._detected_language: str | None = None
         self.speaker_model = None  # type: ignore[assignment]
         self._speaker_references: list[np.ndarray] = []
 
@@ -69,16 +99,60 @@ class FunasrBridge:
     # Model loading
     # ------------------------------------------------------------------
     def load_model(self) -> None:
-        if self._model_loaded:
+        """Ensure the model(s) the current backend needs are ready.
+
+        "auto" warms SenseVoice (the majority-language path) AND the LID
+        model eagerly, since every "auto" transcription calls
+        _detect_language first — leaving LID lazy meant cmd_preload
+        finished before the pipeline was actually ready, and the first
+        real utterance of every session paid a synchronous from_pretrained
+        stall it was supposed to have avoided. PhoWhisper itself stays
+        lazy (see _load_phowhisper): most sessions never speak Vietnamese
+        and shouldn't pay to load a second full transcription model.
+        """
+        if ASR_BACKEND == "phowhisper":
+            self._load_phowhisper()
+        else:
+            self._load_sensevoice()
+            if ASR_BACKEND == "auto":
+                self._load_lid()
+
+    def _load_sensevoice(self) -> None:
+        if self.sensevoice_model is not None:
             return
         from funasr import AutoModel  # type: ignore[import-untyped]
 
-        self.model = AutoModel(
+        self.sensevoice_model = AutoModel(
             model="iic/SenseVoiceSmall",
             device="cpu",
             disable_update=True,
         )
-        self._model_loaded = True
+
+    def _load_phowhisper(self) -> None:
+        if self.phowhisper_model is not None:
+            return
+        # PhoWhisper is a plain Whisper checkpoint (not a FunASR model-zoo
+        # entry), so it loads through transformers' ASR pipeline rather than
+        # funasr's AutoModel.
+        from transformers import pipeline  # type: ignore[import-untyped]
+
+        self.phowhisper_model = pipeline(
+            "automatic-speech-recognition",
+            model=PHOWHISPER_MODEL_ID,
+            device="cpu",
+        )
+
+    def _load_lid(self) -> None:
+        if self.lid_model is not None:
+            return
+        from transformers import (  # type: ignore[import-untyped]
+            WhisperForConditionalGeneration,
+            WhisperProcessor,
+        )
+
+        self.lid_processor = WhisperProcessor.from_pretrained(LID_MODEL_ID)
+        self.lid_model = WhisperForConditionalGeneration.from_pretrained(LID_MODEL_ID)
+        self.lid_model.eval()
 
     # ------------------------------------------------------------------
     # Commands
@@ -107,6 +181,7 @@ class FunasrBridge:
 
     def cmd_reset(self) -> dict:
         self._buffer = np.array([], dtype=np.float32)
+        self._detected_language = None
         return {"type": "ack"}
 
     def cmd_speaker(self, op: str, samples_b64: str = "", sample_rate: int = SAMPLE_RATE) -> dict:
@@ -188,41 +263,70 @@ class FunasrBridge:
     # ------------------------------------------------------------------
     def _transcribe(self, response_type: str) -> dict:
         try:
-            if not self._model_loaded:
-                self.load_model()
+            self.load_model()
             if len(self._buffer) < SAMPLE_RATE * 0.3:  # < 300 ms → skip
                 return {"type": response_type, "text": ""}
-            # SenseVoiceSmall returns a list of dicts, e.g.
-            # [{"text": "<|en|><|NEUTRAL|><|Speech|><|withitn|>Hello world"}]
-            # FunASR/modelscope may emit progress bars or timing summaries to
-            # stdout. Stdout is our line-delimited JSON protocol, so route that
-            # library noise to stderr while inference runs.
-            # use_itn=True asks SenseVoice for punctuation + inverse text
-            # normalization; without it the raw output has no punctuation
-            # or casing, which reads as a corrupted transcript downstream.
+            # FunASR/modelscope (and transformers) may emit progress bars or
+            # timing summaries to stdout. Stdout is our line-delimited JSON
+            # protocol, so route that library noise to stderr while
+            # inference runs.
             with contextlib.redirect_stdout(sys.stderr):
-                result = self.model.generate(
-                    input=self._buffer, language="auto", use_itn=True
-                )
-            text = ""
-            if isinstance(result, list):
-                parts: list[str] = []
-                for item in result:
-                    if isinstance(item, dict):
-                        t = item.get("text") or item.get("text_label", "")
-                        if isinstance(t, str):
-                            parts.append(t)
-                    elif isinstance(item, str):
-                        parts.append(item)
-                text = " ".join(parts)
-            elif isinstance(result, dict):
-                text = result.get("text") or ""
-            elif isinstance(result, str):
-                text = result
-            text = _strip_internal_tags(text)
+                if ASR_BACKEND == "phowhisper":
+                    text = self._transcribe_phowhisper()
+                elif ASR_BACKEND == "sensevoice":
+                    text = self._transcribe_sensevoice()
+                else:
+                    if self._detected_language is None:
+                        self._detected_language = self._detect_language(self._buffer)
+                    language = self._detected_language
+                    if language in LID_LANGUAGES_FOR_PHOWHISPER:
+                        self._load_phowhisper()
+                        text = self._transcribe_phowhisper()
+                    else:
+                        text = self._transcribe_sensevoice()
             return {"type": response_type, "text": text}
         except Exception:
             return {"type": "error", "message": traceback.format_exc()}
+
+    def _detect_language(self, samples: np.ndarray) -> str:
+        """Return a Whisper language code (e.g. "vi", "en", "zh") for samples."""
+        self._load_lid()
+        inputs = self.lid_processor(samples, sampling_rate=SAMPLE_RATE, return_tensors="pt")
+        lang_ids = self.lid_model.detect_language(inputs.input_features)
+        token = self.lid_processor.tokenizer.decode(lang_ids)
+        return token.strip("<|>")
+
+    def _transcribe_sensevoice(self) -> str:
+        # SenseVoiceSmall returns a list of dicts, e.g.
+        # [{"text": "<|en|><|NEUTRAL|><|Speech|><|withitn|>Hello world"}]
+        # use_itn=True asks SenseVoice for punctuation + inverse text
+        # normalization; without it the raw output has no punctuation
+        # or casing, which reads as a corrupted transcript downstream.
+        result = self.sensevoice_model.generate(input=self._buffer, language="auto", use_itn=True)
+        text = ""
+        if isinstance(result, list):
+            parts: list[str] = []
+            for item in result:
+                if isinstance(item, dict):
+                    t = item.get("text") or item.get("text_label", "")
+                    if isinstance(t, str):
+                        parts.append(t)
+                elif isinstance(item, str):
+                    parts.append(item)
+            text = " ".join(parts)
+        elif isinstance(result, dict):
+            text = result.get("text") or ""
+        elif isinstance(result, str):
+            text = result
+        return _strip_internal_tags(text)
+
+    def _transcribe_phowhisper(self) -> str:
+        # transformers' ASR pipeline takes a plain float32 array at the
+        # model's native sample rate; PhoWhisper (like all Whisper
+        # checkpoints) expects 16 kHz, which is already SAMPLE_RATE here.
+        result = self.phowhisper_model({"raw": self._buffer, "sampling_rate": SAMPLE_RATE})
+        text = result.get("text", "") if isinstance(result, dict) else str(result)
+        return text.strip()
 
 
 def main() -> None:
