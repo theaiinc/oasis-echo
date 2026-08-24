@@ -40,9 +40,17 @@ describe('pickFirstFiller', () => {
 
 describe('pickContinuationFiller', () => {
   it('returns a reason-appropriate chained filler', () => {
-    const used = new Set<string>();
-    const f = pickContinuationFiller('complex-reasoning', used);
-    expect(f.length).toBeGreaterThan(10);
+    // The complex-reasoning pool legitimately includes very short entries
+    // (e.g. "Hmm." at 4 chars) alongside longer ones — asserting a >10
+    // length was flaky, failing whenever randomPick() landed on one of
+    // those short entries (about 1 in 11 runs). Assert what's actually
+    // guaranteed: a non-empty phrase, picked afresh each run to exercise
+    // the random path without depending on which entry it lands on.
+    for (let i = 0; i < 20; i++) {
+      const used = new Set<string>();
+      const f = pickContinuationFiller('complex-reasoning', used);
+      expect(f.length).toBeGreaterThan(0);
+    }
   });
 
   it('never picks the same phrase twice in one turn', () => {
