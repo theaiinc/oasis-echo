@@ -58,6 +58,9 @@ export class FunasrStreamingStt {
 
   // Rolling buffer + committed segments (mirrors WhisperStreamingStt).
   private buffer = new Float32Array(0);
+  // Audio dropped off the head since the last commit, piling up until
+  // there's enough to bother transcribing — see feed().
+  private pendingDrop = new Float32Array(0);
   private lastPartialAt = 0;
   private lastPartialText = '';
   private committedSegments = '';
@@ -115,7 +118,15 @@ export class FunasrStreamingStt {
       this.buffer = merged;
       return;
     }
-    // Overflow — transcribe the head we're about to drop, then keep the tail.
+    // Overflow — the head we're about to drop needs to be transcribed
+    // before it's gone, or a long capture just loses its beginning.
+    // Once the buffer is full, every subsequent feed() only overflows
+    // by about one chunk (tens of ms) — far short of minBufferSamples,
+    // so committing each overflow individually meant commitDroppedHead
+    // discarded it outright (see its own guard) and long dictations
+    // silently lost more and more of their start the longer they ran.
+    // Pile up drops here across calls and only commit once there's
+    // enough to be worth an inference pass.
     const dropCount = needed - this.maxBufferSamples;
     const droppedHead = this.buffer.subarray(0, dropCount);
     const keepFromExisting = Math.max(
@@ -131,7 +142,16 @@ export class FunasrStreamingStt {
     }
     merged.set(samples, keepFromExisting);
     this.buffer = merged;
-    this.commitDroppedHead(droppedHead);
+
+    const combinedDrop = new Float32Array(this.pendingDrop.length + droppedHead.length);
+    combinedDrop.set(this.pendingDrop, 0);
+    combinedDrop.set(droppedHead, this.pendingDrop.length);
+    if (combinedDrop.length >= this.minBufferSamples) {
+      this.pendingDrop = new Float32Array(0);
+      this.commitDroppedHead(combinedDrop);
+    } else {
+      this.pendingDrop = combinedDrop;
+    }
   }
 
   /** Duration of buffered audio in seconds. */
@@ -160,6 +180,14 @@ export class FunasrStreamingStt {
 
   /** Best available transcript of the entire buffer. Always runs a fresh inference. */
   async transcribeAll(): Promise<string> {
+    // Whatever's still piled up in pendingDrop lost its chance to reach
+    // minBufferSamples naturally — this is the last call, so commit it
+    // now regardless of size rather than silently dropping it.
+    if (this.pendingDrop.length > 0) {
+      const drop = this.pendingDrop;
+      this.pendingDrop = new Float32Array(0);
+      this.commitDroppedHead(drop, /* force */ true);
+    }
     await this.awaitHeadCommits();
     if (this.buffer.length < this.minBufferSamples) {
       return this.joinCommitted(this.lastPartialText);
@@ -195,6 +223,7 @@ export class FunasrStreamingStt {
   /** Drop the rolling buffer — start fresh for a new utterance. */
   reset(): void {
     this.buffer = new Float32Array(0);
+    this.pendingDrop = new Float32Array(0);
     this.lastPartialAt = 0;
     this.lastPartialText = '';
     this.lastSpeakerMatch = null;
@@ -235,8 +264,11 @@ export class FunasrStreamingStt {
     }
   }
 
-  private commitDroppedHead(head: Float32Array): void {
-    if (head.length < this.minBufferSamples) return;
+  private commitDroppedHead(head: Float32Array, force = false): void {
+    // The Python bridge itself skips sub-300ms windows (returns empty
+    // text), so a floor here just avoids the round-trip for a tail
+    // that's guaranteed to produce nothing.
+    if (force ? head.length < SAMPLE_RATE * 0.3 : head.length < this.minBufferSamples) return;
     const prev = this.headCommitPromise;
     this.headCommitPromise = (async () => {
       if (prev) await prev;
