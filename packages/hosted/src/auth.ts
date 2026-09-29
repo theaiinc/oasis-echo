@@ -114,11 +114,16 @@ export class AegisAuth {
     const d = await this.discover();
     const res = await this.fetchImpl(d.token_endpoint, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        authorization: `Basic ${Buffer.from(`${encodeURIComponent(this.cfg.clientId)}:${encodeURIComponent(this.cfg.clientSecret)}`).toString('base64')}`,
-      },
-      body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: this.cfg.redirectUri, code_verifier: pending.verifier }),
+      // Aegis takes client_secret_post (not basic).
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: this.cfg.redirectUri,
+        code_verifier: pending.verifier,
+        client_id: this.cfg.clientId,
+        client_secret: this.cfg.clientSecret,
+      }),
     });
     if (!res.ok) throw new Error(`Aegis token exchange ${res.status}`);
     const { id_token } = (await res.json()) as { id_token?: string };
