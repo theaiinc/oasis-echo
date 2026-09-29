@@ -1,0 +1,22 @@
+# Hosted Echo (packages/hosted): many users, many agents, no voice models on
+# the server (the browser listens and speaks). Small enough for Cloud Run's
+# free tier with scale to zero.
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
+COPY packages/ packages/
+RUN npm ci --ignore-scripts
+RUN npx tsc -b packages/hosted
+RUN npm prune --omit=dev
+
+FROM node:20-alpine
+WORKDIR /app
+RUN apk add --no-cache dumb-init
+COPY --from=builder /app/node_modules node_modules/
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/packages/ packages/
+ENV NODE_ENV=production PORT=8080 OASIS_LOG_LEVEL=info
+EXPOSE 8080
+USER node
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "packages/hosted/dist/server.js"]

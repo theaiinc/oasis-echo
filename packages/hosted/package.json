@@ -1,0 +1,19 @@
+{
+  "name": "@oasis-echo/hosted",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/server.js",
+    "server": "node --import tsx src/server.ts"
+  },
+  "dependencies": {
+    "@oasis-echo/coordinator": "*",
+    "@oasis-echo/orchestrator": "*",
+    "@oasis-echo/reasoning": "*",
+    "@oasis-echo/telemetry": "*",
+    "@oasis-echo/types": "*"
+  }
+}
