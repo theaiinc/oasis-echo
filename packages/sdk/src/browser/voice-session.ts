@@ -29,6 +29,7 @@ import { AudioStreamUpload } from './audio-stream.js';
 import { BargeInMonitor } from './barge-in-monitor.js';
 import { EmotionDetector } from './emotion-detector.js';
 import { MicCapture } from './mic-capture.js';
+import { EnergyVad } from './energy-vad.js';
 
 export type VoiceHint = { text: string; warn?: boolean };
 
@@ -80,6 +81,14 @@ export type VoiceSessionOpts = {
    * callers can leave this alone.
    */
   audioConstraints?: MediaTrackConstraints;
+  /**
+   * With serverStt, what notices you speaking: the browser's
+   * SpeechRecognition ('recognition', the default) or the mic's loudness
+   * ('energy', no dependency on the browser's speech service). A
+   * recognition that fails for good (network, service not allowed, none
+   * in this browser) falls back to 'energy' on its own.
+   */
+  vad?: 'recognition' | 'energy';
   /** Speech recognition language (BCP 47, e.g. "vi-VN"). Default: the browser's. */
   lang?: string;
   /** sendPartial min-word-count gate. Default 3. */
@@ -126,6 +135,9 @@ export class VoiceSession {
   private readonly serverStt: boolean;
   private readonly baseUrl: string;
   private readonly lang: string | undefined;
+  private readonly vad: 'recognition' | 'energy';
+  private energyVad: EnergyVad | null = null;
+  private micSource: AudioNode | null = null;
   private readonly silenceMs: number;
   private readonly debouncerOpts: Omit<TurnDebouncerOpts, 'onCommit' | 'onStateChange'>;
   private readonly audioConstraints: MediaTrackConstraints;
@@ -169,6 +181,7 @@ export class VoiceSession {
     this.serverStt = opts.serverStt ?? false;
     this.baseUrl = (opts.baseUrl ?? '').replace(/\/+$/, '');
     this.lang = opts.lang;
+    this.vad = opts.vad ?? 'recognition';
     this.silenceMs = opts.silenceMs ?? 1200;
     this.debouncerOpts = opts.debouncer ?? {};
     this.audioConstraints = opts.audioConstraints ?? {
@@ -273,7 +286,9 @@ export class VoiceSession {
       onStateChange: (s) => this.onDebouncerState(s),
     });
 
-    this.startRecognition();
+    this.micSource = source;
+    if (this.serverStt && this.audioStreamReady && this.vad === 'energy') this.startEnergyVad();
+    else this.startRecognition();
 
     this.emit('hint', { text: 'say hello…' });
     this.emit('started', undefined);
@@ -291,6 +306,9 @@ export class VoiceSession {
 
     try { this.recognition?.stop(); } catch { /* ignore */ }
     this.recognition = null;
+    this.energyVad?.stop();
+    this.energyVad = null;
+    this.micSource = null;
     this.bargeInMonitor?.stop();
     this.bargeInMonitor = null;
     this.micCapture?.stop();
@@ -450,18 +468,49 @@ export class VoiceSession {
 
   /* ──────────────── Internal: recognition + debouncer ──────────────── */
 
+  private startEnergyVad(): void {
+    if (this.energyVad || !this.audioCtx || !this.micSource) return;
+    this.energyVad = new EnergyVad({
+      isListening: () => !this.micPausedForTts && !this.agentSpeaking,
+      onStart: () => {
+        if (!this.audioStream) return;
+        this.speculationId = newSpeculationId();
+        this.audioStream.startUtterance(this.speculationId);
+        this.emit('hint', { text: 'listening…' });
+      },
+      onEnd: () => {
+        this.audioStream?.endUtterance();
+        this.emit('hint', { text: 'thinking…' });
+      },
+    });
+    this.energyVad.start(this.audioCtx, this.micSource);
+  }
+
   private startRecognition(): void {
     const Ctor =
       (window as unknown as { SpeechRecognition?: new () => SRInstance }).SpeechRecognition ??
       (window as unknown as { webkitSpeechRecognition?: new () => SRInstance }).webkitSpeechRecognition;
-    if (!Ctor) return;
+    if (!Ctor) {
+      if (this.serverStt && this.audioStreamReady) this.startEnergyVad();
+      return;
+    }
     const rec = new Ctor();
     rec.continuous = true;
     rec.interimResults = true;
     rec.lang = this.lang || navigator.language || 'en-US';
     rec.maxAlternatives = 4;
     rec.onresult = (ev) => this.onSrResult(ev);
-    rec.onerror = (ev) => this.emit('error', { kind: 'recognition', message: ev.error });
+    rec.onerror = (ev) => {
+      // These don't recover by retrying: notice speech from loudness instead.
+      if (['network', 'service-not-allowed', 'language-not-supported'].includes(ev.error) && this.serverStt && this.audioStreamReady) {
+        this.recognition = null;
+        rec.onend = null;
+        try { rec.stop(); } catch { /* ignore */ }
+        this.startEnergyVad();
+        return;
+      }
+      this.emit('error', { kind: 'recognition', message: ev.error });
+    };
     rec.onend = () => {
       if (this.voiceOn && this.shouldListen) {
         try { rec.start(); } catch { /* ignore */ }
