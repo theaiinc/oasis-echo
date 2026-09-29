@@ -8,7 +8,7 @@ COPY packages/ packages/
 RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/hosted
 RUN npm prune --omit=dev
-RUN node --input-type=module -e "import { KokoroTts, WhisperStreamingStt } from '@oasis-echo/coordinator'; await new KokoroTts({ dtype: 'q8' }).warm(); await new WhisperStreamingStt({}).preload(); console.log('voice models cached');"
+RUN node --input-type=module -e "import { KokoroTts, WhisperStreamingStt } from '@oasis-echo/coordinator'; await new KokoroTts({ dtype: 'q8' }).warm(); await new WhisperStreamingStt({}).preload(); console.log('voice models cached'); process.exit(0);"
 
 FROM node:20-bookworm-slim
 WORKDIR /app
