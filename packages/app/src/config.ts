@@ -1,4 +1,4 @@
-export type Backend = 'anthropic' | 'ollama' | 'openai';
+export type Backend = 'anthropic' | 'ollama' | 'openai' | 'pantheon';
 
 export type TtsBackend = 'kokoro' | 'web-speech';
 
@@ -31,6 +31,8 @@ export type RuntimeConfig = {
   /** Timeout for the STT semantic correction LLM call. */
   sttCorrectTimeoutMs: number;
   reasonerTimeoutMs: number;
+  /** OASIS_BACKEND=pantheon: talk to Maya in Pantheon (see PantheonMayaReasoner). */
+  pantheon: { baseUrl: string; botToken: string | undefined; role: string };
   /** LM Studio base URL for Arch-Router classifier (OpenAI-compatible). */
   archBaseUrl: string;
   /** Arch-Router model ID as registered in LM Studio. */
@@ -44,7 +46,7 @@ export type RuntimeConfig = {
 /**
  * Backend resolution order (required — the server errors out if none
  * of these conditions are met):
- *   1. Explicit OASIS_BACKEND=anthropic|ollama|openai
+ *   1. Explicit OASIS_BACKEND=anthropic|ollama|openai|pantheon
  *   2. ANTHROPIC_API_KEY set → anthropic
  *   3. OPENAI_API_KEY    set → openai
  *   4. Fall back to ollama (assuming a local server is running)
@@ -52,7 +54,7 @@ export type RuntimeConfig = {
 export function loadConfig(): RuntimeConfig {
   const explicit = process.env['OASIS_BACKEND'] as Backend | undefined;
   const backend: Backend =
-    explicit === 'anthropic' || explicit === 'ollama' || explicit === 'openai'
+    explicit === 'anthropic' || explicit === 'ollama' || explicit === 'openai' || explicit === 'pantheon'
       ? explicit
       : process.env['ANTHROPIC_API_KEY']
       ? 'anthropic'
@@ -65,6 +67,8 @@ export function loadConfig(): RuntimeConfig {
       ? process.env['OASIS_MODEL'] ?? 'claude-sonnet-4-6'
       : backend === 'openai'
       ? process.env['OPENAI_MODEL'] ?? 'gpt-4o-mini'
+      : backend === 'pantheon'
+      ? 'maya'
       : process.env['OLLAMA_MODEL'] ?? 'gemma4:e2b';
 
   const ttsBackend: TtsBackend =
@@ -88,6 +92,11 @@ export function loadConfig(): RuntimeConfig {
     model,
     ollamaBaseUrl: process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434',
     openaiBaseUrl: process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1',
+    pantheon: {
+      baseUrl: process.env['PANTHEON_URL'] ?? 'https://pantheon.theaiinc.com',
+      botToken: process.env['PANTHEON_BOT_TOKEN'],
+      role: process.env['PANTHEON_MAYA_ROLE'] ?? 'voice:local',
+    },
     ttsBackend,
     sttBackend:
       (process.env['OASIS_STT_BACKEND'] as SttBackend | undefined) === 'funasr'

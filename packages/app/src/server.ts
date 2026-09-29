@@ -41,6 +41,7 @@ import {
   McpRegistry,
   OllamaReasoner,
   OpenAIReasoner,
+  PantheonMayaReasoner,
   ToolRegistry,
   echoTool,
   timeTool,
@@ -480,6 +481,15 @@ async function main(): Promise<void> {
       ...(systemPromptSuffix ? { systemPromptSuffix } : {}),
     });
     logger.info('reasoner', { backend: 'anthropic', model: cfg.model });
+  } else if (cfg.backend === 'pantheon') {
+    if (!cfg.pantheon.botToken) throw new Error('OASIS_BACKEND=pantheon needs PANTHEON_BOT_TOKEN (pantheon-board\'s bot service token)');
+    reasoner = new PantheonMayaReasoner({
+      logger,
+      baseUrl: cfg.pantheon.baseUrl,
+      botToken: cfg.pantheon.botToken,
+      role: cfg.pantheon.role,
+    });
+    logger.info('reasoner', { backend: 'pantheon', baseUrl: cfg.pantheon.baseUrl, role: cfg.pantheon.role });
   } else if (cfg.backend === 'ollama') {
     reasoner = new OllamaReasoner({
       logger,
@@ -838,6 +848,7 @@ async function main(): Promise<void> {
           mediumReasonerModel: cfg.mediumReasonerModel,
           ...(cfg.backend === 'ollama' ? { baseUrl: cfg.ollamaBaseUrl } : {}),
           ...(cfg.backend === 'openai' ? { baseUrl: cfg.openaiBaseUrl } : {}),
+          ...(cfg.backend === 'pantheon' ? { baseUrl: cfg.pantheon.baseUrl } : {}),
           tts: {
             backend: cfg.ttsBackend,
             ...(cfg.ttsBackend === 'kokoro'
@@ -1970,6 +1981,8 @@ async function main(): Promise<void> {
         ? `anthropic (${cfg.model})`
         : cfg.backend === 'ollama'
         ? `ollama (${cfg.model} @ ${cfg.ollamaBaseUrl})`
+        : cfg.backend === 'pantheon'
+        ? `pantheon maya (${cfg.pantheon.baseUrl}, ${cfg.pantheon.role})`
         : `openai (${cfg.model} @ ${cfg.openaiBaseUrl})`;
     const ttsLabel =
       cfg.ttsBackend === 'kokoro'
