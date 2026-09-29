@@ -1,8 +1,9 @@
 import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { canUse, loadAgents, makeReasoner, roleFor } from '../src/agents.js';
+import { canUse, loadAgents, makeReasoner, roleFor, talkerFor } from '../src/agents.js';
 import { AegisAuth, cookies, sign, unsign } from '../src/auth.js';
-import { relay } from '../src/sessions.js';
+import { wire } from '../src/sessions.js';
+import { ExpertDesk, LatencyEstimate, lateNote } from '../src/experts.js';
 
 const MAYA = JSON.stringify([{
   id: 'maya', name: 'Maya', project: 'Pantheon', kind: 'pantheon', baseUrl: 'https://p.example', tokenEnv: 'PANTHEON_BOT_TOKEN',
@@ -20,8 +21,8 @@ describe('agents', () => {
 
   it('talks in the mapped conversation, or one of its own per user', () => {
     const [maya] = loadAgents(MAYA);
-    expect(roleFor(maya!, { sub: 's1', email: 'Steve@example.com' })).toBe('discord:42');
-    expect(roleFor(maya!, { sub: 's2', email: 'amy@team.example' })).toBe('voice:amy@team.example');
+    expect(roleFor(maya!.expert!, { sub: 's1', email: 'Steve@example.com' })).toBe('discord:42');
+    expect(roleFor(maya!.expert!, { sub: 's2', email: 'amy@team.example' })).toBe('voice:amy@team.example');
   });
 
   it('refuses a config it cannot run', () => {
@@ -29,6 +30,16 @@ describe('agents', () => {
     expect(() => loadAgents(MAYA.replace('"pantheon"', '"other"'))).toThrow('not supported');
     expect(() => loadAgents(MAYA.replace(/"allow":\[[^\]]*\]/, '"allow":[]'))).toThrow('who may use it');
     expect(() => makeReasoner(loadAgents(MAYA)[0]!, { sub: 's', email: 'steve@example.com' }, {})).toThrow('PANTHEON_BOT_TOKEN is not set');
+  });
+
+  it('reads the flat form as the expert, and takes the talker from the deployment', () => {
+    const [maya] = loadAgents(MAYA);
+    expect(maya!.expert).toMatchObject({ kind: 'pantheon', name: 'Maya', tokenEnv: 'PANTHEON_BOT_TOKEN' });
+    expect(talkerFor(maya!, {})).toBeNull();
+    expect(talkerFor(maya!, { ECHO_TALKER_MODEL: 'fast', ECHO_TALKER_TOKEN_ENV: 'K', K: 'key' }))
+      .toEqual({ baseUrl: 'https://api.llmapi.ai/v1', model: 'fast', tokenEnv: 'K', apiKey: 'key' });
+    const [solo] = loadAgents('[{"id":"chat","name":"Chat","project":"Echo","allow":["*@x.io"]}]');
+    expect(solo!.expert).toBeUndefined();
   });
 });
 
@@ -80,10 +91,45 @@ describe('Aegis id_token', () => {
   });
 });
 
-describe('relay', () => {
-  it('passes the page only what it speaks and shows', () => {
-    expect(relay({ type: 'tts.chunk', turnId: 't', text: 'Hi.', final: true, filler: false, pcm: new Int16Array(4) } as any))
-      .toEqual({ type: 'say', data: { turnId: 't', text: 'Hi.', final: true, filler: false } });
-    expect(relay({ type: 'llm.token', token: 'x' } as any)).toBeNull();
+describe('wire', () => {
+  it('sends speech as base64 PCM the SDK plays', () => {
+    const out = wire({ type: 'tts.chunk', turnId: 't', text: 'Hi.', final: true, sampleRate: 24000, atMs: 1, pcm: new Int16Array([1, -1]) } as any) as any;
+    expect(out).toMatchObject({ turnId: 't', text: 'Hi.', sampleRate: 24000, filler: false });
+    expect(Buffer.from(out.audio, 'base64')).toHaveLength(4);
+    expect(wire({ type: 'turn.complete', turn: { id: 't' } } as any)).toEqual({ type: 'turn.complete', turn: { id: 't' } });
+  });
+});
+
+describe('asking the expert in the background', () => {
+  it('estimates from real answers: the median, starting from the prior', () => {
+    const est = new LatencyEstimate(60_000);
+    expect(est.typicalMs()).toBe(60_000);
+    [40_000, 90_000, 50_000].forEach((ms) => est.record(ms));
+    expect(est.typicalMs()).toBe(50_000);
+    expect(est.slowMs()).toBe(90_000);
+  });
+
+  it('answers at once with an ETA, reports late, then delivers the answer', async () => {
+    let clock = 0;
+    let release!: (answer: string) => void;
+    const answered: any[] = [];
+    const late: number[] = [];
+    const desk = new ExpertDesk('Maya', () => new Promise<string>((r) => { release = r; }), new LatencyEstimate(20), {
+      answered: (job) => answered.push(job),
+      late: (_job, over) => late.push(over),
+    }, () => clock);
+    const first = desk.start('What needs attention?');
+    expect(first).toMatchObject({ etaSeconds: 0, alreadyAsked: false });
+    expect(desk.start('what needs attention')).toMatchObject({ alreadyAsked: true });
+    expect(desk.contextNote()).toContain('Maya is working on "What needs attention?"');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(late).toHaveLength(1);
+    clock = 45;
+    release('Arion One.');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(answered[0]).toMatchObject({ status: 'done', answer: 'Arion One.' });
+    expect(desk.estimate.typicalMs()).toBe(45);
+    expect(desk.contextNote()).toContain('Maya answered "What needs attention?": Arion One.');
+    expect(lateNote('Maya', 30_000, 1)).toContain('longer than usual');
   });
 });

@@ -14,6 +14,11 @@
     "@oasis-echo/orchestrator": "*",
     "@oasis-echo/reasoning": "*",
     "@oasis-echo/telemetry": "*",
-    "@oasis-echo/types": "*"
+    "@oasis-echo/types": "*",
+    "ws": "^8.18.0",
+    "@oasis-echo/sdk": "*"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
   }
 }

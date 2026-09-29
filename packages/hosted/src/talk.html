@@ -8,32 +8,33 @@
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #667085; --line: #e3e6eb;
-    --accent: #3b5bdb; --accent-text: #ffffff; --me: #eef2ff; --live: #e03131;
+    --accent: #3b5bdb; --accent-text: #ffffff; --me: #eef2ff; --live: #e03131; --note: #fff8e6; --note-line: #f2d98a;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #0f1115; --panel: #171a21; --text: #e8eaef; --muted: #8a93a6; --line: #262b36;
-      --accent: #748ffc; --accent-text: #0f1115; --me: #1d2433; --live: #ff6b6b; color-scheme: dark; }
+      --accent: #748ffc; --accent-text: #0f1115; --me: #1d2433; --live: #ff6b6b; --note: #2a2415; --note-line: #5c4a1c; color-scheme: dark; }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body { background: var(--bg); color: var(--text); font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     display: flex; flex-direction: column; padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom); }
-  header { display: flex; align-items: center; gap: 10px; padding: 14px 0 10px; border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 17px; margin: 0; font-weight: 650; flex: 1; }
-  select, .small { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  header { display: flex; align-items: center; gap: 8px; padding: 14px 0 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; flex: 1; min-width: 6em; }
+  select { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
   #log { flex: 1; overflow-y: auto; padding: 14px 0; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 88%; padding: 9px 12px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); white-space: pre-wrap; }
   .msg.me { align-self: flex-end; background: var(--me); border-color: transparent; }
-  .msg.pending { color: var(--muted); font-style: italic; }
+  .msg.note { background: var(--note); border-color: var(--note-line); font-size: 14px; }
+  .msg.note b { display: block; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
   .hint { color: var(--muted); font-size: 14px; text-align: center; margin: auto 0; }
-  footer { display: flex; flex-direction: column; gap: 10px; padding: 10px 0 14px; border-top: 1px solid var(--line); }
+  footer { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
   #status { color: var(--muted); font-size: 13px; min-height: 18px; text-align: center; }
-  .row { display: flex; gap: 8px; align-items: center; }
-  #mic { flex: none; width: 76px; height: 76px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-text);
-    font-size: 15px; font-weight: 650; margin: 0 auto; cursor: pointer; }
-  #mic.listening { background: var(--live); animation: pulse 1.2s ease-in-out infinite; }
+  #call { width: 84px; height: 84px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-text); font: 650 15px/1 inherit; cursor: pointer; }
+  #call.on { background: var(--live); }
+  #call.speaking { animation: pulse 1.1s ease-in-out infinite; }
   @keyframes pulse { 50% { transform: scale(1.06); } }
+  .row { display: flex; gap: 8px; width: 100%; }
   #text { flex: 1; min-width: 0; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
   label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
 </style>
@@ -41,139 +42,111 @@
 <body>
 <header>
   <h1 id="title">Echo</h1>
-  <select id="agent" aria-label="Who to talk to"></select>
+  <select id="agent" aria-label="Who to talk to" hidden></select>
   <select id="lang" aria-label="Language">
     <option value="en-US">English</option>
     <option value="vi-VN">Tiếng Việt</option>
   </select>
 </header>
-<div id="log"><p class="hint" id="hint">Tap the button and talk.</p></div>
+<div id="log"><p class="hint" id="hint">Tap Call and just talk. You can interrupt any time.</p></div>
 <footer>
   <div id="status"></div>
-  <button id="mic" aria-label="Talk">Talk</button>
+  <button id="call" aria-label="Start call">Call</button>
   <div class="row">
     <input id="text" placeholder="…or type" autocomplete="off" enterkeyhint="send">
-    <label><input type="checkbox" id="handsfree"> Hands-free</label>
   </div>
+  <label id="sttrow" hidden><input type="checkbox" id="serverstt"> Server listening (English)</label>
 </footer>
-<script>
-(() => {
+<script type="importmap">
+  { "imports": {
+      "@oasis-echo/sdk": "/sdk/index.js",
+      "@oasis-echo/sdk/browser": "/sdk/browser/index.js",
+      "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0"
+  } }
+</script>
+<script type="module">
+  import { OasisClient } from '@oasis-echo/sdk';
+  import { VoiceSession } from '@oasis-echo/sdk/browser';
+
   const $ = (id) => document.getElementById(id);
-  const log = $('log'), status = $('status'), mic = $('mic'), agentSel = $('agent'), langSel = $('lang');
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const log = $('log'), status = $('status'), call = $('call'), agentSel = $('agent'), langSel = $('lang');
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch {} },
   };
-  let agent = null, events = null, rec = null, listening = false, speaking = 0, pendingEl = null, answerEl = null;
+  let client = null, voice = null, agent = null;
+  const bubbles = new Map();
 
-  function add(text, who, extra) {
+  function add(text, cls, label) {
     $('hint')?.remove();
     const el = document.createElement('div');
-    el.className = `msg ${who}${extra ? ' ' + extra : ''}`;
-    el.textContent = text;
+    el.className = `msg ${cls}`;
+    if (label) { const b = document.createElement('b'); b.textContent = label; el.appendChild(b); el.appendChild(document.createTextNode(text)); }
+    else el.textContent = text;
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
     return el;
   }
-  const say = (text) => {
-    if (!('speechSynthesis' in window) || !text) return;
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = langSel.value;
-    speaking++;
-    u.onend = u.onerror = () => { speaking = Math.max(0, speaking - 1); maybeListenAgain(); };
-    speechSynthesis.speak(u);
-  };
-  const quiet = () => { if ('speechSynthesis' in window) speechSynthesis.cancel(); speaking = 0; };
 
-  async function api(path, body) {
-    const res = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {});
-    if (res.status === 401) { location.href = '/auth/login'; throw new Error('signed out'); }
-    return res.json();
-  }
-
-  function connect() {
-    events?.close();
-    events = new EventSource(`/api/events?agent=${encodeURIComponent(agent)}`);
-    events.addEventListener('say', (e) => {
-      const d = JSON.parse(e.data);
-      if (d.filler) { status.textContent = d.text; say(d.text); return; }
-      pendingEl?.remove(); pendingEl = null;
-      if (!answerEl) answerEl = add('', 'agent');
-      answerEl.textContent = (answerEl.textContent ? answerEl.textContent + ' ' : '') + d.text;
+  function connect(a) {
+    voice?.stop(); client?.close();
+    bubbles.clear();
+    agent = a;
+    $('title').textContent = a.expert ? `${a.name} · ${a.project}` : a.name;
+    client = new OasisClient({ baseUrl: `/a/${a.id}` });
+    client.on('user.input', (p) => add(p.text, 'me'));
+    client.on('tts.chunk', (p) => {
+      if (p.filler || !p.text) return;
+      let el = bubbles.get(p.turnId);
+      if (!el) { el = add('', 'agent'); bubbles.set(p.turnId, el); }
+      if (!el.textContent.includes(p.text)) el.textContent = (el.textContent ? el.textContent + ' ' : '') + p.text;
       log.scrollTop = log.scrollHeight;
-      status.textContent = '';
-      say(d.text);
     });
-    events.addEventListener('turn', () => { answerEl = null; pendingEl?.remove(); pendingEl = null; status.textContent = ''; });
-    events.addEventListener('stop', () => { answerEl = null; });
-    events.onerror = () => { status.textContent = 'Reconnecting…'; };
-    events.addEventListener('ready', () => { if (status.textContent === 'Reconnecting…') status.textContent = ''; });
+    client.on('expert.answer', (p) => {
+      add(p.answer || p.error || '', 'note', p.status === 'done' ? `${p.expert} answered: ${p.question}` : `${p.expert} couldn't answer`);
+    });
+    client.on('error', (p) => { if (p.source === 'sse') status.textContent = 'Reconnecting…'; });
+    client.connect();
+    voice = new VoiceSession({
+      client,
+      baseUrl: `/a/${a.id}`,
+      emotion: false,
+      serverStt: $('serverstt').checked && langSel.value === 'en-US',
+      lang: langSel.value,
+    });
+    voice.on('hint', (h) => { status.textContent = h.text; });
+    voice.on('speakingChange', (on) => call.classList.toggle('speaking', on));
+    voice.on('error', (e) => { status.textContent = e.kind === 'mic' ? 'Allow the microphone to talk.' : e.message; });
+    voice.on('started', () => { call.classList.add('on'); call.textContent = 'End'; call.setAttribute('aria-label', 'End call'); });
+    voice.on('stopped', () => { call.classList.remove('on', 'speaking'); call.textContent = 'Call'; call.setAttribute('aria-label', 'Start call'); status.textContent = ''; });
   }
 
-  async function send(text) {
-    text = text.trim();
-    if (!text || !agent) return;
-    quiet();
-    answerEl = null;
-    add(text, 'me');
-    pendingEl = add('Thinking…', 'agent', 'pending');
-    await api('/api/turn', { agent, text });
-  }
-
-  function listen() {
-    if (!Recognition) { status.textContent = "This browser can't listen; type instead."; return; }
-    if (listening) { rec?.stop(); return; }
-    // Talking over the agent stops it.
-    if (speaking || answerEl) { quiet(); api('/api/bargein', { agent }).catch(() => {}); }
-    rec = new Recognition();
-    rec.lang = langSel.value;
-    rec.interimResults = true;
-    rec.maxAlternatives = 1;
-    let final = '';
-    rec.onresult = (e) => {
-      let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) final += e.results[i][0].transcript; else interim += e.results[i][0].transcript;
-      }
-      status.textContent = final || interim;
-    };
-    rec.onerror = (e) => { status.textContent = e.error === 'not-allowed' ? 'Allow the microphone to talk.' : ''; };
-    rec.onend = () => {
-      listening = false; mic.classList.remove('listening'); mic.textContent = 'Talk';
-      if (final.trim()) { status.textContent = ''; send(final); }
-    };
-    listening = true; mic.classList.add('listening'); mic.textContent = 'Listening';
-    rec.start();
-  }
-
-  function maybeListenAgain() {
-    if ($('handsfree').checked && !speaking && !listening && !pendingEl && !answerEl) setTimeout(() => { if (!speaking && !listening) listen(); }, 400);
-  }
-
-  mic.addEventListener('click', () => {
-    // iOS only speaks after a tap has spoken once.
-    if ('speechSynthesis' in window && !window.__primed) { speechSynthesis.speak(new SpeechSynthesisUtterance('')); window.__primed = true; }
-    listen();
+  call.addEventListener('click', () => { if (voice?.isRunning) voice.stop(); else voice?.start(); });
+  $('text').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !e.target.value.trim()) return;
+    client?.sendTurn({ text: e.target.value.trim() }).catch(() => {});
+    e.target.value = '';
   });
-  $('text').addEventListener('keydown', (e) => { if (e.key === 'Enter') { send(e.target.value); e.target.value = ''; } });
   langSel.value = store.get('echo.lang') || (navigator.language?.startsWith('vi') ? 'vi-VN' : 'en-US');
-  langSel.addEventListener('change', () => store.set('echo.lang', langSel.value));
-  $('handsfree').checked = store.get('echo.handsfree') === '1';
-  $('handsfree').addEventListener('change', (e) => store.set('echo.handsfree', e.target.checked ? '1' : '0'));
-  agentSel.addEventListener('change', () => { agent = agentSel.value; store.set('echo.agent', agent); $('title').textContent = agentSel.selectedOptions[0].textContent; connect(); });
+  const rebuild = () => { const running = voice?.isRunning; connect(agent); if (running) voice.start(); };
+  langSel.addEventListener('change', () => { store.set('echo.lang', langSel.value); rebuild(); });
+  $('serverstt').addEventListener('change', (e) => { store.set('echo.serverstt', e.target.checked ? '1' : '0'); rebuild(); });
+  $('serverstt').checked = store.get('echo.serverstt') === '1';
 
-  api('/api/me').then((me) => {
-    if (!me.agents?.length) { add(`${me.email} has no agents to talk to yet.`, 'agent'); mic.disabled = true; return; }
+  const res = await fetch('/api/me');
+  if (res.status === 401) location.href = '/auth/login';
+  const me = await res.json();
+  $('sttrow').hidden = !me.serverStt;
+  if (!me.agents?.length) { add(`${me.email} has no agents to talk to yet.`, 'note'); call.disabled = true; }
+  else {
     for (const a of me.agents) agentSel.add(new Option(`${a.name} · ${a.project}`, a.id));
     agentSel.hidden = me.agents.length < 2;
     const saved = store.get('echo.agent');
-    agent = me.agents.some((a) => a.id === saved) ? saved : me.agents[0].id;
-    agentSel.value = agent;
-    $('title').textContent = me.agents.find((a) => a.id === agent).name;
-    connect();
-  });
-})();
+    const first = me.agents.find((a) => a.id === saved) ?? me.agents[0];
+    agentSel.value = first.id;
+    agentSel.addEventListener('change', () => { store.set('echo.agent', agentSel.value); connect(me.agents.find((a) => a.id === agentSel.value)); });
+    connect(first);
+  }
 </script>
 </body>
 </html>

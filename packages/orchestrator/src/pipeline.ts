@@ -193,6 +193,32 @@ export class Pipeline {
    * External caller triggers a barge-in (e.g., the reflex VAD saw the
    * user start talking while the agent was speaking).
    */
+  /**
+   * Say something that is not a reply to the user's last utterance: a
+   * background task finished, a progress note. Spoken like any reply (it
+   * can be barged in on) and kept in the conversation, so the next turn
+   * knows it was said. Callers should wait until no turn is in flight:
+   * starting a turn interrupts whatever is playing.
+   */
+  async announce(text: string): Promise<Turn> {
+    this.turnCounter++;
+    const turnId = `a${this.turnCounter}-${Date.now().toString(36)}`;
+    const startedAtMs = Date.now();
+    const { spoken, interrupted } = await this.playText(turnId, text);
+    const turn: Turn = {
+      id: turnId,
+      startedAtMs,
+      endedAtMs: Date.now(),
+      userText: '',
+      agentText: spoken,
+      tier: 'local',
+      interrupted,
+    };
+    this.state.recordTurn(turn);
+    await this.bus.emit({ type: 'turn.complete', turn });
+    return turn;
+  }
+
   async bargeIn(): Promise<boolean> {
     return this.arbiter.bargeIn(Date.now());
   }

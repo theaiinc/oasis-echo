@@ -80,6 +80,8 @@ export type VoiceSessionOpts = {
    * callers can leave this alone.
    */
   audioConstraints?: MediaTrackConstraints;
+  /** Speech recognition language (BCP 47, e.g. "vi-VN"). Default: the browser's. */
+  lang?: string;
   /** sendPartial min-word-count gate. Default 3. */
   partialMinWords?: number;
   /** Interim-stability window (ms) before firing the backchannel check. Default 300. */
@@ -123,6 +125,7 @@ export class VoiceSession {
   private readonly emotionEnabled: boolean;
   private readonly serverStt: boolean;
   private readonly baseUrl: string;
+  private readonly lang: string | undefined;
   private readonly silenceMs: number;
   private readonly debouncerOpts: Omit<TurnDebouncerOpts, 'onCommit' | 'onStateChange'>;
   private readonly audioConstraints: MediaTrackConstraints;
@@ -165,6 +168,7 @@ export class VoiceSession {
     this.emotionEnabled = opts.emotion ?? true;
     this.serverStt = opts.serverStt ?? false;
     this.baseUrl = (opts.baseUrl ?? '').replace(/\/+$/, '');
+    this.lang = opts.lang;
     this.silenceMs = opts.silenceMs ?? 1200;
     this.debouncerOpts = opts.debouncer ?? {};
     this.audioConstraints = opts.audioConstraints ?? {
@@ -454,7 +458,7 @@ export class VoiceSession {
     const rec = new Ctor();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = navigator.language || 'en-US';
+    rec.lang = this.lang || navigator.language || 'en-US';
     rec.maxAlternatives = 4;
     rec.onresult = (ev) => this.onSrResult(ev);
     rec.onerror = (ev) => this.emit('error', { kind: 'recognition', message: ev.error });
@@ -600,7 +604,11 @@ export class VoiceSession {
 
   private async connectServerStt(source: AudioNode): Promise<void> {
     if (!this.audioCtx) return;
-    const stream = new AudioStreamUpload({ audioContext: this.audioCtx, source });
+    // The audio socket lives beside the other endpoints (baseUrl may be a
+    // path like /a/maya, or another origin).
+    const audioUrl = new URL(`${this.baseUrl}/audio`, location.href);
+    audioUrl.protocol = audioUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const stream = new AudioStreamUpload({ audioContext: this.audioCtx, source, url: audioUrl.toString() });
     stream.on('partial', (text) => this.emit('hint', { text: 'listening…' }));
     stream.on('final', (payload) => {
       const t = (payload.text ?? '').trim();

@@ -1,21 +1,23 @@
-# Hosted Echo (packages/hosted): many users, many agents, no voice models on
-# the server (the browser listens and speaks). Small enough for Cloud Run's
-# free tier with scale to zero.
-FROM node:20-alpine AS builder
+# Hosted Echo (packages/hosted): many users, many agents, live streaming
+# voice. The Kokoro voice and Whisper listener are downloaded here, at build
+# time, so a cold start (Cloud Run scales to zero) doesn't fetch them.
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/ packages/
 RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/hosted
 RUN npm prune --omit=dev
+RUN node --input-type=module -e "import { KokoroTts, WhisperStreamingStt } from '@oasis-echo/coordinator'; await new KokoroTts({ dtype: 'q8' }).warm(); await new WhisperStreamingStt({}).preload(); console.log('voice models cached');"
 
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 WORKDIR /app
-RUN apk add --no-cache dumb-init
+# onnxruntime (Kokoro, Whisper) ships glibc binaries: Debian, not Alpine.
+RUN apt-get update && apt-get install -y --no-install-recommends dumb-init ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/node_modules node_modules/
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/packages/ packages/
-ENV NODE_ENV=production PORT=8080 OASIS_LOG_LEVEL=info
+ENV NODE_ENV=production PORT=8080 OASIS_LOG_LEVEL=info ECHO_SERVER_STT=1
 EXPOSE 8080
 USER node
 ENTRYPOINT ["dumb-init", "--"]

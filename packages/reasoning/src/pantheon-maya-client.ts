@@ -72,7 +72,7 @@ export class PantheonMayaReasoner implements Reasoner {
   }
 
   /** Maya's reply to this message: what she added to the thread after it. */
-  private async ask(message: string, signal?: AbortSignal): Promise<string> {
+  async ask(message: string, signal?: AbortSignal): Promise<string> {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const res = await this.fetchImpl(`${this.baseUrl}/api/chat`, {
       method: 'POST',

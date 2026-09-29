@@ -11,6 +11,7 @@
     { "path": "../telemetry" },
     { "path": "../coordinator" },
     { "path": "../reasoning" },
-    { "path": "../orchestrator" }
+    { "path": "../orchestrator" },
+    { "path": "../sdk" }
   ]
 }
