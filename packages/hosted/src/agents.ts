@@ -16,7 +16,8 @@ import { PantheonMayaReasoner, type Reasoner } from '@oasis-echo/reasoning';
  *                  "roles": { "steve.tran@theaiinc.com": "discord:767623901740007446" } } }]
  *
  * The talker comes from ECHO_TALKER_BASE_URL / ECHO_TALKER_MODEL /
- * ECHO_TALKER_TOKEN_ENV unless the agent sets its own "talker". Without a
+ * ECHO_TALKER_FALLBACK_MODEL / ECHO_TALKER_TOKEN_ENV unless the agent sets its
+ * own "talker" (e.g. a free model first, a cheap one when it fails or is slow). Without a
  * talker key, every turn goes straight to the expert (slow but works).
  * The older flat form (kind/baseUrl/tokenEnv at the top) is read as the expert.
  */
@@ -36,7 +37,7 @@ export type ExpertConfig = {
   typicalSeconds?: number;
 };
 
-export type TalkerConfig = { baseUrl: string; model: string; tokenEnv: string; persona?: string };
+export type TalkerConfig = { baseUrl: string; model: string; fallbackModel?: string; tokenEnv: string; persona?: string };
 
 export type AgentConfig = {
   id: string;
@@ -100,7 +101,12 @@ export function loadAgents(json: string | undefined): AgentConfig[] {
 /** The talker for an agent: its own, or the deployment's default (null: none configured). */
 export function talkerFor(agent: AgentConfig, env: NodeJS.ProcessEnv): (TalkerConfig & { apiKey: string }) | null {
   const t = agent.talker ?? (env['ECHO_TALKER_MODEL'] && env['ECHO_TALKER_TOKEN_ENV']
-    ? { baseUrl: env['ECHO_TALKER_BASE_URL'] ?? 'https://api.llmapi.ai/v1', model: env['ECHO_TALKER_MODEL'], tokenEnv: env['ECHO_TALKER_TOKEN_ENV'] }
+    ? {
+        baseUrl: env['ECHO_TALKER_BASE_URL'] ?? 'https://api.llmapi.ai/v1',
+        model: env['ECHO_TALKER_MODEL'],
+        ...(env['ECHO_TALKER_FALLBACK_MODEL'] ? { fallbackModel: env['ECHO_TALKER_FALLBACK_MODEL'] } : {}),
+        tokenEnv: env['ECHO_TALKER_TOKEN_ENV'],
+      }
     : null);
   const apiKey = t ? env[t.tokenEnv] : undefined;
   return t && apiKey ? { ...t, apiKey } : null;

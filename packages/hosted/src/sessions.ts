@@ -61,6 +61,7 @@ export class Live {
         apiKey: talker.apiKey,
         baseUrl: talker.baseUrl,
         model: talker.model,
+        ...(talker.fallbackModel ? { fallbackModel: talker.fallbackModel } : {}),
         systemPrompt: talkerPrompt(agent, user, talker.persona),
         tools,
         context: () => this.desk?.contextNote(),
@@ -118,14 +119,16 @@ export class Live {
     }
   }
 
-  private async onAnswer(job: ExpertJob, talker: { apiKey: string; baseUrl: string; model: string }): Promise<void> {
+  private async onAnswer(job: ExpertJob, talker: { apiKey: string; baseUrl: string; model: string; fallbackModel?: string }): Promise<void> {
     const name = this.agent.expert?.name ?? 'The expert';
     this.send('expert.answer', { id: job.id, expert: name, question: job.question, status: job.status, answer: job.answer ?? null, error: job.error ?? null, atMs: Date.now() });
     if (job.status !== 'done' || !job.answer) {
       this.say(`Sorry, I couldn't get an answer from ${name} on that. Want me to try again?`);
       return;
     }
-    this.say(await spoken(job.question, job.answer, name, talker).catch(() => `${name} says: ${job.answer!.slice(0, 600)}`));
+    // Summaries go to the dependable model when there are two.
+    const summarizer = { ...talker, model: talker.fallbackModel ?? talker.model };
+    this.say(await spoken(job.question, job.answer, name, summarizer).catch(() => `${name} says: ${job.answer!.slice(0, 600)}`));
   }
 }
 

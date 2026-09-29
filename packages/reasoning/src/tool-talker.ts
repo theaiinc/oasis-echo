@@ -18,6 +18,14 @@ export type ToolTalkerOptions = {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /**
+   * Used for a turn when `model` fails or hasn't started answering within
+   * `firstTokenMs` (e.g. a free model first, a cheap one behind it). After
+   * three failures in a row `model` is skipped for `skipMs`.
+   */
+  fallbackModel?: string;
+  firstTokenMs?: number;
+  skipMs?: number;
   systemPrompt: string;
   tools?: ToolRegistry;
   context?: () => string | undefined;
@@ -37,6 +45,8 @@ type ToolCall = { id: string; type: 'function'; function: { name: string; argume
 export class ToolTalker implements Reasoner {
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
+  private failures = 0;
+  private skipUntil = 0;
 
   constructor(private readonly opts: ToolTalkerOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -51,25 +61,19 @@ export class ToolTalker implements Reasoner {
     let outputTokens = 0;
     for (let round = 0; ; round++) {
       const canCall = toolSpecs.length > 0 && round < (this.opts.maxToolRounds ?? 3);
-      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.opts.apiKey}` },
-        body: JSON.stringify({
-          model: this.opts.model,
-          messages,
-          stream: true,
-          stream_options: { include_usage: true },
-          temperature: this.opts.temperature ?? 0.6,
-          ...(canCall ? { tools: toolSpecs, tool_choice: 'auto' } : {}),
-        }),
-        signal: timeoutSignal(input.signal, this.opts.timeoutMs ?? 30_000),
-      });
-      if (!res.ok || !res.body) throw new Error(`talker ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+      const body = {
+        messages,
+        stream: true,
+        stream_options: { include_usage: true },
+        temperature: this.opts.temperature ?? 0.6,
+        ...(canCall ? { tools: toolSpecs, tool_choice: 'auto' } : {}),
+      };
+      const chunks = await this.open(body, input.signal);
 
       let text = '';
       const calls: ToolCall[] = [];
       let finish: string | null = null;
-      for await (const chunk of sseJson(res.body, input.signal)) {
+      for await (const chunk of chunks) {
         const choice = chunk.choices?.[0];
         const delta = choice?.delta;
         if (delta?.content) {
@@ -108,6 +112,76 @@ export class ToolTalker implements Reasoner {
         yield { type: 'tool_result', id: call.id, output };
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(output) });
       }
+    }
+  }
+
+  /**
+   * The streamed completion from the first model that starts answering in
+   * time: `model`, or `fallbackModel` when it errors or is slow to begin.
+   */
+  private async open(body: Record<string, unknown>, signal?: AbortSignal): Promise<AsyncIterable<StreamChunk>> {
+    const primary = this.opts.model;
+    const fallback = this.opts.fallbackModel;
+    const tryPrimary = !fallback || Date.now() >= this.skipUntil;
+    if (tryPrimary) {
+      const firstTokenMs = fallback ? (this.opts.firstTokenMs ?? 4000) : (this.opts.timeoutMs ?? 30_000);
+      try {
+        const started = await this.start(primary, body, signal, firstTokenMs);
+        this.failures = 0;
+        return started;
+      } catch (err) {
+        if (signal?.aborted || !fallback) throw err;
+        if (++this.failures >= 3) {
+          this.skipUntil = Date.now() + (this.opts.skipMs ?? 5 * 60_000);
+          this.failures = 0;
+        }
+        this.opts.logger?.warn('talker falling back', { model: primary, fallback, error: String(err) });
+      }
+    }
+    return this.start(fallback!, body, signal, this.opts.timeoutMs ?? 30_000);
+  }
+
+  /** Starts a stream and waits for its first chunk (so a slow model can be abandoned before anything is said). */
+  private async start(model: string, body: Record<string, unknown>, signal: AbortSignal | undefined, firstChunkMs: number): Promise<AsyncIterable<StreamChunk>> {
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const overall = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 30_000);
+    const firstTimer = setTimeout(() => ctl.abort(), firstChunkMs);
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.opts.apiKey}` },
+        body: JSON.stringify({ model, ...body }),
+        signal: ctl.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(`talker ${model} ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+      const it = sseJson(res.body, ctl.signal)[Symbol.asyncIterator]();
+      // Wait for something to say (or a tool call), not keep-alives or reasoning.
+      const buffered: StreamChunk[] = [];
+      for (;;) {
+        const next = await it.next();
+        if (next.done) break;
+        buffered.push(next.value);
+        const d = next.value.choices?.[0];
+        if (d?.delta?.content || d?.delta?.tool_calls?.length || d?.finish_reason) break;
+      }
+      clearTimeout(firstTimer);
+      const rest = { [Symbol.asyncIterator]: () => it };
+      return (async function* () {
+        try {
+          yield* buffered;
+          yield* rest;
+        } finally {
+          clearTimeout(overall);
+          signal?.removeEventListener('abort', onAbort);
+        }
+      })();
+    } catch (err) {
+      clearTimeout(firstTimer);
+      clearTimeout(overall);
+      signal?.removeEventListener('abort', onAbort);
+      throw ctl.signal.aborted && !signal?.aborted ? new Error(`talker ${model}: no answer within ${firstChunkMs} ms`) : err;
     }
   }
 
@@ -158,7 +232,3 @@ async function* sseJson(body: ReadableStream<Uint8Array>, signal?: AbortSignal):
   }
 }
 
-function timeoutSignal(signal: AbortSignal | undefined, ms: number): AbortSignal {
-  const timeout = AbortSignal.timeout(ms);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}

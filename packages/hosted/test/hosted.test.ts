@@ -38,6 +38,8 @@ describe('agents', () => {
     expect(talkerFor(maya!, {})).toBeNull();
     expect(talkerFor(maya!, { ECHO_TALKER_MODEL: 'fast', ECHO_TALKER_TOKEN_ENV: 'K', K: 'key' }))
       .toEqual({ baseUrl: 'https://api.llmapi.ai/v1', model: 'fast', tokenEnv: 'K', apiKey: 'key' });
+    expect(talkerFor(maya!, { ECHO_TALKER_MODEL: 'zaya1-8b', ECHO_TALKER_FALLBACK_MODEL: 'gemini-2.5-flash-lite', ECHO_TALKER_TOKEN_ENV: 'K', K: 'key' }))
+      .toMatchObject({ model: 'zaya1-8b', fallbackModel: 'gemini-2.5-flash-lite' });
     const [solo] = loadAgents('[{"id":"chat","name":"Chat","project":"Echo","allow":["*@x.io"]}]');
     expect(solo!.expert).toBeUndefined();
   });

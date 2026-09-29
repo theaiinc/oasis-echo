@@ -39,4 +39,27 @@ describe('ToolTalker', () => {
     expect(events.map((e) => e.type)).toEqual(['token', 'done']);
     expect(bodies[0].tools).toBeUndefined();
   });
+
+  it('uses the fallback when the free model errors or is slow to start, and skips it after repeated failures', async () => {
+    const models: string[] = [];
+    let primaryMode: 'error' | 'slow' = 'error';
+    const fetchImpl = vi.fn(async (_u: string, init: any) => {
+      const { model } = JSON.parse(init.body);
+      models.push(model);
+      if (model === 'free') {
+        if (primaryMode === 'error') return new Response('busy', { status: 503 });
+        return new Promise<Response>((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+      }
+      return sse([{ choices: [{ delta: { content: 'Hi.' }, finish_reason: 'stop' }] }]);
+    });
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'free', fallbackModel: 'cheap', firstTokenMs: 30, systemPrompt: 's', fetchImpl: fetchImpl as any });
+    const say = async () => (await collect(talker.stream({ userText: 'hi', state }))).find((e) => e.type === 'token')?.text;
+    expect(await say()).toBe('Hi.');
+    primaryMode = 'slow';
+    expect(await say()).toBe('Hi.');
+    expect(await say()).toBe('Hi.');
+    expect(models).toEqual(['free', 'cheap', 'free', 'cheap', 'free', 'cheap']);
+    await say();
+    expect(models.slice(6)).toEqual(['cheap']);
+  });
 });
