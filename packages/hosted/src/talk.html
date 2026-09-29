@@ -55,7 +55,7 @@
   <div class="row">
     <input id="text" placeholder="…or type" autocomplete="off" enterkeyhint="send">
   </div>
-  <label id="sttrow" hidden><input type="checkbox" id="serverstt"> Server listening (English)</label>
+  <label id="sttrow" hidden><input type="checkbox" id="serverstt" checked> Server listening (English)</label>
 </footer>
 <script type="importmap">
   { "imports": {
@@ -111,12 +111,19 @@
       client,
       baseUrl: `/a/${a.id}`,
       emotion: false,
+      // Server listening (Whisper, English) notices speech from mic loudness, so it
+      // doesn't depend on the phone's own speech service.
       serverStt: $('serverstt').checked && langSel.value === 'en-US',
+      vad: 'energy',
       lang: langSel.value,
     });
     voice.on('hint', (h) => { status.textContent = h.text; });
     voice.on('speakingChange', (on) => call.classList.toggle('speaking', on));
-    voice.on('error', (e) => { status.textContent = e.kind === 'mic' ? 'Allow the microphone to talk.' : e.message; });
+    voice.on('error', (e) => {
+      status.textContent = e.kind === 'mic' ? 'Allow the microphone to talk.'
+        : e.kind === 'recognition' && e.message === 'network' ? "This phone's speech service is unreachable. Switch to English to use server listening."
+        : e.message;
+    });
     voice.on('started', () => { call.classList.add('on'); call.textContent = 'End'; call.setAttribute('aria-label', 'End call'); });
     voice.on('stopped', () => { call.classList.remove('on', 'speaking'); call.textContent = 'Call'; call.setAttribute('aria-label', 'Start call'); status.textContent = ''; });
   }
@@ -131,7 +138,7 @@
   const rebuild = () => { const running = voice?.isRunning; connect(agent); if (running) voice.start(); };
   langSel.addEventListener('change', () => { store.set('echo.lang', langSel.value); rebuild(); });
   $('serverstt').addEventListener('change', (e) => { store.set('echo.serverstt', e.target.checked ? '1' : '0'); rebuild(); });
-  $('serverstt').checked = store.get('echo.serverstt') === '1';
+  $('serverstt').checked = store.get('echo.serverstt') !== '0';
 
   const res = await fetch('/api/me');
   if (res.status === 401) location.href = '/auth/login';

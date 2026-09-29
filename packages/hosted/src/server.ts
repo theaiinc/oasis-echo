@@ -215,16 +215,25 @@ function listen(ws: WebSocket): void {
   const send = (payload: Record<string, unknown>) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload)); };
   const stopLoop = () => { if (loop) clearInterval(loop); loop = null; };
   void stt.preload().then(() => send({ type: 'ready' }));
+  // Kokoro's phonemizer turns any uncaught exception into a crash of the
+  // whole server, so nothing from a socket may throw out of here.
   ws.on('message', (data, isBinary) => {
+    try {
+      onMessage(data as Buffer, isBinary);
+    } catch (err) {
+      logger.warn('audio message failed', { error: String(err) });
+    }
+  });
+  const onMessage = (data: Buffer, isBinary: boolean): void => {
     if (isBinary) {
-      const buf = data as Buffer;
-      const aligned = new Float32Array(buf.byteLength / 4);
-      new Uint8Array(aligned.buffer).set(new Uint8Array(buf.buffer, buf.byteOffset, aligned.byteLength * 4));
-      stt.feed(aligned);
+      // 32-bit float PCM; copied so it is aligned whatever Buffer it came in.
+      const samples = new Float32Array(Math.floor(data.byteLength / 4));
+      new Uint8Array(samples.buffer).set(data.subarray(0, samples.byteLength));
+      stt.feed(samples);
       return;
     }
     let msg: { type?: string; speculationId?: string; utteranceId?: string };
-    try { msg = JSON.parse(String(data)); } catch { return; }
+    try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === 'start') {
       stt.reset();
       last = '';
@@ -244,7 +253,8 @@ function listen(ws: WebSocket): void {
       stopLoop();
       stt.reset();
     }
-  });
+  };
+  ws.on('error', (err) => logger.warn('audio socket error', { error: String(err) }));
   ws.on('close', stopLoop);
 }
 
