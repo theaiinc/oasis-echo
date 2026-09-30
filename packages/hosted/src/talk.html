@@ -128,26 +128,42 @@
     voice.on('stopped', () => { call.classList.remove('on', 'speaking'); call.textContent = 'Call'; call.setAttribute('aria-label', 'Start call'); status.textContent = ''; });
   }
 
-  // The server loads its voice and listener on a cold start; a call only starts once both are warm.
-  let warm = false, startWhenWarm = false;
+  // On a cold start the server is still loading its voice and listener. Like a phone
+  // call, tapping Call rings (ringback tone) until the other side picks up.
+  let warm = false, ringing = null;
+  function ring() {
+    const ctx = new AudioContext();
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    gain.connect(ctx.destination);
+    for (const f of [440, 480]) { const o = ctx.createOscillator(); o.frequency.value = f; o.connect(gain); o.start(); }
+    // 2 s on, 4 s off.
+    const cycle = () => {
+      const t = ctx.currentTime;
+      gain.gain.setValueAtTime(0.08, t);
+      gain.gain.setValueAtTime(0, t + 2);
+    };
+    cycle();
+    const timer = setInterval(cycle, 6000);
+    return () => { clearInterval(timer); ctx.close(); };
+  }
+  function pickUp() {
+    ringing?.(); ringing = null;
+    status.textContent = '';
+    voice?.start();
+  }
   (async function waitWarm() {
-    try {
-      const r = await fetch('/api/ready').then((x) => x.json());
-      warm = !!r.ready;
-    } catch { /* retry */ }
-    if (warm) {
-      if (call.textContent === 'Warming up…') call.textContent = 'Call';
-      if (startWhenWarm) { startWhenWarm = false; status.textContent = ''; voice?.start(); }
-      return;
-    }
-    call.textContent = 'Warming up…';
-    status.textContent = startWhenWarm ? 'Starting the call as soon as the voice is ready…' : 'Warming up the voice…';
+    try { warm = !!(await fetch('/api/ready').then((x) => x.json())).ready; } catch { /* retry */ }
+    if (warm) { if (ringing) pickUp(); return; }
     setTimeout(waitWarm, 1000);
   })();
   call.addEventListener('click', () => {
     if (voice?.isRunning) return voice.stop();
-    if (!warm) { startWhenWarm = true; status.textContent = 'Starting the call as soon as the voice is ready…'; return; }
-    voice?.start();
+    if (ringing) { ringing(); ringing = null; call.classList.remove('on'); call.textContent = 'Call'; status.textContent = ''; return; }
+    if (warm) return pickUp();
+    ringing = ring();
+    call.classList.add('on'); call.textContent = 'End';
+    status.textContent = 'Calling…';
   });
   $('text').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || !e.target.value.trim()) return;
