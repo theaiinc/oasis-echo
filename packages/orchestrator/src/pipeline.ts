@@ -39,6 +39,14 @@ export type PipelineOpts = {
    */
   mediumReasonerModel?: string;
   summarizeEveryNTurns?: number;
+  /** Open the turn after an interruption with a short apology. Default true. */
+  apologizeAfterInterruption?: boolean;
+  /**
+   * When the user interrupts a reply, keep the part that was generated but not yet
+   * spoken in the turn's history (marked as not said), so a follow-up can use it
+   * instead of starting over. Default false.
+   */
+  keepInterruptedReply?: boolean;
 };
 
 /**
@@ -69,6 +77,8 @@ export class Pipeline {
   private readonly fillerAdvisor: FillerAdvisor | undefined;
   private readonly mediumReasonerModel: string | undefined;
   private readonly summarizeEveryNTurns: number;
+  private readonly apologizeAfterInterruption: boolean;
+  private readonly keepInterruptedReply: boolean;
   private turnCounter = 0;
   /**
    * Rolling set of recently-used filler phrases, scoped to the whole
@@ -111,6 +121,8 @@ export class Pipeline {
     this.fillerAdvisor = opts.fillerAdvisor;
     this.mediumReasonerModel = opts.mediumReasonerModel?.trim() || undefined;
     this.summarizeEveryNTurns = opts.summarizeEveryNTurns ?? 5;
+    this.apologizeAfterInterruption = opts.apologizeAfterInterruption ?? true;
+    this.keepInterruptedReply = opts.keepInterruptedReply ?? false;
   }
 
   /**
@@ -130,7 +142,7 @@ export class Pipeline {
     const reflex = reflexClassify(userText);
     if (reflex) {
       const turn = await this.speakLocal(turnId, userText, reflex, 'reflex', startedAtMs);
-      this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+      this.pendingApology = this.apologizeAfterInterruption && turn.interrupted && turn.tier !== 'reflex';
       this.state.applyIntent(turn.intent ?? 'unknown');
       this.state.recordTurn(turn);
       if (turnSpan) this.tracer?.end(turnSpan, { tier: 'reflex', intent: turn.intent });
@@ -168,7 +180,7 @@ export class Pipeline {
     // If the agent got barge-in'd mid-response, apologize at the start
     // of the next turn. Skip tracking when the just-finished turn was
     // itself a reflex (too short to feel like a real interruption).
-    this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+    this.pendingApology = this.apologizeAfterInterruption && turn.interrupted && turn.tier !== 'reflex';
 
     this.state.applyIntent(turn.intent ?? 'unknown');
     this.state.recordTurn(turn);
@@ -362,7 +374,7 @@ export class Pipeline {
       interrupted,
     };
 
-    this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+    this.pendingApology = this.apologizeAfterInterruption && turn.interrupted && turn.tier !== 'reflex';
     this.state.applyIntent(turn.intent ?? 'unknown');
     this.state.recordTurn(turn);
 
@@ -428,6 +440,7 @@ export class Pipeline {
     const signal = this.arbiter.beginTurn(turnId, () => {});
 
     let agentText = '';
+    let fullText = '';
     let interrupted = false;
     const markTimeline = (stage: string, detail?: string): void => {
       void this.bus.emit({
@@ -460,7 +473,6 @@ export class Pipeline {
       let streamStopReason: string | null = null;
       let streamCompletedCleanly = false;
       let watchdogTimedOut = false;
-      let fullText = '';
       // Stateful filter that captures <think>...</think> blocks and
       // routes them via bus.emit('think.token') for the UI, while
       // stripping them from the TTS sentence stream.
@@ -724,7 +736,7 @@ export class Pipeline {
       endedAtMs: Date.now(),
       userText,
       intent: output.intent as Intent,
-      agentText: agentText.trim(),
+      agentText: interrupted && this.keepInterruptedReply ? withUnsaidRest(agentText, fullText) : agentText.trim(),
       tier: 'escalated',
       interrupted,
     };
@@ -1093,4 +1105,17 @@ function appendSilence(pcm: Int16Array, sampleRate: number, ms: number): Int16Ar
   out.set(pcm, 0);
   // trailing samples default to 0 = silence
   return out;
+}
+
+/**
+ * An interrupted reply as history: what was said, then what had been generated but
+ * not said yet, marked so the model knows the user never heard it.
+ */
+export function withUnsaidRest(spoken: string, generated: string): string {
+  const said = spoken.trim();
+  const all = generated.replace(/\s+/g, ' ').trim();
+  const norm = (t: string) => t.replace(/\s+/g, ' ').trim();
+  const rest = norm(said) && all.startsWith(norm(said)) ? all.slice(norm(said).length).trim() : said ? '' : all;
+  const head = said ? `${said} [interrupted here]` : '[interrupted before saying anything]';
+  return rest ? `${head} [not yet said: ${rest}]` : head;
 }
