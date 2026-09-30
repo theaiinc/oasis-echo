@@ -16,7 +16,7 @@ import type { Intent, RouterOutput, Turn } from '@oasis-echo/types';
 import { BargeInArbiter } from './bargein-arbiter.js';
 import { EventBus } from './event-bus.js';
 import type { FillerAdvisor } from './filler-advisor.js';
-import { pickApology, pickContinuationFiller, pickFirstFiller } from './filler.js';
+import { pickApology, pickContinuationFiller, pickFirstFiller, type FillerLanguage } from './filler.js';
 
 const LLM_STALL_TIMEOUT_MS = Number(process.env['OASIS_LLM_STALL_TIMEOUT_MS'] ?? 8_000);
 
@@ -47,6 +47,10 @@ export type PipelineOpts = {
    * instead of starting over. Default false.
    */
   keepInterruptedReply?: boolean;
+  /** At most this many fillers in one turn, then silence until the answer. Default unlimited. */
+  maxFillersPerTurn?: number;
+  /** Language for fillers and apologies, read per turn (e.g. the call's pinned language). Default English. */
+  fillerLanguage?: () => FillerLanguage;
 };
 
 /**
@@ -79,6 +83,10 @@ export class Pipeline {
   private readonly summarizeEveryNTurns: number;
   private readonly apologizeAfterInterruption: boolean;
   private readonly keepInterruptedReply: boolean;
+  private readonly fillerLanguage: () => FillerLanguage;
+  private readonly maxFillersPerTurn: number;
+  /** Total audio sent so far, to pace fillers by how long they play. */
+  private emittedAudioMs = 0;
   private turnCounter = 0;
   /**
    * Rolling set of recently-used filler phrases, scoped to the whole
@@ -123,6 +131,8 @@ export class Pipeline {
     this.summarizeEveryNTurns = opts.summarizeEveryNTurns ?? 5;
     this.apologizeAfterInterruption = opts.apologizeAfterInterruption ?? true;
     this.keepInterruptedReply = opts.keepInterruptedReply ?? false;
+    this.fillerLanguage = opts.fillerLanguage ?? (() => 'en');
+    this.maxFillersPerTurn = opts.maxFillersPerTurn ?? Number.POSITIVE_INFINITY;
   }
 
   /**
@@ -307,20 +317,22 @@ export class Pipeline {
         while (
           sentenceQueue.length === 0 &&
           !drainDone &&
-          !signal.aborted
+          !signal.aborted &&
+          fillersPlayed < this.maxFillersPerTurn
         ) {
           const filler = fillersPlayed === 0
-            ? pickFirstFiller(recentSet)
-            : pickContinuationFiller('thinking', usedFillers, recentSet);
+            ? pickFirstFiller(recentSet, this.fillerLanguage())
+            : pickContinuationFiller('thinking', usedFillers, recentSet, this.fillerLanguage());
           usedFillers.add(filler);
           this.trackRecentFiller(filler);
           const trailingSilenceMs = 300 + fillersPlayed * 250;
-          await this.streamTts(turnId, filler, signal, {
+          const playMs = await this.streamFiller(turnId, filler, signal, {
             filler: true,
             speed: fillerSpeed,
             trailingSilenceMs,
           });
           fillersPlayed++;
+          await this.untilPlayed(playMs, () => sentenceQueue.length > 0 || drainDone || signal.aborted);
         }
       }
 
@@ -430,7 +442,7 @@ export class Pipeline {
     const fillerReason = output.decision.reason;
     const recentSet = new Set(this.recentFillers);
     const fillerText =
-      output.decision.filler ?? pickFirstFiller(recentSet);
+      output.decision.filler ?? pickFirstFiller(recentSet, this.fillerLanguage());
     const usedFillers = new Set<string>();
     let advisedFiller: string | null = null;
     let fillerAdviceInFlight = false;
@@ -642,7 +654,8 @@ export class Pipeline {
       while (
         sentenceQueue.length === 0 &&
         !signal.aborted &&
-        !streamDone
+        !streamDone &&
+        fillersPlayed < this.maxFillersPerTurn
       ) {
         let text = fillerText;
         if (fillersPlayed > 0) {
@@ -652,7 +665,7 @@ export class Pipeline {
             usedFillers.add(text);
             this.trackRecentFiller(text);
           } else {
-            text = pickContinuationFiller(fillerReason, usedFillers, recentSet);
+            text = pickContinuationFiller(fillerReason, usedFillers, recentSet, this.fillerLanguage());
             this.trackRecentFiller(text);
           }
         } else if (text) {
@@ -663,13 +676,14 @@ export class Pipeline {
         // position (later fillers → longer pause) so the pacing feels
         // like someone genuinely hesitating rather than reading a list.
         const trailingSilenceMs = 300 + fillersPlayed * 250;
-        await this.streamTts(turnId, text, signal, {
+        const playMs = await this.streamFiller(turnId, text, signal, {
           filler: true,
           speed: fillerSpeed,
           trailingSilenceMs,
         });
         fillersPlayed++;
         requestFillerAdvice();
+        await this.untilPlayed(playMs, () => sentenceQueue.length > 0 || signal.aborted || streamDone);
       }
 
       // Drain sentences as they arrive. Each synth starts right after
@@ -783,7 +797,7 @@ export class Pipeline {
     if (!this.pendingApology || signal.aborted) return;
     this.pendingApology = false;
     const recent = new Set(this.recentApologies);
-    const apology = pickApology(recent);
+    const apology = pickApology(recent, this.fillerLanguage());
     this.recentApologies.push(apology);
     while (this.recentApologies.length > 4) this.recentApologies.shift();
     await this.streamTts(turnId, apology, signal, {
@@ -791,6 +805,28 @@ export class Pipeline {
       speed: 0.95,
       trailingSilenceMs: 250,
     });
+  }
+
+  /**
+   * A filler, returning how long its audio plays. Synthesis used to pace the filler
+   * loops by accident; with fillers ready ahead of time they'd be sent back to back
+   * as fast as the loop spins, so the loops wait on playback instead.
+   */
+  private async streamFiller(
+    turnId: string,
+    text: string,
+    signal: AbortSignal,
+    opts: { filler?: boolean; speed?: number; trailingSilenceMs?: number },
+  ): Promise<number> {
+    const before = this.emittedAudioMs;
+    await this.streamTts(turnId, text, signal, opts);
+    return this.emittedAudioMs - before;
+  }
+
+  /** Wait until audio of `ms` would have played (a little less, to keep speech continuous), or `done()`. */
+  private async untilPlayed(ms: number, done: () => boolean): Promise<void> {
+    const until = Date.now() + Math.max(0, ms - 150);
+    while (!done() && Date.now() < until) await sleep(20);
   }
 
   private async streamTts(
@@ -812,6 +848,7 @@ export class Pipeline {
         chunk.final && chunk.pcm && opts.trailingSilenceMs
           ? appendSilence(chunk.pcm, chunk.sampleRate, opts.trailingSilenceMs)
           : chunk.pcm;
+      if (pcm && chunk.sampleRate) this.emittedAudioMs += (pcm.length / chunk.sampleRate) * 1000;
       await this.bus.emit({
         type: 'tts.chunk',
         turnId,

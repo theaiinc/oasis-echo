@@ -244,6 +244,33 @@ describe('Pipeline', () => {
     expect(events.map((e) => e.text).join(' ').toLowerCase()).toContain('slow');
   });
 
+  it('paces instant fillers by how long they play, and caps them per turn', async () => {
+    // A voice with fillers ready ahead of time: 400 ms of audio, returned at once.
+    const instant = {
+      async *synthesize(text: string) {
+        yield { text, pcm: new Int16Array(24_000 * 0.4), sampleRate: 24_000, final: true };
+      },
+    };
+    const run = async (maxFillersPerTurn?: number) => {
+      const p = new Pipeline({
+        sessionId: 's',
+        router: escalateComplex,
+        reasoner: new FakeReasoner({ tokens: ['Slow ', 'answer ', 'here.'], delayMs: 700 }),
+        tts: instant,
+        ...(maxFillersPerTurn ? { maxFillersPerTurn } : {}),
+      });
+      let fillers = 0;
+      p.bus.on('tts.chunk', (e) => { if (e.filler) fillers++; });
+      await p.handleTurn('explain slowly');
+      return fillers;
+    };
+    // ~2.1 s of waiting at ~0.25 s+ per filler: a handful, not hundreds.
+    const unpaced = await run();
+    expect(unpaced).toBeGreaterThan(0);
+    expect(unpaced).toBeLessThan(10);
+    expect(await run(2)).toBeLessThanOrEqual(2);
+  });
+
   it('continues fillers until a speakable clause arrives', async () => {
     const slow = new Pipeline({
       sessionId: 's',

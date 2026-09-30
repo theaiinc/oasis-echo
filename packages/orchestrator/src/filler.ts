@@ -25,9 +25,10 @@ const APOLOGIES = [
  * Pick a random apology phrase. Caller can pass a `recent` set to
  * avoid repeating the same line back-to-back.
  */
-export function pickApology(recent?: Set<string>): string {
-  const available = recent ? APOLOGIES.filter((a) => !recent.has(a)) : APOLOGIES;
-  const picked = randomPick(available.length > 0 ? available : APOLOGIES) ?? APOLOGIES[0]!;
+export function pickApology(recent?: Set<string>, lang: FillerLanguage = 'en'): string {
+  const pool = lang === 'vi' ? VI_APOLOGIES : APOLOGIES;
+  const available = recent ? pool.filter((a) => !recent.has(a)) : pool;
+  const picked = randomPick(available.length > 0 ? available : pool) ?? pool[0]!;
   recent?.add(picked);
   return picked;
 }
@@ -114,17 +115,42 @@ const CONTINUATIONS_BY_REASON: Record<string, string[]> = {
     'Bear with me.',
   ],
 };
+/** Vietnamese counterparts, for calls held in Vietnamese. Polite, neutral register. */
+const VI_APOLOGIES = [
+  'Xin lỗi, bạn cứ nói tiếp.',
+  'Ồ, xin lỗi, mình nghe đây.',
+  'Xin lỗi, mời bạn nói tiếp.',
+];
+const VI_FIRST_BEATS = [
+  'Ừm, để mình xem.',
+  'Đợi mình một chút nhé.',
+  'Ừ, chờ mình chút.',
+  'Để mình nghĩ đã.',
+  'Câu hỏi hay, chờ mình chút.',
+];
+const VI_CONTINUATIONS = [
+  'Mình đang xem.',
+  'Sắp xong rồi.',
+  'Chờ mình thêm chút nhé.',
+  'Để mình kiểm tra.',
+  'Ừm.',
+];
+
+/** A filler language this module has phrases for; anything else falls back to English. */
+export type FillerLanguage = 'en' | 'vi';
+
 /**
  * Pick a random short "first-beat" filler that hasn't been used
  * recently (per the caller-provided `recent` set, which the caller
  * typically threads across turns so we don't repeat yesterday's word
  * as today's opener).
  */
-export function pickFirstFiller(recent?: Set<string>): string {
+export function pickFirstFiller(recent?: Set<string>, lang: FillerLanguage = 'en'): string {
+  const beats = lang === 'vi' ? VI_FIRST_BEATS : FIRST_BEATS;
   const available = recent
-    ? FIRST_BEATS.filter((f) => !recent.has(f))
-    : FIRST_BEATS;
-  const picked = randomPick(available.length > 0 ? available : FIRST_BEATS) ?? FALLBACK;
+    ? beats.filter((f) => !recent.has(f))
+    : beats;
+  const picked = randomPick(available.length > 0 ? available : beats) ?? FALLBACK;
   recent?.add(picked);
   return picked;
 }
@@ -139,8 +165,9 @@ export function pickContinuationFiller(
   reason: string,
   used: Set<string>,
   recent?: Set<string>,
+  lang: FillerLanguage = 'en',
 ): string {
-  const pool = CONTINUATIONS_BY_REASON[reason] ?? CONTINUATIONS_BY_REASON['unclassified'] ?? [FALLBACK];
+  const pool = lang === 'vi' ? VI_CONTINUATIONS : CONTINUATIONS_BY_REASON[reason] ?? CONTINUATIONS_BY_REASON['unclassified'] ?? [FALLBACK];
   // Prefer phrases we haven't used this turn OR recently across turns.
   const fresh = pool.filter((p) => !used.has(p) && !(recent?.has(p) ?? false));
   const unused = pool.filter((p) => !used.has(p));
@@ -153,6 +180,7 @@ export function pickContinuationFiller(
 }
 
 /** Every fixed phrase the pipeline may speak on its own (apologies and fillers), so a voice can prepare them ahead of time. */
-export function allFillerPhrases(): string[] {
+export function allFillerPhrases(lang: FillerLanguage = 'en'): string[] {
+  if (lang === 'vi') return [...new Set([...VI_APOLOGIES, ...VI_FIRST_BEATS, ...VI_CONTINUATIONS])];
   return [...new Set([...APOLOGIES, ...FIRST_BEATS, ...Object.values(CONTINUATIONS_BY_REASON).flat(), FALLBACK])];
 }
