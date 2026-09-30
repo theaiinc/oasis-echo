@@ -151,3 +151,8 @@ export function pickContinuationFiller(
   recent?.add(a);
   return a;
 }
+
+/** Every fixed phrase the pipeline may speak on its own (apologies and fillers), so a voice can prepare them ahead of time. */
+export function allFillerPhrases(): string[] {
+  return [...new Set([...APOLOGIES, ...FIRST_BEATS, ...Object.values(CONTINUATIONS_BY_REASON).flat(), FALLBACK])];
+}

@@ -49,6 +49,8 @@ export type DeskEvents = {
   answered: (job: ExpertJob) => void;
   /** Taking longer than expected: say so (at most twice per job). */
   late: (job: ExpertJob, overMs: number) => void;
+  /** Before it is due: a short "still working" note, so the call isn't silent while waiting. */
+  progress?: (job: ExpertJob, n: number) => void;
 };
 
 export class ExpertDesk {
@@ -79,6 +81,16 @@ export class ExpertDesk {
         this.events.late(job, this.now() - job.startedAt - this.estimate.typicalMs());
       }, this.estimate.typicalMs() * (n === 1 ? 1.15 : 2)),
     );
+    const typical = this.estimate.typicalMs();
+    if (this.events.progress) {
+      [0.3, 0.65].forEach((at, i) => {
+        const delay = Math.max(12_000, typical * at);
+        if (delay >= typical) return;
+        lateTimers.push(setTimeout(() => {
+          if (job.status === 'running') this.events.progress?.(job, i + 1);
+        }, delay));
+      });
+    }
     lateTimers.forEach((t) => (t as { unref?: () => void }).unref?.());
     void this.ask(q, abort.signal).then(
       (answer) => {
@@ -132,6 +144,18 @@ function same(a: string, b: string): boolean {
 function clip(text: string, max: number): string {
   const t = text.replace(/\s+/g, ' ').trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/** A "still working" note before the answer is due, spoken without a model call. */
+export function progressNote(expert: string, n: number): string {
+  return n <= 1
+    ? `I'm still with ${expert} on that. It's coming together.`
+    : `${expert} is still pulling it together. Anything else while we wait?`;
+}
+
+/** Every fixed line the desk may speak for this expert, so the voice can prepare them. */
+export function deskPhrases(expert: string): string[] {
+  return [progressNote(expert, 1), progressNote(expert, 2), lateNote(expert, 0, 0), lateNote(expert, 30_000, 0), lateNote(expert, 0, 2)];
 }
 
 /** A progress note for a late job, spoken without a model call. */

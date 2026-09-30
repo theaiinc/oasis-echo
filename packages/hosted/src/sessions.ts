@@ -4,7 +4,8 @@ import { Pipeline } from '@oasis-echo/orchestrator';
 import { ToolRegistry, ToolTalker, type Reasoner } from '@oasis-echo/reasoning';
 import type { Logger } from '@oasis-echo/telemetry';
 import { makeExpert, talkerFor, type AgentConfig, type EchoUser } from './agents.js';
-import { ExpertDesk, LatencyEstimate, lateNote, type ExpertJob } from './experts.js';
+import { ExpertDesk, LatencyEstimate, lateNote, progressNote, type ExpertJob } from './experts.js';
+import { KeptFacts, WorkingNotes, userKey, type FactStore } from './memory.js';
 
 /**
  * One live call per (user, agent), made on first use and dropped when idle.
@@ -19,19 +20,27 @@ export class Live {
   lastUsed = Date.now();
   private busy = 0;
   private readonly queue: string[] = [];
+  /** Short-lived notes for the talker (e.g. a reply the user cut off); they fade when unused. */
+  readonly notes = new WorkingNotes();
+  /** What this user explicitly asked to be remembered, kept across calls. */
+  readonly facts: KeptFacts;
+  /** When the line last went quiet (a turn or announcement ended). */
+  private quietSince = Date.now();
 
   constructor(
     readonly agent: AgentConfig,
     readonly user: EchoUser,
-    deps: { env: NodeJS.ProcessEnv; tts: StreamingTts | null; latency: (agentId: string) => LatencyEstimate; logger?: Logger },
+    deps: { env: NodeJS.ProcessEnv; tts: StreamingTts | null; latency: (agentId: string) => LatencyEstimate; logger?: Logger; facts?: FactStore | null },
   ) {
     const { env, logger } = deps;
+    this.facts = new KeptFacts(deps.facts ?? null, userKey(user.sub), logger);
     const talker = talkerFor(agent, env);
     const expert = agent.expert ? makeExpert(agent.expert, user, env, logger) : null;
     this.desk = talker && expert && agent.expert
       ? new ExpertDesk(agent.expert.name, (q, signal) => expert.ask(q, signal), deps.latency(agent.id), {
           answered: (job) => void this.onAnswer(job, talker),
           late: (job, over) => this.say(lateNote(agent.expert!.name, over, job.updates)),
+          progress: (_job, n) => this.sayIfQuiet(progressNote(agent.expert!.name, n)),
         })
       : null;
 
@@ -57,6 +66,26 @@ export class Live {
           },
         });
       }
+      tools.register<{ fact?: string }, unknown>({
+        name: 'remember',
+        description: 'Save a fact the user asked you to remember (in any language: "remember", "keep in mind", "nhớ giúp tôi", "don\'t make me repeat"). Kept across calls. Required whenever the user asks you to remember something; only then.',
+        input_schema: {
+          type: 'object',
+          properties: { fact: { type: 'string', description: 'The fact, written as a short standalone statement about the user.' } },
+          required: ['fact'],
+        },
+        handler: async ({ fact }) => (fact?.trim() ? this.facts.remember(fact) : { error: 'fact is required' }),
+      });
+      tools.register<{ about?: string }, unknown>({
+        name: 'forget',
+        description: 'Drop kept facts. Only when the user explicitly asks you to forget something; "everything" drops all of them.',
+        input_schema: {
+          type: 'object',
+          properties: { about: { type: 'string', description: 'Words from the fact to drop, or "everything".' } },
+          required: ['about'],
+        },
+        handler: async ({ about }) => (about?.trim() ? this.facts.forget(about) : { error: 'about is required' }),
+      });
       reasoner = new ToolTalker({
         apiKey: talker.apiKey,
         baseUrl: talker.baseUrl,
@@ -64,7 +93,9 @@ export class Live {
         ...(talker.fallbackModel ? { fallbackModel: talker.fallbackModel } : {}),
         systemPrompt: talkerPrompt(agent, user, talker.persona),
         tools,
-        context: () => this.desk?.contextNote(),
+        context: () => this.context(),
+        // What matters comes from the notes above; a few turns are enough for the flow of talk.
+        historyTurns: 3,
         ...(logger ? { logger } : {}),
       });
     } else if (expert) {
@@ -78,7 +109,17 @@ export class Live {
       router: alwaysEscalate,
       reasoner,
       tts: deps.tts ?? new PassthroughTts(),
+      // A voice call: no "sorry, go ahead" before answering an interruption, and keep
+      // what was cut off so a follow-up can pick it up instead of starting over.
+      apologizeAfterInterruption: false,
+      keepInterruptedReply: true,
       ...(logger ? { logger } : {}),
+    });
+    this.pipeline.bus.on('turn.complete', ({ turn }) => {
+      const said = turn.agentText ?? '';
+      if (turn.interrupted && said.includes('[not yet said:')) {
+        this.notes.put('interrupted', `Your last reply was cut off by the user: ${said.slice(0, 800)} If they come back to it, answer from this instead of starting over.`);
+      }
     });
     // One line per turn with how long each stage took, so a slow reply shows where the time went.
     const timings = new Map<string, string[]>();
@@ -105,6 +146,7 @@ export class Live {
       await this.pipeline.handleTurn(text);
     } finally {
       this.busy--;
+      this.quietSince = Date.now();
       void this.drain();
     }
   }
@@ -112,6 +154,24 @@ export class Live {
   send(type: string, payload: unknown): void {
     const frame = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
     for (const res of this.clients) res.write(frame);
+  }
+
+  /** What the talker is told each turn in place of a long history: kept facts, fresh notes, background work. */
+  private context(): string | undefined {
+    const parts: string[] = [];
+    const facts = this.facts.list();
+    if (facts.length) parts.push(`What the user asked you to remember:\n${facts.map((f) => `- ${f}`).join('\n')}`);
+    const notes = this.notes.read();
+    if (notes.length) parts.push(`Notes from this call:\n${notes.map((n) => `- ${n}`).join('\n')}`);
+    const desk = this.desk?.contextNote();
+    if (desk) parts.push(desk);
+    return parts.length ? parts.join('\n\n') : undefined;
+  }
+
+  /** Say this only if nothing is playing or queued and it has been quiet for a moment; otherwise skip it. */
+  sayIfQuiet(text: string, quietMs = 6_000): void {
+    if (this.busy > 0 || this.queue.length || Date.now() - this.quietSince < quietMs) return;
+    this.say(text);
   }
 
   /** Say this when the line is free (after the current turn). */
@@ -128,6 +188,7 @@ export class Live {
         await this.pipeline.announce(text);
       } finally {
         this.busy--;
+        this.quietSince = Date.now();
       }
     }
   }
@@ -173,6 +234,9 @@ function talkerPrompt(agent: AgentConfig, user: EchoUser, persona?: string): str
     persona ?? `You are ${agent.name}'s voice on a live call with ${user.email} (${agent.project}).`,
     'This is speech: answer in one to three short, natural sentences. No markdown, lists, or links. Answer first; ask back only when you truly need to.',
     'Answer yourself whatever you can: conversation, general knowledge, planning, helping the user think.',
+    'Language: reply in the language the user is speaking. Once the call has a language, stay in it for every reply, even when names or terms are in another language; switch only when the user explicitly asks you to.',
+    'Memory: you get only the last few turns, plus notes. Rely on the notes.',
+    'When the user asks you to remember something, keep it in mind, or not make them repeat it (in any language, e.g. "nhớ giúp tôi", "remember that"), you must call remember with that fact before you reply; never say you will remember without calling it. Call forget when they ask you to forget. Never store anything they did not ask you to keep.',
     ...(expert ? [
       `${expert.name} is ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Only ${expert.name} knows their projects, boards, decisions and status: never guess those.`,
       `When a question needs ${expert.name}, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long ${expert.name} usually takes.`,
@@ -206,7 +270,7 @@ export class Sessions {
   private readonly sweeper: ReturnType<typeof setInterval>;
 
   constructor(
-    private readonly deps: { env: NodeJS.ProcessEnv; tts: StreamingTts | null; logger?: Logger },
+    private readonly deps: { env: NodeJS.ProcessEnv; tts: StreamingTts | null; logger?: Logger; facts?: FactStore | null },
     private readonly idleMs = 30 * 60_000,
   ) {
     this.sweeper = setInterval(() => this.sweep(), 60_000);

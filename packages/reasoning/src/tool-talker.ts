@@ -29,6 +29,8 @@ export type ToolTalkerOptions = {
   systemPrompt: string;
   tools?: ToolRegistry;
   context?: () => string | undefined;
+  /** How many recent turns of chat history to send (default 8). Fewer saves tokens when `context` carries what matters. */
+  historyTurns?: number;
   maxToolRounds?: number;
   timeoutMs?: number;
   temperature?: number;
@@ -199,7 +201,7 @@ export class ToolTalker implements Reasoner {
     const context = this.opts.context?.();
     if (context) msgs.push({ role: 'system', content: context });
     if (state.summary) msgs.push({ role: 'system', content: `Conversation so far:\n${state.summary}` });
-    for (const turn of state.turns.slice(-8)) {
+    for (const turn of state.turns.slice(-(this.opts.historyTurns ?? 8))) {
       if (turn.userText) msgs.push({ role: 'user', content: turn.userText });
       if (turn.agentText) msgs.push({ role: 'assistant', content: turn.agentText });
     }

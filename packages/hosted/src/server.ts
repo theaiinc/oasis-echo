@@ -28,6 +28,9 @@ import { canUse, loadAgents, talkerFor, type AgentConfig, type EchoUser } from '
 import { AegisAuth, cookie } from './auth.js';
 import { Sessions } from './sessions.js';
 import { SharedEars, SharedVoice } from './voice.js';
+import { allFillerPhrases } from '@oasis-echo/orchestrator';
+import { deskPhrases } from './experts.js';
+import { DirFactStore, GcsFactStore } from './memory.js';
 
 const env = process.env;
 const logger = createLogger({ level: (env['OASIS_LOG_LEVEL'] as 'info') ?? 'info', bindings: { service: 'echo-hosted' } });
@@ -54,7 +57,9 @@ const processHandlers = {
   uncaughtException: process.listeners('uncaughtException'),
   unhandledRejection: process.listeners('unhandledRejection'),
 };
-const voice = env['ECHO_TTS'] === 'browser' ? null : new SharedVoice({ logger });
+const voice = env['ECHO_TTS'] === 'browser'
+  ? null
+  : new SharedVoice({ logger, phrases: [...allFillerPhrases(), ...agents.flatMap((a) => (a.expert ? deskPhrases(a.expert.name) : []))] });
 void voice?.ready.then(() => {
   for (const listener of process.listeners('uncaughtException')) {
     if (!processHandlers.uncaughtException.includes(listener)) process.removeListener('uncaughtException', listener);
@@ -64,7 +69,10 @@ void voice?.ready.then(() => {
   }
 });
 const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger) : null;
-const sessions = new Sessions({ env, tts: voice, logger });
+// Facts users ask to keep: Cloud Storage in production, a directory in development, or none (kept for the call only).
+const factStore = env['ECHO_MEMORY_BUCKET'] ? new GcsFactStore(env['ECHO_MEMORY_BUCKET'])
+  : env['ECHO_MEMORY_DIR'] ? new DirFactStore(env['ECHO_MEMORY_DIR']) : null;
+const sessions = new Sessions({ env, tts: voice, logger, facts: factStore });
 const page = readFileSync(join(here, '..', 'src', 'talk.html'), 'utf8');
 
 function required(name: string): string {
