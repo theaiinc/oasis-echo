@@ -29,6 +29,8 @@ export type ToolTalkerOptions = {
   systemPrompt: string;
   tools?: ToolRegistry;
   context?: () => string | undefined;
+  /** A short note added after the user's latest words (e.g. the reply language), where the model weighs it most. */
+  turnNote?: () => string | undefined;
   /** How many recent turns of chat history to send (default 8). Fewer saves tokens when `context` carries what matters. */
   historyTurns?: number;
   maxToolRounds?: number;
@@ -62,7 +64,11 @@ export class ToolTalker implements Reasoner {
     let inputTokens = 0;
     let outputTokens = 0;
     let retriedEmpty = false;
+    const userAt = messages.length - 1;
     for (let round = 0; ; round++) {
+      // Re-read every round: a tool (e.g. set_language) may have just changed it.
+      const note = this.opts.turnNote?.();
+      messages[userAt] = { role: 'user', content: note ? `${input.userText}\n\n[${note}]` : input.userText };
       const canCall = toolSpecs.length > 0 && round < (this.opts.maxToolRounds ?? 3);
       const body = {
         messages,
