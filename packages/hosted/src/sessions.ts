@@ -6,6 +6,8 @@ import type { Logger } from '@oasis-echo/telemetry';
 import { makeExpert, talkerFor, type AgentConfig, type EchoUser } from './agents.js';
 import { ExpertDesk, LatencyEstimate, lateNote, progressNote, type ExpertJob } from './experts.js';
 import { KeptFacts, WorkingNotes, userKey, type FactStore } from './memory.js';
+import { isVietnamese } from './vieneu.js';
+import { SharedVoice } from './voice.js';
 
 /**
  * One live call per (user, agent), made on first use and dropped when idle.
@@ -27,6 +29,8 @@ export class Live {
   /** The reply language, pinned: set by the user's explicit request, else the language of their first words. */
   private language: string | null = null;
   private firstWords: string | null = null;
+  /** The page's language setting (e.g. "vi-VN"), before the user has said anything. */
+  pageLanguage: string | null = null;
   /** When the line last went quiet (a turn or announcement ended). */
   private quietSince = Date.now();
 
@@ -42,8 +46,8 @@ export class Live {
     this.desk = talker && expert && agent.expert
       ? new ExpertDesk(agent.expert.name, (q, signal) => expert.ask(q, signal), deps.latency(agent.id), {
           answered: (job) => void this.onAnswer(job, talker),
-          late: (job, over) => this.say(lateNote(agent.expert!.name, over, job.updates)),
-          progress: (_job, n) => this.sayIfQuiet(progressNote(agent.expert!.name, n)),
+          late: (job, over) => this.say(lateNote(agent.expert!.name, over, job.updates, this.callLanguage())),
+          progress: (_job, n) => this.sayIfQuiet(progressNote(agent.expert!.name, n, this.callLanguage())),
         })
       : null;
 
@@ -126,11 +130,13 @@ export class Live {
       sessionId: `${agent.id}:${user.sub}`,
       router: alwaysEscalate,
       reasoner,
-      tts: deps.tts ?? new PassthroughTts(),
+      tts: deps.tts ? (deps.tts instanceof SharedVoice ? deps.tts.forCall(() => this.callLanguage()) : deps.tts) : new PassthroughTts(),
       // A voice call: no "sorry, go ahead" before answering an interruption, and keep
       // what was cut off so a follow-up can pick it up instead of starting over.
       apologizeAfterInterruption: false,
       keepInterruptedReply: true,
+      fillerLanguage: () => this.callLanguage(),
+      maxFillersPerTurn: 3,
       ...(logger ? { logger } : {}),
     });
     this.pipeline.bus.on('turn.complete', ({ turn }) => {
@@ -175,9 +181,20 @@ export class Live {
     for (const res of this.clients) res.write(frame);
   }
 
+  /**
+   * The call's language as far as speech is concerned (fillers, backchannels, which
+   * listener): the user's explicit choice, else the page's setting, else their first words.
+   */
+  callLanguage(): 'en' | 'vi' {
+    if (this.language) return /viet|việt/i.test(this.language) ? 'vi' : 'en';
+    if (this.pageLanguage) return this.pageLanguage.toLowerCase().startsWith('vi') ? 'vi' : 'en';
+    return this.firstWords && isVietnamese(this.firstWords) ? 'vi' : 'en';
+  }
+
   /** The reply-language pin, sent right after the user's words each turn. */
   private languageNote(): string | undefined {
     const current = this.language ?? (this.firstWords ? `the language of the user's first words in this call ("${this.firstWords}")` : null);
+    // (Page setting only picks the listener and fillers; the reply follows what the user actually says.)
     if (!current) return undefined;
     return `If this message asks you to reply in a different language, call set_language with the language they name, then reply in it. Otherwise reply in ${current}, whatever language this message is in.`;
   }

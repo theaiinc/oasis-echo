@@ -28,10 +28,13 @@ import { createLogger } from '@oasis-echo/telemetry';
 import { canUse, loadAgents, talkerFor, type AgentConfig, type EchoUser } from './agents.js';
 import { AegisAuth, cookie } from './auth.js';
 import { Sessions } from './sessions.js';
-import { SharedEars, SharedVoice } from './voice.js';
+import { BACKCHANNELS_VI, SharedEars, SharedVoice } from './voice.js';
 import { allFillerPhrases } from '@oasis-echo/orchestrator';
 import { deskPhrases } from './experts.js';
 import { DirFactStore, GcsFactStore } from './memory.js';
+import { isVietnamese, VieneuTts } from './vieneu.js';
+import type { Live } from './sessions.js';
+import type { WhisperStreamingStt } from '@oasis-echo/coordinator';
 
 const env = process.env;
 const logger = createLogger({ level: (env['OASIS_LOG_LEVEL'] as 'info') ?? 'info', bindings: { service: 'echo-hosted' } });
@@ -58,11 +61,20 @@ const processHandlers = {
   uncaughtException: process.listeners('uncaughtException'),
   unhandledRejection: process.listeners('unhandledRejection'),
 };
+// Vietnamese speech: VieNeu-TTS through a Python bridge, when ECHO_VIENEU_PYTHON names the interpreter it's installed in.
+const vieneu = env['ECHO_TTS'] !== 'browser' && env['ECHO_VIENEU_PYTHON']
+  ? new VieneuTts({ python: env['ECHO_VIENEU_PYTHON'], script: join(here, '..', 'src', 'vieneu-bridge.py'), logger })
+  : null;
 const voice = env['ECHO_TTS'] === 'browser'
   ? null
   : new SharedVoice({
       logger,
-      phrases: [...allFillerPhrases(), ...agents.flatMap((a) => (a.expert ? deskPhrases(a.expert.name) : []))],
+      vi: vieneu,
+      phrases: [
+        ...allFillerPhrases(),
+        ...(vieneu ? [...allFillerPhrases('vi'), ...BACKCHANNELS_VI] : []),
+        ...agents.flatMap((a) => (a.expert ? deskPhrases(a.expert.name).filter((p) => vieneu || !isVietnamese(p)) : [])),
+      ],
       // Written at image build by dist/bake.js (Dockerfile.hosted).
       bakedFile: env['ECHO_PHRASES_FILE'] ?? fileURLToPath(new URL('../phrases.json', import.meta.url)),
     });
@@ -74,14 +86,20 @@ void voice?.ready.then(() => {
     if (!processHandlers.unhandledRejection.includes(listener)) process.removeListener('unhandledRejection', listener);
   }
 });
-const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger) : null;
+const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger, undefined, env['ECHO_STT_VI_MODEL'] || null) : null;
 // Warm up at start, not on the first call: speaking first, then listening, so a call
 // only starts (the page waits on /api/ready) once both are there.
-const warm = { voice: !voice, ears: !ears };
+const warm = { voice: !voice, ears: !ears, vi: !vieneu };
+void vieneu?.ready.then((ok) => { warm.vi = ok; });
 void (voice?.ready ?? Promise.resolve()).then(() => {
   warm.voice = true;
   return ears?.newListener().preload();
-}).then(() => { warm.ears = true; logger.info('warm', { ms: Math.round(process.uptime() * 1000) }); });
+}).then(async () => {
+  if (ears?.hasVietnamese) await ears.newListener('vi').preload();
+  warm.ears = true;
+  logger.info('warm', { ms: Math.round(process.uptime() * 1000) });
+  if (vieneu) logger.info('vieneu warm', { ok: await vieneu.ready, ms: Math.round(process.uptime() * 1000) });
+});
 // Facts users ask to keep: Cloud Storage in production, a directory in development, or none (kept for the call only).
 const factStore = env['ECHO_MEMORY_BUCKET'] ? new GcsFactStore(env['ECHO_MEMORY_BUCKET'])
   : env['ECHO_MEMORY_DIR'] ? new DirFactStore(env['ECHO_MEMORY_DIR']) : null;
@@ -174,11 +192,16 @@ const server = createServer(async (req, res) => {
     }
     if (!user) return json(res, 401, { error: 'sign_in' });
 
-    if (url.pathname === '/api/ready') return json(res, 200, { ready: warm.voice && warm.ears, ...warm });
+    if (url.pathname === '/api/ready') {
+      // A Vietnamese call also waits for VieNeu; an English one doesn't.
+      const vi = (url.searchParams.get('lang') ?? '').toLowerCase().startsWith('vi');
+      return json(res, 200, { ready: warm.voice && warm.ears && (!vi || warm.vi), ...warm });
+    }
     if (url.pathname === '/api/me') {
       return json(res, 200, {
         email: user.email,
         serverStt: !!ears,
+        serverSttLanguages: ears ? (ears.hasVietnamese ? ['en-US', 'vi-VN'] : ['en-US']) : [],
         serverVoice: !!voice,
         agents: agents.filter((a) => canUse(a, user.email)).map((a) => ({
           id: a.id, name: a.name, project: a.project, expert: a.expert?.name ?? null, live: !!talkerFor(a, env),
@@ -186,7 +209,7 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    const m = /^\/a\/([a-z0-9-]+)\/(events|turn|bargein|backchannel)$/.exec(url.pathname);
+    const m = /^\/a\/([a-z0-9-]+)\/(events|turn|bargein|backchannel|lang)$/.exec(url.pathname);
     if (!m) return json(res, 404, { error: 'not_found' });
     const agent = agentFor(user, m[1]);
     if (!agent) return json(res, 404, { error: 'no_such_agent' });
@@ -205,7 +228,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (route === 'backchannel' && req.method === 'GET') {
-      const clip = voice?.backchannel();
+      const clip = voice?.backchannel(sessions.get(agent, user).callLanguage());
       return clip ? json(res, 200, { ready: true, ...clip }) : json(res, 503, { ready: false });
     }
     if (req.method !== 'POST' || !sameOrigin(req)) return json(res, 403, { error: 'forbidden' });
@@ -219,6 +242,10 @@ const server = createServer(async (req, res) => {
       if (!text) return json(res, 400, { error: 'empty' });
       void live.turn(text).catch((err) => logger.warn('turn failed', { agent: agent.id, error: String(err) }));
       return json(res, 202, { accepted: true });
+    }
+    if (route === 'lang') {
+      live.pageLanguage = typeof input['lang'] === 'string' ? input['lang'].slice(0, 20) : null;
+      return json(res, 200, { lang: live.callLanguage() });
     }
     if (route === 'bargein') {
       return json(res, 200, { interrupted: await live.pipeline.bargeIn() });
@@ -243,11 +270,19 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => listen(ws));
+  wss.handleUpgrade(req, socket, head, (ws) => listen(ws, sessions.get(agent, user!)));
 });
 
-function listen(ws: WebSocket): void {
-  const stt = ears!.newListener();
+function listen(ws: WebSocket, live: Live): void {
+  // A listener per language, picked at the start of each utterance from the call's language.
+  const listeners = new Map<'en' | 'vi', WhisperStreamingStt>();
+  const listenerFor = (lang: 'en' | 'vi') => {
+    const key = lang === 'vi' && ears!.hasVietnamese ? 'vi' : 'en';
+    let l = listeners.get(key);
+    if (!l) listeners.set(key, (l = ears!.newListener(key)));
+    return l;
+  };
+  let stt = listenerFor(live.callLanguage());
   let utteranceId: string | null = null;
   const send = (payload: Record<string, unknown>) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload)); };
   void stt.preload().then(() => send({ type: 'ready' }));
@@ -271,6 +306,7 @@ function listen(ws: WebSocket): void {
     let msg: { type?: string; speculationId?: string; utteranceId?: string };
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === 'start') {
+      stt = listenerFor(live.callLanguage());
       stt.reset();
       utteranceId = msg.utteranceId ?? `u${Date.now().toString(36)}`;
       // The page only shows "listening…" for a partial, so say so once instead of

@@ -2,6 +2,7 @@ import { KokoroTts, WhisperStreamingStt, type StreamingTts, type TtsChunk } from
 import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import type { Logger } from '@oasis-echo/telemetry';
+import { isVietnamese, type VieneuTts } from './vieneu.js';
 
 /**
  * The server's voice, shared by every call: one Kokoro model (speaking) and
@@ -11,18 +12,21 @@ import type { Logger } from '@oasis-echo/telemetry';
 
 /** Short "mm-hmm" clips the page may play while the user is still talking. */
 export const BACKCHANNELS = ['uh huh', 'yeah', 'right', 'I see', 'got it', 'okay', 'mm hmm'];
+export const BACKCHANNELS_VI = ['ừ', 'vâng', 'dạ', 'ừm', 'đúng rồi'];
 
 /** Phrases synthesized ahead of time (at image build), as stored on disk. */
 type BakedFile = { voice: string; phrases: Record<string, Array<{ text: string; sampleRate: number; final: boolean; pcm?: string }>> };
 
 /** Synthesize `phrases` with `voice` and write them where SharedVoice can load them. */
-export async function bakePhrases(file: string, phrases: string[], voice = 'af_heart'): Promise<number> {
+export async function bakePhrases(file: string, phrases: string[], voice = 'af_heart', vi?: StreamingTts): Promise<number> {
   const kokoro = new KokoroTts({ voice, dtype: 'q8' });
   await kokoro.warm();
   const out: BakedFile = { voice, phrases: {} };
   for (const phrase of new Set(phrases.map((p) => p.trim()).filter(Boolean))) {
+    const engine: StreamingTts = vi && isVietnamese(phrase) ? vi : kokoro;
+    if (engine === kokoro && isVietnamese(phrase)) continue;
     const chunks: BakedFile['phrases'][string] = [];
-    for await (const c of kokoro.synthesize(phrase)) {
+    for await (const c of engine.synthesize(phrase)) {
       chunks.push({ text: c.text, sampleRate: c.sampleRate, final: c.final, ...(c.pcm ? { pcm: Buffer.from(c.pcm.buffer, c.pcm.byteOffset, c.pcm.byteLength).toString('base64') } : {}) });
     }
     out.phrases[phrase] = chunks;
@@ -42,8 +46,13 @@ export class SharedVoice implements StreamingTts {
   /** Fixed lines (fillers, apologies, backchannels, progress notes) ready to play at once instead of after seconds of synthesis. */
   private readonly phrases = new Map<string, TtsChunk[]>();
 
-  constructor(opts: { voice?: string; concurrent?: number; logger?: Logger; phrases?: string[]; bakedFile?: string } = {}) {
+  /** Vietnamese speech (VieNeu), when available; everything else is Kokoro. */
+  private readonly vi: VieneuTts | null;
+  private readonly clipsVi = new Map<string, { audio: string; sampleRate: number }>();
+
+  constructor(opts: { voice?: string; concurrent?: number; logger?: Logger; phrases?: string[]; bakedFile?: string; vi?: VieneuTts | null } = {}) {
     const voice = opts.voice ?? 'af_heart';
+    this.vi = opts.vi ?? null;
     this.kokoro = new KokoroTts({ voice, dtype: 'q8', ...(opts.logger ? { logger: opts.logger } : {}) });
     this.concurrent = opts.concurrent ?? 2;
     // Baked phrases load in well under a second; only what they lack is synthesized, in the background.
@@ -56,6 +65,7 @@ export class SharedVoice implements StreamingTts {
       let made = 0;
       for (const phrase of new Set(opts.phrases ?? [])) {
         if (this.phrases.has(phrase.trim())) continue;
+        if (isVietnamese(phrase) && !(this.vi && (await this.vi.ready))) continue;
         try {
           await this.phrase(phrase);
           made++;
@@ -93,12 +103,22 @@ export class SharedVoice implements StreamingTts {
     const have = this.phrases.get(key);
     if (have) return have;
     const chunks: TtsChunk[] = [];
-    for await (const chunk of this.kokoro.synthesize(key)) chunks.push(chunk);
+    for await (const chunk of this.engineFor(key).synthesize(key)) chunks.push(chunk);
     this.phrases.set(key, chunks);
     return chunks;
   }
 
-  async *synthesize(text: string, opts: { signal?: AbortSignal; voice?: string; speed?: number } = {}): AsyncIterable<TtsChunk> {
+  /** VieNeu for a Vietnamese call (it handles English words inside Vietnamese too), or for Vietnamese text anywhere. */
+  private engineFor(text: string, lang?: 'en' | 'vi'): StreamingTts {
+    return this.vi && (lang === 'vi' || isVietnamese(text)) ? this.vi : this.kokoro;
+  }
+
+  /** This voice as one call hears it: routed by that call's language. */
+  forCall(lang: () => 'en' | 'vi'): StreamingTts {
+    return { synthesize: (text, opts) => this.synthesize(text, { ...opts, lang: lang() }) };
+  }
+
+  async *synthesize(text: string, opts: { signal?: AbortSignal; voice?: string; speed?: number; lang?: 'en' | 'vi' } = {}): AsyncIterable<TtsChunk> {
     const ready = this.phrases.get(text.trim());
     if (ready) {
       yield* ready;
@@ -106,29 +126,40 @@ export class SharedVoice implements StreamingTts {
     }
     await this.acquire();
     try {
-      yield* this.kokoro.synthesize(text, opts);
+      const { lang, ...rest } = opts;
+      yield* this.engineFor(text, lang).synthesize(text, rest);
     } finally {
       this.release();
     }
   }
 
   /** A short "mm-hmm" style clip, for the page to play while you are still talking. */
-  backchannel(): { text: string; audio: string; sampleRate: number } | null {
-    const phrases = [...this.clips.keys()];
+  backchannel(lang: 'en' | 'vi' = 'en'): { text: string; audio: string; sampleRate: number } | null {
+    const clips = lang === 'vi' && this.clipsVi.size ? this.clipsVi : this.clips;
+    const phrases = [...clips.keys()];
     if (!phrases.length) return null;
     const text = phrases[Math.floor(Math.random() * phrases.length)]!;
-    return { text, ...this.clips.get(text)! };
+    return { text, ...clips.get(text)! };
   }
 
   private async primeBackchannels(): Promise<void> {
-    for (const phrase of BACKCHANNELS) {
+    await this.primeClips(BACKCHANNELS, this.clips);
+    // Vietnamese ones only when VieNeu is up (or baked); never block English on it.
+    void (async () => {
+      const baked = BACKCHANNELS_VI.every((p) => this.phrases.has(p));
+      if (baked || (this.vi && (await this.vi.ready))) await this.primeClips(BACKCHANNELS_VI, this.clipsVi);
+    })().catch(() => undefined);
+  }
+
+  private async primeClips(list: string[], into: Map<string, { audio: string; sampleRate: number }>): Promise<void> {
+    for (const phrase of list) {
       const parts = (await this.phrase(phrase)).filter((c) => c.pcm).map((c) => c.pcm!);
       if (!parts.length) continue;
       const sampleRate = (await this.phrase(phrase)).find((c) => c.pcm)!.sampleRate;
       const pcm = new Int16Array(parts.reduce((n, p) => n + p.length, 0));
       let at = 0;
       for (const p of parts) { pcm.set(p, at); at += p.length; }
-      this.clips.set(phrase, { audio: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'), sampleRate });
+      into.set(phrase, { audio: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'), sampleRate });
     }
   }
 
@@ -146,20 +177,38 @@ export class SharedVoice implements StreamingTts {
   }
 }
 
-/** Whisper loaded once; `newListener()` gives a call its own buffer on it. */
+/**
+ * Listening models, each loaded once and shared; `newListener(lang)` gives a call
+ * its own buffer on the model for that language: English Whisper, or PhoWhisper
+ * (VinAI, fine-tuned on Vietnamese) for Vietnamese calls when configured.
+ */
 export class SharedEars {
-  private model: Promise<unknown> | null = null;
+  private readonly models = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly logger?: Logger, private readonly modelId = 'Xenova/whisper-base.en') {}
+  constructor(
+    private readonly logger?: Logger,
+    private readonly modelId = 'Xenova/whisper-base.en',
+    private readonly viModelId: string | null = null,
+  ) {}
 
-  newListener(): WhisperStreamingStt {
+  get hasVietnamese(): boolean {
+    return !!this.viModelId;
+  }
+
+  newListener(lang: 'en' | 'vi' = 'en'): WhisperStreamingStt {
+    const vi = lang === 'vi' && this.viModelId;
     return new WhisperStreamingStt({
-      modelId: this.modelId,
+      modelId: vi ? this.viModelId! : this.modelId,
+      ...(vi ? { language: 'vietnamese' } : {}),
       ...(this.logger ? { logger: this.logger } : {}),
       loader: async () => ({
         pipeline: (task: string, model: string, opts?: Record<string, unknown>) => {
-          this.model ??= import('@huggingface/transformers' as string).then((m: { pipeline: (...a: unknown[]) => Promise<unknown> }) => m.pipeline(task, model, opts));
-          return this.model;
+          let loaded = this.models.get(model);
+          if (!loaded) {
+            loaded = import('@huggingface/transformers' as string).then((m: { pipeline: (...a: unknown[]) => Promise<unknown> }) => m.pipeline(task, model, opts));
+            this.models.set(model, loaded);
+          }
+          return loaded;
         },
       }),
     });

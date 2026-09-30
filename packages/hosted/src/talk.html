@@ -107,13 +107,15 @@
     });
     client.on('error', (p) => { if (p.source === 'sse') status.textContent = 'Reconnecting…'; });
     client.connect();
+    // Tell the server the call's language so it listens and fills in the right one.
+    fetch(`/a/${a.id}/lang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ lang: langSel.value }) }).catch(() => {});
     voice = new VoiceSession({
       client,
       baseUrl: `/a/${a.id}`,
       emotion: false,
-      // Server listening (Whisper, English) notices speech from mic loudness, so it
-      // doesn't depend on the phone's own speech service.
-      serverStt: $('serverstt').checked && langSel.value === 'en-US',
+      // Server listening (Whisper; PhoWhisper for Vietnamese) notices speech from mic
+      // loudness, so it doesn't depend on the phone's own speech service.
+      serverStt: $('serverstt').checked && sttLanguages.includes(langSel.value),
       vad: 'energy',
       lang: langSel.value,
     });
@@ -121,7 +123,7 @@
     voice.on('speakingChange', (on) => call.classList.toggle('speaking', on));
     voice.on('error', (e) => {
       status.textContent = e.kind === 'mic' ? 'Allow the microphone to talk.'
-        : e.kind === 'recognition' && e.message === 'network' ? "This phone's speech service is unreachable. Switch to English to use server listening."
+        : e.kind === 'recognition' && e.message === 'network' ? "This phone's speech service is unreachable. Turn on server listening."
         : e.message;
     });
     voice.on('started', () => { call.classList.add('on'); call.textContent = 'End'; call.setAttribute('aria-label', 'End call'); });
@@ -131,6 +133,7 @@
   // On a cold start the server is still loading its voice and listener. Like a phone
   // call, tapping Call rings (ringback tone) until the other side picks up.
   let warm = false, ringing = null;
+  let sttLanguages = ['en-US'];
   function ring() {
     const ctx = new AudioContext();
     const gain = ctx.createGain();
@@ -152,11 +155,17 @@
     status.textContent = '';
     voice?.start();
   }
-  (async function waitWarm() {
-    try { warm = !!(await fetch('/api/ready').then((x) => x.json())).ready; } catch { /* retry */ }
+  // Ready means ready for this call's language (a Vietnamese call also needs VieNeu),
+  // so a language change checks again.
+  let warmCheck = 0;
+  async function waitWarm(check = ++warmCheck) {
+    if (check !== warmCheck) return;
+    try { warm = !!(await fetch(`/api/ready?lang=${encodeURIComponent(langSel.value)}`).then((x) => x.json())).ready; } catch { /* retry */ }
+    if (check !== warmCheck) return;
     if (warm) { if (ringing) pickUp(); return; }
-    setTimeout(waitWarm, 1000);
-  })();
+    setTimeout(() => waitWarm(check), 1000);
+  }
+  waitWarm();
   call.addEventListener('click', () => {
     if (voice?.isRunning) return voice.stop();
     if (ringing) { ringing(); ringing = null; call.classList.remove('on'); call.textContent = 'Call'; status.textContent = ''; return; }
@@ -172,7 +181,7 @@
   });
   langSel.value = store.get('echo.lang') || (navigator.language?.startsWith('vi') ? 'vi-VN' : 'en-US');
   const rebuild = () => { const running = voice?.isRunning; connect(agent); if (running) voice.start(); };
-  langSel.addEventListener('change', () => { store.set('echo.lang', langSel.value); rebuild(); });
+  langSel.addEventListener('change', () => { store.set('echo.lang', langSel.value); warm = false; waitWarm(); rebuild(); });
   $('serverstt').addEventListener('change', (e) => { store.set('echo.serverstt', e.target.checked ? '1' : '0'); rebuild(); });
   $('serverstt').checked = store.get('echo.serverstt') !== '0';
 
@@ -180,6 +189,7 @@
   if (res.status === 401) location.href = '/auth/login';
   const me = await res.json();
   $('sttrow').hidden = !me.serverStt;
+  sttLanguages = me.serverSttLanguages ?? ['en-US'];
   if (!me.agents?.length) { add(`${me.email} has no agents to talk to yet.`, 'note'); call.disabled = true; }
   else {
     for (const a of me.agents) agentSel.add(new Option(`${a.name} · ${a.project}`, a.id));

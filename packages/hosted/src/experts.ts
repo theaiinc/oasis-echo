@@ -147,7 +147,10 @@ function clip(text: string, max: number): string {
 }
 
 /** A "still working" note before the answer is due, spoken without a model call. */
-export function progressNote(expert: string, n: number): string {
+export function progressNote(expert: string, n: number, lang: 'en' | 'vi' = 'en'): string {
+  if (lang === 'vi') {
+    return n <= 1 ? `Mình vẫn đang chờ ${expert}, sắp có rồi.` : `${expert} vẫn đang tổng hợp. Trong lúc chờ, bạn cần gì thêm không?`;
+  }
   return n <= 1
     ? `I'm still with ${expert} on that. It's coming together.`
     : `${expert} is still pulling it together. Anything else while we wait?`;
@@ -155,11 +158,20 @@ export function progressNote(expert: string, n: number): string {
 
 /** Every fixed line the desk may speak for this expert, so the voice can prepare them. */
 export function deskPhrases(expert: string): string[] {
-  return [progressNote(expert, 1), progressNote(expert, 2), lateNote(expert, 0, 0), lateNote(expert, 30_000, 0), lateNote(expert, 0, 2)];
+  return [
+    progressNote(expert, 1), progressNote(expert, 2), lateNote(expert, 0, 0), lateNote(expert, 30_000, 0), lateNote(expert, 0, 2),
+    progressNote(expert, 1, 'vi'), progressNote(expert, 2, 'vi'), lateNote(expert, 0, 0, 'vi'), lateNote(expert, 30_000, 0, 'vi'), lateNote(expert, 0, 2, 'vi'),
+  ];
 }
 
 /** A progress note for a late job, spoken without a model call. */
-export function lateNote(expert: string, overMs: number, updates: number): string {
+export function lateNote(expert: string, overMs: number, updates: number, lang: 'en' | 'vi' = 'en'): string {
+  if (lang === 'vi') {
+    if (updates >= 2) return `${expert} vẫn đang làm. Có kết quả là mình báo bạn ngay.`;
+    return overMs > 20_000
+      ? `${expert} lần này lâu hơn mọi khi. Mình vẫn đang chờ, có là báo bạn ngay.`
+      : `${expert} sắp xong rồi. Có kết quả là mình báo bạn ngay.`;
+  }
   if (updates >= 2) return `${expert} is still on it. I'll tell you the moment the answer comes in.`;
   return overMs > 20_000
     ? `${expert} is taking longer than usual on that one. I'm still waiting, and I'll tell you as soon as the answer comes in.`

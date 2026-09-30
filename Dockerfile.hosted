@@ -1,25 +1,37 @@
 # Hosted Echo (packages/hosted): many users, many agents, live streaming
-# voice. The Kokoro voice and Whisper listener are downloaded here, at build
-# time, so a cold start (Cloud Run scales to zero) doesn't fetch them.
+# voice. Every model is downloaded here, at build time, so a cold start
+# (Cloud Run scales to zero) fetches nothing: Kokoro (English voice),
+# Whisper (English listening), PhoWhisper-small (Vietnamese listening) and
+# VieNeu-TTS (Vietnamese voice, Python, torch-free ONNX on CPU).
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/vieneu && /opt/vieneu/bin/pip install --no-cache-dir vieneu
+ENV HF_HOME=/opt/hf VIENEU_DIR=/opt/vieneu-models ECHO_VIENEU_PYTHON=/opt/vieneu/bin/python
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/ packages/
 RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/hosted
 RUN npm prune --omit=dev
-RUN node --input-type=module -e "import { KokoroTts, WhisperStreamingStt } from '@oasis-echo/coordinator'; await new KokoroTts({ dtype: 'q8' }).warm(); await new WhisperStreamingStt({}).preload(); console.log('voice models cached'); process.exit(0);"
-# Fillers, apologies and backchannels, synthesized once here instead of at every cold start.
+RUN node --input-type=module -e "import { KokoroTts, WhisperStreamingStt } from '@oasis-echo/coordinator'; await new KokoroTts({ dtype: 'q8' }).warm(); await new WhisperStreamingStt({}).preload(); await new WhisperStreamingStt({ modelId: 'huuquyet/PhoWhisper-small', language: 'vietnamese' }).preload(); console.log('voice models cached'); process.exit(0);"
+# Fillers, apologies and backchannels (English with Kokoro, Vietnamese with
+# VieNeu, which also downloads its model here), synthesized once here instead
+# of at every cold start.
 RUN node packages/hosted/dist/bake.js packages/hosted/phrases.json
 
 FROM node:20-bookworm-slim
 WORKDIR /app
-# onnxruntime (Kokoro, Whisper) ships glibc binaries: Debian, not Alpine.
-RUN apt-get update && apt-get install -y --no-install-recommends dumb-init ca-certificates && rm -rf /var/lib/apt/lists/*
+# onnxruntime (Kokoro, Whisper, VieNeu) ships glibc binaries: Debian, not Alpine.
+RUN apt-get update && apt-get install -y --no-install-recommends dumb-init ca-certificates python3 && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/vieneu /opt/vieneu
+COPY --from=builder /opt/vieneu-models /opt/vieneu-models
+COPY --from=builder /opt/hf /opt/hf
 COPY --from=builder /app/node_modules node_modules/
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/packages/ packages/
-ENV NODE_ENV=production PORT=8080 OASIS_LOG_LEVEL=info ECHO_SERVER_STT=1
+ENV NODE_ENV=production PORT=8080 OASIS_LOG_LEVEL=info ECHO_SERVER_STT=1 \
+    ECHO_STT_VI_MODEL=huuquyet/PhoWhisper-small \
+    ECHO_VIENEU_PYTHON=/opt/vieneu/bin/python VIENEU_DIR=/opt/vieneu-models HF_HOME=/opt/hf HF_HUB_OFFLINE=1
 EXPOSE 8080
 USER node
 ENTRYPOINT ["dumb-init", "--"]
