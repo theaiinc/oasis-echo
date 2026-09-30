@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { allFillerPhrases } from '@oasis-echo/orchestrator';
 import { BACKCHANNELS, BACKCHANNELS_VI, bakePhrases } from './voice.js';
-import { VieneuTts } from './vieneu.js';
+import { deskPhrases } from './experts.js';
+import { isVietnamese, VieneuTts } from './vieneu.js';
 
 const file = process.argv[2];
 if (!file) throw new Error('usage: bake.js <file>');
@@ -16,7 +17,8 @@ const vi = python
   ? new VieneuTts({ python, script: join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'vieneu-bridge.py') })
   : undefined;
 if (vi && !(await vi.ready)) throw new Error('VieNeu did not start');
-const phrases = [...allFillerPhrases(), ...BACKCHANNELS, ...(vi ? [...allFillerPhrases('vi'), ...BACKCHANNELS_VI] : [])];
+const desk = deskPhrases();
+const phrases = [...allFillerPhrases(), ...BACKCHANNELS, ...desk.filter((p) => !isVietnamese(p)), ...(vi ? [...allFillerPhrases('vi'), ...BACKCHANNELS_VI, ...desk.filter(isVietnamese)] : [])];
 const count = await bakePhrases(file, phrases, undefined, vi);
 console.log(`baked ${count} phrases into ${file}${vi ? ' (with Vietnamese)' : ''}`);
 vi?.close();

@@ -6,6 +6,7 @@
  *   GET  /a/:agent/events       server-sent events (tts.chunk with PCM, turn.complete, …)
  *   POST /a/:agent/turn         { text } something you said ({ partial: true } is ignored)
  *   POST /a/:agent/bargein      you talked over it
+ *   POST /a/:agent/hello        the call picked up: the agent says hello
  *   GET  /a/:agent/backchannel  a short "mm-hmm" clip
  *   WS   /a/:agent/audio        mic PCM (16 kHz float) → stt.partial / stt.final (optional server listening)
  *   GET  /api/me                who you are and your agents
@@ -30,10 +31,10 @@ import { AegisAuth, cookie } from './auth.js';
 import { Sessions } from './sessions.js';
 import { BACKCHANNELS_VI, SharedEars, SharedVoice } from './voice.js';
 import { allFillerPhrases } from '@oasis-echo/orchestrator';
-import { deskPhrases } from './experts.js';
 import { DirFactStore, GcsFactStore } from './memory.js';
-import { isVietnamese, VieneuTts } from './vieneu.js';
-import type { Live } from './sessions.js';
+import { VieneuTts } from './vieneu.js';
+import { endpointMs } from './endpoint.js';
+import { greeting, type Live } from './sessions.js';
 import type { WhisperStreamingStt } from '@oasis-echo/coordinator';
 
 const env = process.env;
@@ -73,7 +74,6 @@ const voice = env['ECHO_TTS'] === 'browser'
       phrases: [
         ...allFillerPhrases(),
         ...(vieneu ? [...allFillerPhrases('vi'), ...BACKCHANNELS_VI] : []),
-        ...agents.flatMap((a) => (a.expert ? deskPhrases(a.expert.name).filter((p) => vieneu || !isVietnamese(p)) : [])),
       ],
       // Written at image build by dist/bake.js (Dockerfile.hosted).
       bakedFile: env['ECHO_PHRASES_FILE'] ?? fileURLToPath(new URL('../phrases.json', import.meta.url)),
@@ -89,17 +89,25 @@ void voice?.ready.then(() => {
 const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger, undefined, env['ECHO_STT_VI_MODEL'] || null) : null;
 // Warm up at start, not on the first call: speaking first, then listening, so a call
 // only starts (the page waits on /api/ready) once both are there.
+// Greetings carry the agent's name, so they're made here (a few seconds), not baked.
+const greetings = (lang: 'en' | 'vi') => agents.map((a) => greeting(a.name, lang));
 const warm = { voice: !voice, ears: !ears, vi: !vieneu };
-// Settled either way: without VieNeu a Vietnamese call still picks up (on Kokoro) rather than ringing forever.
-void vieneu?.ready.then(() => { warm.vi = true; });
-void (voice?.ready ?? Promise.resolve()).then(() => {
+// VieNeu starts only when a page asks for Vietnamese (see /api/ready and /lang). Settled
+// either way: without it a Vietnamese call still picks up (on Kokoro) rather than ringing.
+vieneu?.whenReady((ok) => {
+  void ((ok && voice?.prepare(greetings('vi'))) || Promise.resolve()).then(() => {
+    warm.vi = true;
+    logger.info('vieneu warm', { ok, ms: Math.round(process.uptime() * 1000) });
+  });
+});
+void (voice?.ready ?? Promise.resolve()).then(async () => {
+  await voice?.prepare(greetings('en'));
   warm.voice = true;
   return ears?.newListener().preload();
 }).then(async () => {
   if (ears?.hasVietnamese) await ears.newListener('vi').preload();
   warm.ears = true;
   logger.info('warm', { ms: Math.round(process.uptime() * 1000) });
-  if (vieneu) logger.info('vieneu warm', { ok: await vieneu.ready, ms: Math.round(process.uptime() * 1000) });
 });
 // Facts users ask to keep: Cloud Storage in production, a directory in development, or none (kept for the call only).
 const factStore = env['ECHO_MEMORY_BUCKET'] ? new GcsFactStore(env['ECHO_MEMORY_BUCKET'])
@@ -196,6 +204,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/ready') {
       // A Vietnamese call also waits for VieNeu; an English one doesn't.
       const vi = (url.searchParams.get('lang') ?? '').toLowerCase().startsWith('vi');
+      if (vi) void vieneu?.ready; // start VieNeu for this call
       return json(res, 200, { ready: warm.voice && warm.ears && (!vi || warm.vi), ...warm });
     }
     if (url.pathname === '/api/me') {
@@ -210,7 +219,7 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    const m = /^\/a\/([a-z0-9-]+)\/(events|turn|bargein|backchannel|lang)$/.exec(url.pathname);
+    const m = /^\/a\/([a-z0-9-]+)\/(events|turn|bargein|backchannel|lang|hello)$/.exec(url.pathname);
     if (!m) return json(res, 404, { error: 'not_found' });
     const agent = agentFor(user, m[1]);
     if (!agent) return json(res, 404, { error: 'no_such_agent' });
@@ -241,12 +250,19 @@ const server = createServer(async (req, res) => {
       if (input['partial'] === true) return json(res, 202, { accepted: true });
       const text = typeof input['text'] === 'string' ? input['text'].trim().slice(0, 2000) : '';
       if (!text) return json(res, 400, { error: 'empty' });
+      // Already started by the server when it heard it (listen()): don't answer twice.
+      if (live.alreadyClaimed(typeof input['speculationId'] === 'string' ? input['speculationId'] : null)) return json(res, 202, { accepted: true, duplicate: true });
       void live.turn(text).catch((err) => logger.warn('turn failed', { agent: agent.id, error: String(err) }));
       return json(res, 202, { accepted: true });
     }
     if (route === 'lang') {
       live.pageLanguage = typeof input['lang'] === 'string' ? input['lang'].slice(0, 20) : null;
+      if (live.callLanguage() === 'vi') void vieneu?.ready;
       return json(res, 200, { lang: live.callLanguage() });
+    }
+    if (route === 'hello') {
+      live.greet();
+      return json(res, 202, { accepted: true });
     }
     if (route === 'bargein') {
       return json(res, 200, { interrupted: await live.pipeline.bargeIn() });
@@ -285,7 +301,50 @@ function listen(ws: WebSocket, live: Live): void {
   };
   let stt = listenerFor(live.callLanguage());
   let utteranceId: string | null = null;
+  let speculationId: string | null = null;
+  // The server decides when a turn ends, from the words: once the user has been quiet
+  // for EARLY_MS it transcribes, then answers after endpointMs(text) of quiet in all
+  // (short after a question, long mid-thought). Speech in the meantime cancels that;
+  // speech after the answer started stops it and is joined to what was said before.
+  // The page's own end-of-utterance is a fallback.
+  const EARLY_MS = 300;
+  const LOUD_RMS = 0.012;
+  const BARGE_MS = 250;
+  let spoke = false;
+  let lastLoudAt = 0;
+  let loudAfterCommitMs = 0;
+  let early: Promise<string> | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let committed = false;
+  let carry = '';
   const send = (payload: Record<string, unknown>) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload)); };
+  const clearTimer = () => { if (timer) clearTimeout(timer); timer = null; };
+  const commit = (text: string, how: string, sttMs: number) => {
+    clearTimer();
+    committed = true;
+    loudAfterCommitMs = 0;
+    const full = [carry, text.trim()].filter(Boolean).join(' ');
+    logger.info('stt final', { ms: sttMs, how, quietMs: Date.now() - lastLoudAt, words: full.split(/\s+/).filter(Boolean).length });
+    // Start the turn here rather than wait for the page to post it back; the page's
+    // own post of this utterance is then ignored (see /turn).
+    if (full) {
+      live.claimUtterance(speculationId);
+      void live.turn(full).catch((err) => logger.warn('turn failed', { error: String(err) }));
+    }
+    send({ type: 'stt.final', text: full, utteranceId, speculationId, atMs: Date.now() });
+    carry = full;
+    stt.reset();
+    early = null;
+    spoke = false;
+  };
+  const reset = () => {
+    clearTimer();
+    stt.reset();
+    early = null;
+    spoke = false;
+    committed = false;
+    carry = '';
+  };
   void stt.preload().then(() => send({ type: 'ready' }));
   // Kokoro's phonemizer turns any uncaught exception into a crash of the
   // whole server, so nothing from a socket may throw out of here.
@@ -302,29 +361,58 @@ function listen(ws: WebSocket, live: Live): void {
       const samples = new Float32Array(Math.floor(data.byteLength / 4));
       new Uint8Array(samples.buffer).set(data.subarray(0, samples.byteLength));
       stt.feed(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) sum += samples[i]! * samples[i]!;
+      const now = Date.now();
+      if (samples.length && Math.sqrt(sum / samples.length) > LOUD_RMS) {
+        if (committed) {
+          // Talking again after the answer started: past a short blip, stop it and keep listening.
+          loudAfterCommitMs += (samples.length / 16_000) * 1000;
+          if (loudAfterCommitMs < BARGE_MS) return;
+          committed = false;
+          void live.pipeline.bargeIn();
+        }
+        spoke = true;
+        lastLoudAt = now;
+        early = null; // more speech: an early transcript would miss it
+        clearTimer();
+      } else if (spoke && !committed && !early && now - lastLoudAt >= EARLY_MS) {
+        const at = lastLoudAt;
+        const started = now;
+        const pending = stt.transcribeAll();
+        early = pending;
+        pending.then((text) => {
+          if (early !== pending || lastLoudAt !== at || committed) return;
+          if (!text.trim()) return; // nothing heard: leave it to the page's end
+          const wait = endpointMs([carry, text].filter(Boolean).join(' '));
+          timer = setTimeout(() => {
+            if (early === pending && lastLoudAt === at && !committed) commit(text, `endpoint ${wait}ms`, Date.now() - started);
+          }, Math.max(0, at + wait - Date.now()));
+        }).catch(() => undefined);
+      }
       return;
     }
     let msg: { type?: string; speculationId?: string; utteranceId?: string };
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === 'start') {
       stt = listenerFor(live.callLanguage());
-      stt.reset();
+      reset();
       utteranceId = msg.utteranceId ?? `u${Date.now().toString(36)}`;
+      speculationId = msg.speculationId ?? null;
       // The page only shows "listening…" for a partial, so say so once instead of
-      // re-transcribing the whole buffer every few hundred ms: those Whisper passes
-      // overlapped on Cloud Run's CPUs and starved the talker and Kokoro (seconds of
-      // delay before a reply). The final transcript still comes from transcribeAll().
+      // re-transcribing the whole buffer every few hundred ms (those passes starved
+      // the talker and Kokoro on Cloud Run's CPUs).
       send({ type: 'stt.partial', text: '', utteranceId, atMs: Date.now() });
     } else if (msg.type === 'end') {
-      const id = utteranceId;
+      // The page's fallback end: answer now unless the server already did.
+      // (Even if the server never heard it as loud: a quiet mic must still get an answer.)
+      if (committed) return;
       const started = Date.now();
-      void stt.transcribeAll().then((text) => {
-        logger.info('stt final', { ms: Date.now() - started, words: text.split(/\s+/).filter(Boolean).length });
-        send({ type: 'stt.final', text, utteranceId: id, speculationId: msg.speculationId ?? null, atMs: Date.now() });
-        stt.reset();
+      void (early ?? stt.transcribeAll()).then((text) => {
+        if (!committed) commit(text, 'page end', Date.now() - started);
       }).catch(() => undefined);
     } else if (msg.type === 'abort') {
-      stt.reset();
+      reset();
     }
   };
   ws.on('error', (err) => logger.warn('audio socket error', { error: String(err) }));

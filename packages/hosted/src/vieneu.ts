@@ -24,22 +24,46 @@ export class VieneuTts implements StreamingTts {
   private turn: Promise<void> = Promise.resolve();
   private onReady: ((rate: number) => void) | null = null;
   private onFailed: (() => void) | null = null;
+  private starting: Promise<boolean> | null = null;
+  private readonly waiters: Array<(ok: boolean) => void> = [];
   sampleRate = 48_000;
-  readonly ready: Promise<boolean>;
 
-  constructor(private readonly opts: { python: string; script: string; env?: NodeJS.ProcessEnv; logger?: Logger }) {
-    this.ready = new Promise<boolean>((resolve) => {
-      this.onReady = (rate) => { this.sampleRate = rate; resolve(true); };
-      this.onFailed = () => resolve(false);
+  /**
+   * Nothing runs until something needs Vietnamese: loading and warming VieNeu takes
+   * ~20 s of CPU, which an English call shouldn't compete with.
+   */
+  constructor(private readonly opts: { python: string; script: string; env?: NodeJS.ProcessEnv; logger?: Logger }) {}
+
+  /** Start (once) and settle when it can speak (true) or never will (false). */
+  get ready(): Promise<boolean> {
+    this.starting ??= new Promise<boolean>((resolve) => {
+      const settle = (ok: boolean) => {
+        resolve(ok);
+        for (const w of this.waiters.splice(0)) w(ok);
+      };
+      this.onReady = (rate) => { this.sampleRate = rate; settle(true); };
+      this.onFailed = () => settle(false);
       try {
         this.start();
         this.proc!.stdin.write(JSON.stringify({ type: 'preload' }) + '\n');
       } catch (err) {
-        opts.logger?.error('vieneu start failed', { error: String(err) });
-        resolve(false);
+        this.opts.logger?.error('vieneu start failed', { error: String(err) });
+        settle(false);
       }
-      this.proc?.on('exit', () => resolve(false));
+      this.proc?.on('exit', () => settle(false));
+      // A missing interpreter emits 'error'; unhandled, it would take the whole server down.
+      this.proc?.on('error', (err) => {
+        this.opts.logger?.error('vieneu start failed', { error: String(err) });
+        settle(false);
+      });
     });
+    return this.starting;
+  }
+
+  /** Call back when it settles, without starting it. */
+  whenReady(cb: (ok: boolean) => void): void {
+    if (this.starting) void this.starting.then(cb);
+    else this.waiters.push(cb);
   }
 
   private start(): void {

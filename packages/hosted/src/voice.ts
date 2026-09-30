@@ -55,7 +55,11 @@ export class SharedVoice implements StreamingTts {
   constructor(opts: { voice?: string; concurrent?: number; logger?: Logger; phrases?: string[]; bakedFile?: string; vi?: VieneuTts | null } = {}) {
     const voice = opts.voice ?? 'af_heart';
     this.vi = opts.vi ?? null;
-    void this.vi?.ready.then((ok) => { this.viOk = ok; });
+    // Vietnamese backchannels once VieNeu is up (or from the bake); never starts it.
+    this.vi?.whenReady((ok) => {
+      this.viOk = ok;
+      if (ok) void this.primeClips(BACKCHANNELS_VI, this.clipsVi).catch(() => undefined);
+    });
     this.kokoro = new KokoroTts({ voice, dtype: 'q8', ...(opts.logger ? { logger: opts.logger } : {}) });
     this.concurrent = opts.concurrent ?? 2;
     // Baked phrases load in well under a second; only what they lack is synthesized, in the background.
@@ -68,7 +72,7 @@ export class SharedVoice implements StreamingTts {
       let made = 0;
       for (const phrase of new Set(opts.phrases ?? [])) {
         if (this.phrases.has(phrase.trim())) continue;
-        if (isVietnamese(phrase) && !(this.vi && (await this.vi.ready))) continue;
+        if (isVietnamese(phrase) && !this.viOk) continue;
         try {
           await this.phrase(phrase);
           made++;
@@ -97,6 +101,15 @@ export class SharedVoice implements StreamingTts {
     } catch (err) {
       logger?.warn('baked phrases not loaded', { file, error: String(err) });
       return 0;
+    }
+  }
+
+  /** Make sure these lines are ready to play at once (skipping Vietnamese ones until VieNeu is up). */
+  async prepare(lines: string[]): Promise<void> {
+    await this.ready;
+    for (const line of lines) {
+      if (isVietnamese(line) && !this.viOk) continue;
+      await this.phrase(line).catch(() => undefined);
     }
   }
 
@@ -147,11 +160,8 @@ export class SharedVoice implements StreamingTts {
 
   private async primeBackchannels(): Promise<void> {
     await this.primeClips(BACKCHANNELS, this.clips);
-    // Vietnamese ones only when VieNeu is up (or baked); never block English on it.
-    void (async () => {
-      const baked = BACKCHANNELS_VI.every((p) => this.phrases.has(p));
-      if (baked || (this.vi && (await this.vi.ready))) await this.primeClips(BACKCHANNELS_VI, this.clipsVi);
-    })().catch(() => undefined);
+    // Baked Vietnamese ones need no VieNeu; otherwise they wait for it (see constructor).
+    if (BACKCHANNELS_VI.every((p) => this.phrases.has(p))) await this.primeClips(BACKCHANNELS_VI, this.clipsVi);
   }
 
   private async primeClips(list: string[], into: Map<string, { audio: string; sampleRate: number }>): Promise<void> {

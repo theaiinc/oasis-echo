@@ -44,10 +44,10 @@ export class Live {
     const talker = talkerFor(agent, env);
     const expert = agent.expert ? makeExpert(agent.expert, user, env, logger) : null;
     this.desk = talker && expert && agent.expert
-      ? new ExpertDesk(agent.expert.name, (q, signal) => expert.ask(q, signal), deps.latency(agent.id), {
+      ? new ExpertDesk(expertIsSelf(agent) ? 'Your background lookup' : agent.expert.name, (q, signal) => expert.ask(q, signal), deps.latency(agent.id), {
           answered: (job) => void this.onAnswer(job, talker),
-          late: (job, over) => this.say(lateNote(agent.expert!.name, over, job.updates, this.callLanguage())),
-          progress: (_job, n) => this.sayIfQuiet(progressNote(agent.expert!.name, n, this.callLanguage())),
+          late: (job, over) => this.say(lateNote(over, job.updates, this.callLanguage())),
+          progress: (_job, n) => this.sayIfQuiet(progressNote(n, this.callLanguage())),
         })
       : null;
 
@@ -58,7 +58,9 @@ export class Live {
         const desk = this.desk;
         tools.register<{ question?: string }, unknown>({
           name: `ask_${agent.expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
-          description: `Ask ${agent.expert.name}${agent.expert.about ? ` (${agent.expert.about})` : ''} a question in the background. Returns at once with how long ${agent.expert.name} usually takes; the answer is spoken to the user when it arrives.`,
+          description: expertIsSelf(agent)
+            ? `Look something up in the background${agent.expert.about ? ` (${agent.expert.about})` : ''}. Returns at once with how long it usually takes; the answer is spoken to the user when it arrives.`
+            : `Ask ${agent.expert.name}${agent.expert.about ? ` (${agent.expert.about})` : ''} a question in the background. Returns at once with how long ${agent.expert.name} usually takes; the answer is spoken to the user when it arrives.`,
           input_schema: {
             type: 'object',
             properties: { question: { type: 'string', description: 'A complete, self-contained question, with any context from the call it needs.' } },
@@ -137,6 +139,8 @@ export class Live {
       keepInterruptedReply: true,
       fillerLanguage: () => this.callLanguage(),
       maxFillersPerTurn: 3,
+      // Fillers are baked, so one can play almost at once when the answer isn't there yet.
+      fillerDelayMs: 250,
       ...(logger ? { logger } : {}),
     });
     this.pipeline.bus.on('turn.complete', ({ turn }) => {
@@ -211,6 +215,24 @@ export class Live {
     return parts.length ? parts.join('\n\n') : undefined;
   }
 
+  /** Utterances the server started a turn for itself, by speculation id (so the page's copy is skipped). */
+  private readonly claimed: string[] = [];
+
+  claimUtterance(id: string | null): void {
+    if (!id) return;
+    this.claimed.push(id);
+    while (this.claimed.length > 20) this.claimed.shift();
+  }
+
+  alreadyClaimed(id: string | null): boolean {
+    return !!id && this.claimed.includes(id);
+  }
+
+  /** Answer the call: a short hello in the call's language, so the line isn't silent. */
+  greet(): void {
+    this.say(greeting(this.agent.name, this.callLanguage()));
+  }
+
   /** Say this only if nothing is playing or queued and it has been quiet for a moment; otherwise skip it. */
   sayIfQuiet(text: string, quietMs = 6_000): void {
     if (this.busy > 0 || this.queue.length || Date.now() - this.quietSince < quietMs) return;
@@ -238,19 +260,43 @@ export class Live {
 
   private async onAnswer(job: ExpertJob, talker: { apiKey: string; baseUrl: string; model: string; fallbackModel?: string }): Promise<void> {
     const name = this.agent.expert?.name ?? 'The expert';
+    const self = expertIsSelf(this.agent);
+    const lang = this.callLanguage();
     this.send('expert.answer', { id: job.id, expert: name, question: job.question, status: job.status, answer: job.answer ?? null, error: job.error ?? null, atMs: Date.now() });
     if (job.status !== 'done' || !job.answer) {
-      this.say(`Sorry, I couldn't get an answer from ${name} on that. Want me to try again?`);
+      this.say(lang === 'vi'
+        ? 'Xin lỗi, mình chưa tra được câu đó. Bạn muốn mình thử lại không?'
+        : self ? "Sorry, I couldn't find that one. Want me to try again?" : `Sorry, I couldn't get an answer from ${name} on that. Want me to try again?`);
       return;
     }
     // Summaries go to the dependable model when there are two.
     const summarizer = { ...talker, model: talker.fallbackModel ?? talker.model };
-    this.say(await spoken(job.question, job.answer, name, summarizer).catch(() => `${name} says: ${job.answer!.slice(0, 600)}`));
+    const fallback = self ? `Here's what I found: ${job.answer.slice(0, 600)}` : `${name} says: ${job.answer.slice(0, 600)}`;
+    this.say(await spoken(job.question, job.answer, self ? null : name, lang, summarizer).catch(() => fallback));
   }
 }
 
+/**
+ * Whether the background expert is the agent itself (the same name, e.g. Maya on the
+ * phone and Maya's deep lookup). Then the talker speaks of it in the first person
+ * ("let me look into that"), never "I've asked Maya".
+ */
+export function expertIsSelf(agent: AgentConfig): boolean {
+  return !!agent.expert && agent.expert.name.trim().toLowerCase() === agent.name.trim().toLowerCase();
+}
+
+/** What the agent says when a call picks up. */
+export function greeting(name: string, lang: 'en' | 'vi'): string {
+  return lang === 'vi' ? `Chào bạn, mình là ${name}. Mình giúp gì được cho bạn?` : `Hi, this is ${name}. How can I help?`;
+}
+
 /** The expert's answer, as a few sentences worth saying out loud. */
-async function spoken(question: string, answer: string, expert: string, talker: { apiKey: string; baseUrl: string; model: string }): Promise<string> {
+async function spoken(question: string, answer: string, expert: string | null, lang: 'en' | 'vi', talker: { apiKey: string; baseUrl: string; model: string }): Promise<string> {
+  // expert null: the agent looked it up itself, so it reports in the first person.
+  const who = expert
+    ? `${expert} just answered a question the user asked a moment ago. Tell the user what ${expert} said in at most four short spoken sentences: lead with "${expert} says" or similar,`
+    : `You just finished looking into a question the user asked a moment ago. Tell the user what you found, in the first person, in at most four short spoken sentences: lead with "Okay, here's what I found" or similar, never refer to yourself by name or as someone else,`;
+  const language = lang === 'vi' ? ' Speak Vietnamese.' : '';
   const res = await fetch(`${talker.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${talker.apiKey}` },
@@ -258,8 +304,8 @@ async function spoken(question: string, answer: string, expert: string, talker: 
       model: talker.model,
       temperature: 0.3,
       messages: [
-        { role: 'system', content: `You are speaking on a live voice call. ${expert} just answered a question the user asked a moment ago. Tell the user what ${expert} said in at most four short spoken sentences: lead with "${expert} says" or similar, keep names and numbers exact, no markdown, no lists, no links. Offer the details if there is more.` },
-        { role: 'user', content: `Question: ${question}\n\n${expert}'s answer:\n${answer}` },
+        { role: 'system', content: `You are speaking on a live voice call. ${who} keep names and numbers exact, no markdown, no lists, no links. Offer the details if there is more.${language}` },
+        { role: 'user', content: `Question: ${question}\n\nAnswer found:\n${answer}` },
       ],
     }),
     signal: AbortSignal.timeout(20_000),
@@ -274,13 +320,18 @@ async function spoken(question: string, answer: string, expert: string, talker: 
 function talkerPrompt(agent: AgentConfig, user: EchoUser, persona?: string): string {
   const expert = agent.expert;
   return [
-    persona ?? `You are ${agent.name}'s voice on a live call with ${user.email} (${agent.project}).`,
+    persona ?? `You are ${agent.name}, on a live call with ${user.email} (${agent.project}). Speak as yourself, in the first person.`,
     'This is speech: answer in one to three short, natural sentences. No markdown, lists, or links. Answer first; ask back only when you truly need to.',
     'Answer yourself whatever you can: conversation, general knowledge, planning, helping the user think.',
     'Language: each user message ends with a bracketed note naming the reply language. Follow it for every reply, even when the message itself is in another language. Only when the user explicitly asks to switch, call set_language, then reply in the new language. Never mention the note.',
     'Memory: you get only the last few turns, plus notes. Rely on the notes.',
     'When the user asks you to remember something, keep it in mind, or not make them repeat it (in any language, e.g. "nhớ giúp tôi", "remember that"), you must call remember with that fact before you reply; never say you will remember without calling it. Call forget when they ask you to forget. Never store anything they did not ask you to keep.',
-    ...(expert ? [
+    ...(expert && expertIsSelf(agent) ? [
+      `You are ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Their projects, boards, decisions and status come only from your background lookup: never guess those.`,
+      `When a question needs that, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long it usually takes.`,
+      `Then say, in the first person, that you're looking into it and roughly how long it takes ("let me pull that up, about a minute"), and keep the call useful while waiting: say what you're checking, ask one thing that would sharpen the answer, or offer something quick you can answer yourself. Never talk about ${agent.name} as someone else, and don't repeat the wait time every turn.`,
+      `The answer is spoken to the user automatically when it arrives. If asked whether it's ready, use the background notes.`,
+    ] : expert ? [
       `${expert.name} is ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Only ${expert.name} knows their projects, boards, decisions and status: never guess those.`,
       `When a question needs ${expert.name}, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long ${expert.name} usually takes.`,
       `Then say you've asked ${expert.name} and roughly how long it takes (round it: "about a minute"), and keep the call useful while waiting: say what you're checking, ask one thing that would sharpen the answer, or offer something quick you can answer yourself. Do not repeat the wait time every turn.`,

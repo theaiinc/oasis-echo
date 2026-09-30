@@ -47,6 +47,8 @@ export type PipelineOpts = {
    * instead of starting over. Default false.
    */
   keepInterruptedReply?: boolean;
+  /** How long to wait for the answer's first sentence before a filler plays. Default 500–600 ms; lower when fillers are ready ahead of time. */
+  fillerDelayMs?: number;
   /** At most this many fillers in one turn, then silence until the answer. Default unlimited. */
   maxFillersPerTurn?: number;
   /** Language for fillers and apologies, read per turn (e.g. the call's pinned language). Default English. */
@@ -85,6 +87,7 @@ export class Pipeline {
   private readonly keepInterruptedReply: boolean;
   private readonly fillerLanguage: () => FillerLanguage;
   private readonly maxFillersPerTurn: number;
+  private readonly fillerDelayMs: number | undefined;
   /** Total audio sent so far, to pace fillers by how long they play. */
   private emittedAudioMs = 0;
   private turnCounter = 0;
@@ -133,6 +136,7 @@ export class Pipeline {
     this.keepInterruptedReply = opts.keepInterruptedReply ?? false;
     this.fillerLanguage = opts.fillerLanguage ?? (() => 'en');
     this.maxFillersPerTurn = opts.maxFillersPerTurn ?? Number.POSITIVE_INFINITY;
+    this.fillerDelayMs = opts.fillerDelayMs;
   }
 
   /**
@@ -299,7 +303,7 @@ export class Pipeline {
       // mid-tool-call and hadn't produced round-2 tokens yet. Race
       // first-sentence vs a short threshold; if the queue is still
       // empty, play short chained fillers until a sentence lands.
-      const FILLER_THRESHOLD_MS = 500;
+      const FILLER_THRESHOLD_MS = this.fillerDelayMs ?? 500;
       await Promise.race([
         (async () => {
           while (sentenceQueue.length === 0 && !signal.aborted && !drainDone) {
@@ -629,7 +633,7 @@ export class Pipeline {
       // token, so wait for sentenceQueue to actually have something.
       // If the model is fast enough that a sentence lands before the
       // threshold, we skip the filler entirely.
-      const FILLER_THRESHOLD_MS = 600;
+      const FILLER_THRESHOLD_MS = this.fillerDelayMs ?? 600;
       const { fillerSpeed } = this.fillerStrategy();
       await Promise.race([
         (async () => {

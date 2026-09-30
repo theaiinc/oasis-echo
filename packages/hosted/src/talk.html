@@ -117,6 +117,9 @@
       // loudness, so it doesn't depend on the phone's own speech service.
       serverStt: $('serverstt').checked && sttLanguages.includes(langSel.value),
       vad: 'energy',
+      // The server ends a turn from the words (short after a question, longer mid-thought);
+      // the page's own silence end is only a fallback.
+      vadEndSilenceMs: 2200,
       lang: langSel.value,
     });
     voice.on('hint', (h) => { status.textContent = h.text; });
@@ -126,6 +129,8 @@
         : e.kind === 'recognition' && e.message === 'network' ? "This phone's speech service is unreachable. Turn on server listening."
         : e.message;
     });
+    // Picked up: the agent says hello, so the line isn't silent.
+    voice.on('started', () => { fetch(`/a/${a.id}/hello`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {}); });
     voice.on('started', () => { call.classList.add('on'); call.textContent = 'End'; call.setAttribute('aria-label', 'End call'); });
     voice.on('stopped', () => { call.classList.remove('on', 'speaking'); call.textContent = 'Call'; call.setAttribute('aria-label', 'Start call'); status.textContent = ''; });
   }

@@ -50,7 +50,7 @@ describe('kept facts', () => {
 
 describe('desk progress notes', () => {
   it('are fixed lines, so the voice can prepare them ahead of time', () => {
-    expect(progressNote('Maya', 1)).toBe(progressNote('Maya', 1));
-    expect(progressNote('Maya', 2)).not.toBe(progressNote('Maya', 1));
+    expect(progressNote(1)).toBe(progressNote(1));
+    expect(progressNote(2)).not.toBe(progressNote(1));
   });
 });

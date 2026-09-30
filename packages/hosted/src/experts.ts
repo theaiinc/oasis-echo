@@ -146,34 +146,39 @@ function clip(text: string, max: number): string {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+/**
+ * The desk's spoken notes are fixed lines without the expert's name, so they are
+ * baked into the image with the fillers and play at once; the name would need
+ * runtime synthesis, which starved the first call after a cold start.
+ */
+
 /** A "still working" note before the answer is due, spoken without a model call. */
-export function progressNote(expert: string, n: number, lang: 'en' | 'vi' = 'en'): string {
+export function progressNote(n: number, lang: 'en' | 'vi' = 'en'): string {
   if (lang === 'vi') {
-    return n <= 1 ? `Mình vẫn đang chờ ${expert}, sắp có rồi.` : `${expert} vẫn đang tổng hợp. Trong lúc chờ, bạn cần gì thêm không?`;
+    return n <= 1 ? 'Mình vẫn đang chờ câu trả lời, sắp có rồi.' : 'Vẫn đang tổng hợp. Trong lúc chờ, bạn cần gì thêm không?';
   }
   return n <= 1
-    ? `I'm still with ${expert} on that. It's coming together.`
-    : `${expert} is still pulling it together. Anything else while we wait?`;
+    ? "I'm still waiting on that answer. It's coming together."
+    : "It's still being pulled together. Anything else while we wait?";
 }
 
-/** Every fixed line the desk may speak for this expert, so the voice can prepare them. */
-export function deskPhrases(expert: string): string[] {
-  return [
-    progressNote(expert, 1), progressNote(expert, 2), lateNote(expert, 0, 0), lateNote(expert, 30_000, 0), lateNote(expert, 0, 2),
-    progressNote(expert, 1, 'vi'), progressNote(expert, 2, 'vi'), lateNote(expert, 0, 0, 'vi'), lateNote(expert, 30_000, 0, 'vi'), lateNote(expert, 0, 2, 'vi'),
-  ];
+/** Every fixed line the desk may speak, so the voice can prepare them ahead of time. */
+export function deskPhrases(): string[] {
+  return (['en', 'vi'] as const).flatMap((lang) => [
+    progressNote(1, lang), progressNote(2, lang), lateNote(0, 0, lang), lateNote(30_000, 0, lang), lateNote(0, 2, lang),
+  ]);
 }
 
 /** A progress note for a late job, spoken without a model call. */
-export function lateNote(expert: string, overMs: number, updates: number, lang: 'en' | 'vi' = 'en'): string {
+export function lateNote(overMs: number, updates: number, lang: 'en' | 'vi' = 'en'): string {
   if (lang === 'vi') {
-    if (updates >= 2) return `${expert} vẫn đang làm. Có kết quả là mình báo bạn ngay.`;
+    if (updates >= 2) return 'Vẫn đang làm. Có kết quả là mình báo bạn ngay.';
     return overMs > 20_000
-      ? `${expert} lần này lâu hơn mọi khi. Mình vẫn đang chờ, có là báo bạn ngay.`
-      : `${expert} sắp xong rồi. Có kết quả là mình báo bạn ngay.`;
+      ? 'Lần này lâu hơn mọi khi. Mình vẫn đang chờ, có là báo bạn ngay.'
+      : 'Sắp xong rồi. Có kết quả là mình báo bạn ngay.';
   }
-  if (updates >= 2) return `${expert} is still on it. I'll tell you the moment the answer comes in.`;
+  if (updates >= 2) return "Still on it. I'll tell you the moment the answer comes in.";
   return overMs > 20_000
-    ? `${expert} is taking longer than usual on that one. I'm still waiting, and I'll tell you as soon as the answer comes in.`
-    : `${expert} is almost there. I'll tell you as soon as the answer comes in.`;
+    ? "This one is taking longer than usual. I'm still waiting, and I'll tell you as soon as the answer comes in."
+    : "Almost there. I'll tell you as soon as the answer comes in.";
 }

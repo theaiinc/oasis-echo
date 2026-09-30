@@ -89,6 +89,11 @@ export type VoiceSessionOpts = {
    * in this browser) falls back to 'energy' on its own.
    */
   vad?: 'recognition' | 'energy';
+  /**
+   * Energy VAD: silence (ms) before the page ends an utterance itself. A server
+   * that decides turn ends from the words (hosted Echo) sets this long, as a fallback.
+   */
+  vadEndSilenceMs?: number;
   /** Speech recognition language (BCP 47, e.g. "vi-VN"). Default: the browser's. */
   lang?: string;
   /** sendPartial min-word-count gate. Default 3. */
@@ -139,6 +144,7 @@ export class VoiceSession {
   private energyVad: EnergyVad | null = null;
   private micSource: AudioNode | null = null;
   private readonly silenceMs: number;
+  private readonly vadEndSilenceMs: number | undefined;
   private readonly debouncerOpts: Omit<TurnDebouncerOpts, 'onCommit' | 'onStateChange'>;
   private readonly audioConstraints: MediaTrackConstraints;
   private readonly partialMinWords: number;
@@ -183,6 +189,7 @@ export class VoiceSession {
     this.lang = opts.lang;
     this.vad = opts.vad ?? 'recognition';
     this.silenceMs = opts.silenceMs ?? 1200;
+    this.vadEndSilenceMs = opts.vadEndSilenceMs;
     this.debouncerOpts = opts.debouncer ?? {};
     this.audioConstraints = opts.audioConstraints ?? {
       echoCancellation: true,
@@ -471,6 +478,7 @@ export class VoiceSession {
   private startEnergyVad(): void {
     if (this.energyVad || !this.audioCtx || !this.micSource) return;
     this.energyVad = new EnergyVad({
+      ...(this.vadEndSilenceMs ? { endSilenceMs: this.vadEndSilenceMs } : {}),
       isListening: () => !this.micPausedForTts && !this.agentSpeaking,
       onStart: () => {
         if (!this.audioStream) return;

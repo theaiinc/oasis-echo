@@ -132,6 +132,6 @@ describe('asking the expert in the background', () => {
     expect(answered[0]).toMatchObject({ status: 'done', answer: 'Arion One.' });
     expect(desk.estimate.typicalMs()).toBe(45);
     expect(desk.contextNote()).toContain('Maya answered "What needs attention?": Arion One.');
-    expect(lateNote('Maya', 30_000, 1)).toContain('longer than usual');
+    expect(lateNote(30_000, 1)).toContain('longer than usual');
   });
 });
