@@ -45,7 +45,24 @@ const auth = devUser ? null : new AegisAuth({
   redirectUri: `${publicUrl}/auth/callback`,
   sessionSecret: required('ECHO_SESSION_SECRET'),
 });
+// Kokoro's phonemizer (Emscripten) adds process handlers that rethrow, so one stray
+// rejected promise anywhere (a failed model load, a socket) exits the server and every
+// call on it. Once Kokoro has loaded, take those out again: log a stray rejection, and
+// leave uncaught exceptions to Node's default.
+process.on('unhandledRejection', (err) => logger.error('unhandled rejection', { error: String(err) }));
+const processHandlers = {
+  uncaughtException: process.listeners('uncaughtException'),
+  unhandledRejection: process.listeners('unhandledRejection'),
+};
 const voice = env['ECHO_TTS'] === 'browser' ? null : new SharedVoice({ logger });
+void voice?.ready.then(() => {
+  for (const listener of process.listeners('uncaughtException')) {
+    if (!processHandlers.uncaughtException.includes(listener)) process.removeListener('uncaughtException', listener);
+  }
+  for (const listener of process.listeners('unhandledRejection')) {
+    if (!processHandlers.unhandledRejection.includes(listener)) process.removeListener('unhandledRejection', listener);
+  }
+});
 const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger) : null;
 const sessions = new Sessions({ env, tts: voice, logger });
 const page = readFileSync(join(here, '..', 'src', 'talk.html'), 'utf8');
