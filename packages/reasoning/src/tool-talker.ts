@@ -59,6 +59,7 @@ export class ToolTalker implements Reasoner {
     const toolSpecs = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
     let inputTokens = 0;
     let outputTokens = 0;
+    let retriedEmpty = false;
     for (let round = 0; ; round++) {
       const canCall = toolSpecs.length > 0 && round < (this.opts.maxToolRounds ?? 3);
       const body = {
@@ -93,6 +94,14 @@ export class ToolTalker implements Reasoner {
         }
       }
       const called = calls.filter((c) => c.function.name);
+      // Some providers end a round with finish_reason "tool_calls" but no call and no
+      // words (a malformed call dropped upstream). Ask again once rather than go silent.
+      if (!called.length && !text && finish === 'tool_calls' && !retriedEmpty) {
+        retriedEmpty = true;
+        this.opts.logger?.warn('talker empty tool round, retrying', { model: this.opts.model, round });
+        round--;
+        continue;
+      }
       if (!called.length || !canCall) {
         yield { type: 'done', stopReason: finish === 'length' ? 'length' : 'stop', inputTokens, outputTokens };
         return;
