@@ -128,7 +128,27 @@
     voice.on('stopped', () => { call.classList.remove('on', 'speaking'); call.textContent = 'Call'; call.setAttribute('aria-label', 'Start call'); status.textContent = ''; });
   }
 
-  call.addEventListener('click', () => { if (voice?.isRunning) voice.stop(); else voice?.start(); });
+  // The server loads its voice and listener on a cold start; a call only starts once both are warm.
+  let warm = false, startWhenWarm = false;
+  (async function waitWarm() {
+    try {
+      const r = await fetch('/api/ready').then((x) => x.json());
+      warm = !!r.ready;
+    } catch { /* retry */ }
+    if (warm) {
+      if (call.textContent === 'Warming up…') call.textContent = 'Call';
+      if (startWhenWarm) { startWhenWarm = false; status.textContent = ''; voice?.start(); }
+      return;
+    }
+    call.textContent = 'Warming up…';
+    status.textContent = startWhenWarm ? 'Starting the call as soon as the voice is ready…' : 'Warming up the voice…';
+    setTimeout(waitWarm, 1000);
+  })();
+  call.addEventListener('click', () => {
+    if (voice?.isRunning) return voice.stop();
+    if (!warm) { startWhenWarm = true; status.textContent = 'Starting the call as soon as the voice is ready…'; return; }
+    voice?.start();
+  });
   $('text').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || !e.target.value.trim()) return;
     client?.sendTurn({ text: e.target.value.trim() }).catch(() => {});

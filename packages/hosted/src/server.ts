@@ -9,6 +9,7 @@
  *   GET  /a/:agent/backchannel  a short "mm-hmm" clip
  *   WS   /a/:agent/audio        mic PCM (16 kHz float) → stt.partial / stt.final (optional server listening)
  *   GET  /api/me                who you are and your agents
+ *   GET  /api/ready             whether speaking and listening have warmed up
  *   GET  /sdk/*                 the SDK's browser modules
  *   GET  /                      the call page; /auth/* signs in with Aegis
  *
@@ -74,6 +75,13 @@ void voice?.ready.then(() => {
   }
 });
 const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger) : null;
+// Warm up at start, not on the first call: speaking first, then listening, so a call
+// only starts (the page waits on /api/ready) once both are there.
+const warm = { voice: !voice, ears: !ears };
+void (voice?.ready ?? Promise.resolve()).then(() => {
+  warm.voice = true;
+  return ears?.newListener().preload();
+}).then(() => { warm.ears = true; logger.info('warm', { ms: Math.round(process.uptime() * 1000) }); });
 // Facts users ask to keep: Cloud Storage in production, a directory in development, or none (kept for the call only).
 const factStore = env['ECHO_MEMORY_BUCKET'] ? new GcsFactStore(env['ECHO_MEMORY_BUCKET'])
   : env['ECHO_MEMORY_DIR'] ? new DirFactStore(env['ECHO_MEMORY_DIR']) : null;
@@ -166,6 +174,7 @@ const server = createServer(async (req, res) => {
     }
     if (!user) return json(res, 401, { error: 'sign_in' });
 
+    if (url.pathname === '/api/ready') return json(res, 200, { ready: warm.voice && warm.ears, ...warm });
     if (url.pathname === '/api/me') {
       return json(res, 200, {
         email: user.email,
