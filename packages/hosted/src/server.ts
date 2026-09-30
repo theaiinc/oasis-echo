@@ -33,7 +33,7 @@ import { BACKCHANNELS_VI, SharedEars, SharedVoice } from './voice.js';
 import { allFillerPhrases } from '@oasis-echo/orchestrator';
 import { DirFactStore, GcsFactStore } from './memory.js';
 import { VieneuTts } from './vieneu.js';
-import { endpointMs } from './endpoint.js';
+import { endpointMs, SpeechGate } from './endpoint.js';
 import { greeting, type Live } from './sessions.js';
 import type { WhisperStreamingStt } from '@oasis-echo/coordinator';
 
@@ -308,9 +308,9 @@ function listen(ws: WebSocket, live: Live): void {
   // speech after the answer started stops it and is joined to what was said before.
   // The page's own end-of-utterance is a fallback.
   const EARLY_MS = 300;
-  const LOUD_RMS = 0.012;
   const BARGE_MS = 250;
-  let spoke = false;
+  const gate = new SpeechGate();
+  // Audio time of the speech an early transcript covers; later speech makes it stale.
   let lastLoudAt = 0;
   let loudAfterCommitMs = 0;
   let early: Promise<string> | null = null;
@@ -324,7 +324,7 @@ function listen(ws: WebSocket, live: Live): void {
     committed = true;
     loudAfterCommitMs = 0;
     const full = [carry, text.trim()].filter(Boolean).join(' ');
-    logger.info('stt final', { ms: sttMs, how, quietMs: Date.now() - lastLoudAt, words: full.split(/\s+/).filter(Boolean).length });
+    logger.info('stt final', { ms: sttMs, how, quietMs: Math.round(gate.quietMs), words: full.split(/\s+/).filter(Boolean).length });
     // Start the turn here rather than wait for the page to post it back; the page's
     // own post of this utterance is then ignored (see /turn).
     if (full) {
@@ -335,13 +335,13 @@ function listen(ws: WebSocket, live: Live): void {
     carry = full;
     stt.reset();
     early = null;
-    spoke = false;
+    gate.reset();
   };
   const reset = () => {
     clearTimer();
     stt.reset();
     early = null;
-    spoke = false;
+    gate.reset();
     committed = false;
     carry = '';
   };
@@ -361,22 +361,19 @@ function listen(ws: WebSocket, live: Live): void {
       const samples = new Float32Array(Math.floor(data.byteLength / 4));
       new Uint8Array(samples.buffer).set(data.subarray(0, samples.byteLength));
       stt.feed(samples);
-      let sum = 0;
-      for (let i = 0; i < samples.length; i++) sum += samples[i]! * samples[i]!;
       const now = Date.now();
-      if (samples.length && Math.sqrt(sum / samples.length) > LOUD_RMS) {
+      if (gate.push(samples)) {
         if (committed) {
           // Talking again after the answer started: past a short blip, stop it and keep listening.
-          loudAfterCommitMs += (samples.length / 16_000) * 1000;
+          loudAfterCommitMs += 30; // one confirmed 30 ms speech window
           if (loudAfterCommitMs < BARGE_MS) return;
           committed = false;
           void live.pipeline.bargeIn();
         }
-        spoke = true;
-        lastLoudAt = now;
+        lastLoudAt = gate.lastSpeechMs;
         early = null; // more speech: an early transcript would miss it
         clearTimer();
-      } else if (spoke && !committed && !early && now - lastLoudAt >= EARLY_MS) {
+      } else if (gate.spoke && !committed && !early && gate.quietMs >= EARLY_MS) {
         const at = lastLoudAt;
         const started = now;
         const pending = stt.transcribeAll();
@@ -387,7 +384,7 @@ function listen(ws: WebSocket, live: Live): void {
           const wait = endpointMs([carry, text].filter(Boolean).join(' '));
           timer = setTimeout(() => {
             if (early === pending && lastLoudAt === at && !committed) commit(text, `endpoint ${wait}ms`, Date.now() - started);
-          }, Math.max(0, at + wait - Date.now()));
+          }, Math.max(0, wait - gate.quietMs));
         }).catch(() => undefined);
       }
       return;

@@ -34,6 +34,9 @@
   #call.on { background: var(--live); }
   #call.speaking { animation: pulse 1.1s ease-in-out infinite; }
   @keyframes pulse { 50% { transform: scale(1.06); } }
+  .callrow { display: flex; align-items: center; gap: 16px; }
+  #mute { width: 56px; height: 56px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: 600 13px/1 inherit; cursor: pointer; }
+  #mute[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
   .row { display: flex; gap: 8px; width: 100%; }
   #text { flex: 1; min-width: 0; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
   label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
@@ -51,7 +54,10 @@
 <div id="log"><p class="hint" id="hint">Tap Call and just talk. You can interrupt any time.</p></div>
 <footer>
   <div id="status"></div>
-  <button id="call" aria-label="Start call">Call</button>
+  <div class="callrow">
+    <button id="mute" aria-label="Mute microphone" aria-pressed="false" hidden>Mute</button>
+    <button id="call" aria-label="Start call">Call</button>
+  </div>
   <div class="row">
     <input id="text" placeholder="…or type" autocomplete="off" enterkeyhint="send">
   </div>
@@ -131,6 +137,8 @@
     });
     // Picked up: the agent says hello, so the line isn't silent.
     voice.on('started', () => { fetch(`/a/${a.id}/hello`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {}); });
+    voice.on('started', () => { setMute(false); mute.hidden = false; });
+    voice.on('stopped', () => { setMute(false); mute.hidden = true; });
     voice.on('started', () => { call.classList.add('on'); call.textContent = 'End'; call.setAttribute('aria-label', 'End call'); });
     voice.on('stopped', () => { call.classList.remove('on', 'speaking'); call.textContent = 'Call'; call.setAttribute('aria-label', 'Start call'); status.textContent = ''; });
   }
@@ -171,6 +179,16 @@
     setTimeout(() => waitWarm(check), 1000);
   }
   waitWarm();
+  // Mute: the call stays up and you still hear the agent; it just can't hear you.
+  const mute = $('mute');
+  function setMute(on) {
+    voice?.setMuted(on);
+    mute.setAttribute('aria-pressed', String(on));
+    mute.textContent = on ? 'Unmute' : 'Mute';
+    mute.setAttribute('aria-label', on ? 'Unmute microphone' : 'Mute microphone');
+    status.textContent = on ? 'Muted' : '';
+  }
+  mute.addEventListener('click', () => setMute(!voice?.isMuted));
   call.addEventListener('click', () => {
     if (voice?.isRunning) return voice.stop();
     if (ringing) { ringing(); ringing = null; call.classList.remove('on'); call.textContent = 'Call'; status.textContent = ''; return; }
