@@ -40,6 +40,20 @@ describe('ToolTalker', () => {
     expect(bodies[0].tools).toBeUndefined();
   });
 
+  it('asks again once when a round ends in "tool_calls" with no call and no words', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls++;
+      return calls === 1
+        ? sse([{ choices: [{ delta: { content: null }, finish_reason: 'tool_calls' }] }])
+        : sse([{ choices: [{ delta: { content: 'Checking now.' }, finish_reason: 'stop' }] }]);
+    });
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm', systemPrompt: 's', fetchImpl: fetchImpl as any });
+    const events = await collect(talker.stream({ userText: 'what is new?', state }));
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.type === 'token').map((e: any) => e.text).join('')).toBe('Checking now.');
+  });
+
   it('uses the fallback when the free model errors or is slow to start, and skips it after repeated failures', async () => {
     const models: string[] = [];
     let primaryMode: 'error' | 'slow' = 'error';

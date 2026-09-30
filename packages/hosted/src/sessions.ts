@@ -80,7 +80,20 @@ export class Live {
       tts: deps.tts ?? new PassthroughTts(),
       ...(logger ? { logger } : {}),
     });
-    this.pipeline.bus.onAny((event) => this.send(event.type, wire(event as unknown as Record<string, unknown> & { type: string })));
+    // One line per turn with how long each stage took, so a slow reply shows where the time went.
+    const timings = new Map<string, string[]>();
+    this.pipeline.bus.onAny((event) => {
+      this.send(event.type, wire(event as unknown as Record<string, unknown> & { type: string }));
+      if (event.type !== 'turn.timeline') return;
+      const { turnId, stage, elapsedMs, detail } = event as unknown as { turnId: string; stage: string; elapsedMs: number; detail?: string };
+      const stages = timings.get(turnId) ?? [];
+      stages.push(`${stage}${detail ? `(${detail})` : ''}@${elapsedMs}`);
+      timings.set(turnId, stages);
+      if (stage === 'tts.done') {
+        timings.delete(turnId);
+        logger?.info('turn timing', { agent: agent.id, turnId, stages: stages.join(' ') });
+      }
+    });
   }
 
   /** Something the user said. A new turn interrupts whatever was playing. */
