@@ -904,7 +904,8 @@ function evaluateResponseCompletion(
   if (!trimmed) {
     return { complete: false, reason: 'empty answer', stopReason };
   }
-  if (!/[.!?]["')\]]?$/.test(trimmed)) {
+  // Latin, CJK (。！？), Arabic (؟) and Devanagari (।) sentence ends.
+  if (!/[.!?。！？؟।…]["')\]」』]?$/.test(trimmed)) {
     return { complete: false, reason: 'missing sentence terminator', stopReason };
   }
   return { complete: true, stopReason };

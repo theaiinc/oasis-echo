@@ -24,6 +24,9 @@ export class Live {
   readonly notes = new WorkingNotes();
   /** What this user explicitly asked to be remembered, kept across calls. */
   readonly facts: KeptFacts;
+  /** The reply language, pinned: set by the user's explicit request, else the language of their first words. */
+  private language: string | null = null;
+  private firstWords: string | null = null;
   /** When the line last went quiet (a turn or announcement ended). */
   private quietSince = Date.now();
 
@@ -86,6 +89,20 @@ export class Live {
         },
         handler: async ({ about }) => (about?.trim() ? this.facts.forget(about) : { error: 'about is required' }),
       });
+      tools.register<{ language?: string }, unknown>({
+        name: 'set_language',
+        description: 'Change the language you reply in. Only when the user explicitly asks you to reply or speak in another language.',
+        input_schema: {
+          type: 'object',
+          properties: { language: { type: 'string', description: 'The language the user asked for, in English (e.g. "tiếng Nhật" → "Japanese", "back to English" → "English").' } },
+          required: ['language'],
+        },
+        handler: async ({ language }) => {
+          if (!language?.trim()) return { error: 'language is required' };
+          this.language = language.trim();
+          return { ok: true, language: this.language, note: `Reply in ${this.language} from now on, starting with this reply.` };
+        },
+      });
       reasoner = new ToolTalker({
         apiKey: talker.apiKey,
         baseUrl: talker.baseUrl,
@@ -94,6 +111,7 @@ export class Live {
         systemPrompt: talkerPrompt(agent, user, talker.persona),
         tools,
         context: () => this.context(),
+        turnNote: () => this.languageNote(),
         // What matters comes from the notes above; a few turns are enough for the flow of talk.
         historyTurns: 3,
         ...(logger ? { logger } : {}),
@@ -143,6 +161,7 @@ export class Live {
     try {
       await this.pipeline.bargeIn();
       this.send('user.input', { text, atMs: Date.now() });
+      this.firstWords ??= text.slice(0, 200);
       await this.pipeline.handleTurn(text);
     } finally {
       this.busy--;
@@ -154,6 +173,13 @@ export class Live {
   send(type: string, payload: unknown): void {
     const frame = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
     for (const res of this.clients) res.write(frame);
+  }
+
+  /** The reply-language pin, sent right after the user's words each turn. */
+  private languageNote(): string | undefined {
+    const current = this.language ?? (this.firstWords ? `the language of the user's first words in this call ("${this.firstWords}")` : null);
+    if (!current) return undefined;
+    return `If this message asks you to reply in a different language, call set_language with the language they name, then reply in it. Otherwise reply in ${current}, whatever language this message is in.`;
   }
 
   /** What the talker is told each turn in place of a long history: kept facts, fresh notes, background work. */
@@ -234,7 +260,7 @@ function talkerPrompt(agent: AgentConfig, user: EchoUser, persona?: string): str
     persona ?? `You are ${agent.name}'s voice on a live call with ${user.email} (${agent.project}).`,
     'This is speech: answer in one to three short, natural sentences. No markdown, lists, or links. Answer first; ask back only when you truly need to.',
     'Answer yourself whatever you can: conversation, general knowledge, planning, helping the user think.',
-    'Language: reply in the language the user is speaking. Once the call has a language, stay in it for every reply, even when names or terms are in another language; switch only when the user explicitly asks you to.',
+    'Language: each user message ends with a bracketed note naming the reply language. Follow it for every reply, even when the message itself is in another language. Only when the user explicitly asks to switch, call set_language, then reply in the new language. Never mention the note.',
     'Memory: you get only the last few turns, plus notes. Rely on the notes.',
     'When the user asks you to remember something, keep it in mind, or not make them repeat it (in any language, e.g. "nhớ giúp tôi", "remember that"), you must call remember with that fact before you reply; never say you will remember without calling it. Call forget when they ask you to forget. Never store anything they did not ask you to keep.',
     ...(expert ? [
