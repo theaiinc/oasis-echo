@@ -227,10 +227,7 @@ server.on('upgrade', (req, socket, head) => {
 function listen(ws: WebSocket): void {
   const stt = ears!.newListener();
   let utteranceId: string | null = null;
-  let loop: ReturnType<typeof setInterval> | null = null;
-  let last = '';
   const send = (payload: Record<string, unknown>) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload)); };
-  const stopLoop = () => { if (loop) clearInterval(loop); loop = null; };
   void stt.preload().then(() => send({ type: 'ready' }));
   // Kokoro's phonemizer turns any uncaught exception into a crash of the
   // whole server, so nothing from a socket may throw out of here.
@@ -253,26 +250,25 @@ function listen(ws: WebSocket): void {
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === 'start') {
       stt.reset();
-      last = '';
       utteranceId = msg.utteranceId ?? `u${Date.now().toString(36)}`;
-      stopLoop();
-      loop = setInterval(() => void stt.partial().then((p) => {
-        if (p !== null && p !== last) { last = p; send({ type: 'stt.partial', text: p, utteranceId, atMs: Date.now() }); }
-      }).catch(() => undefined), 400);
+      // The page only shows "listening…" for a partial, so say so once instead of
+      // re-transcribing the whole buffer every few hundred ms: those Whisper passes
+      // overlapped on Cloud Run's CPUs and starved the talker and Kokoro (seconds of
+      // delay before a reply). The final transcript still comes from transcribeAll().
+      send({ type: 'stt.partial', text: '', utteranceId, atMs: Date.now() });
     } else if (msg.type === 'end') {
-      stopLoop();
       const id = utteranceId;
+      const started = Date.now();
       void stt.transcribeAll().then((text) => {
+        logger.info('stt final', { ms: Date.now() - started, words: text.split(/\s+/).filter(Boolean).length });
         send({ type: 'stt.final', text, utteranceId: id, speculationId: msg.speculationId ?? null, atMs: Date.now() });
         stt.reset();
       }).catch(() => undefined);
     } else if (msg.type === 'abort') {
-      stopLoop();
       stt.reset();
     }
   };
   ws.on('error', (err) => logger.warn('audio socket error', { error: String(err) }));
-  ws.on('close', stopLoop);
 }
 
 const port = Number(env['PORT'] ?? 8080);
