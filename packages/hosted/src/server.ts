@@ -59,7 +59,12 @@ const processHandlers = {
 };
 const voice = env['ECHO_TTS'] === 'browser'
   ? null
-  : new SharedVoice({ logger, phrases: [...allFillerPhrases(), ...agents.flatMap((a) => (a.expert ? deskPhrases(a.expert.name) : []))] });
+  : new SharedVoice({
+      logger,
+      phrases: [...allFillerPhrases(), ...agents.flatMap((a) => (a.expert ? deskPhrases(a.expert.name) : []))],
+      // Written at image build by dist/bake.js (Dockerfile.hosted).
+      bakedFile: env['ECHO_PHRASES_FILE'] ?? fileURLToPath(new URL('../phrases.json', import.meta.url)),
+    });
 void voice?.ready.then(() => {
   for (const listener of process.listeners('uncaughtException')) {
     if (!processHandlers.uncaughtException.includes(listener)) process.removeListener('uncaughtException', listener);

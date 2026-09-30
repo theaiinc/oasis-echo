@@ -9,6 +9,8 @@ RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/hosted
 RUN npm prune --omit=dev
 RUN node --input-type=module -e "import { KokoroTts, WhisperStreamingStt } from '@oasis-echo/coordinator'; await new KokoroTts({ dtype: 'q8' }).warm(); await new WhisperStreamingStt({}).preload(); console.log('voice models cached'); process.exit(0);"
+# Fillers, apologies and backchannels, synthesized once here instead of at every cold start.
+RUN node packages/hosted/dist/bake.js packages/hosted/phrases.json
 
 FROM node:20-bookworm-slim
 WORKDIR /app
