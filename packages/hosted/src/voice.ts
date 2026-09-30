@@ -49,10 +49,13 @@ export class SharedVoice implements StreamingTts {
   /** Vietnamese speech (VieNeu), when available; everything else is Kokoro. */
   private readonly vi: VieneuTts | null;
   private readonly clipsVi = new Map<string, { audio: string; sampleRate: number }>();
+  /** VieNeu came up; until then (or if it never does) everything is Kokoro. */
+  private viOk = false;
 
   constructor(opts: { voice?: string; concurrent?: number; logger?: Logger; phrases?: string[]; bakedFile?: string; vi?: VieneuTts | null } = {}) {
     const voice = opts.voice ?? 'af_heart';
     this.vi = opts.vi ?? null;
+    void this.vi?.ready.then((ok) => { this.viOk = ok; });
     this.kokoro = new KokoroTts({ voice, dtype: 'q8', ...(opts.logger ? { logger: opts.logger } : {}) });
     this.concurrent = opts.concurrent ?? 2;
     // Baked phrases load in well under a second; only what they lack is synthesized, in the background.
@@ -110,7 +113,7 @@ export class SharedVoice implements StreamingTts {
 
   /** VieNeu for a Vietnamese call (it handles English words inside Vietnamese too), or for Vietnamese text anywhere. */
   private engineFor(text: string, lang?: 'en' | 'vi'): StreamingTts {
-    return this.vi && (lang === 'vi' || isVietnamese(text)) ? this.vi : this.kokoro;
+    return this.vi && this.viOk && (lang === 'vi' || isVietnamese(text)) ? this.vi : this.kokoro;
   }
 
   /** This voice as one call hears it: routed by that call's language. */

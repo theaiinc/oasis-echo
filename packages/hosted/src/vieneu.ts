@@ -23,12 +23,14 @@ export class VieneuTts implements StreamingTts {
   private seq = 0;
   private turn: Promise<void> = Promise.resolve();
   private onReady: ((rate: number) => void) | null = null;
+  private onFailed: (() => void) | null = null;
   sampleRate = 48_000;
   readonly ready: Promise<boolean>;
 
   constructor(private readonly opts: { python: string; script: string; env?: NodeJS.ProcessEnv; logger?: Logger }) {
     this.ready = new Promise<boolean>((resolve) => {
       this.onReady = (rate) => { this.sampleRate = rate; resolve(true); };
+      this.onFailed = () => resolve(false);
       try {
         this.start();
         this.proc!.stdin.write(JSON.stringify({ type: 'preload' }) + '\n');
@@ -60,6 +62,8 @@ export class VieneuTts implements StreamingTts {
       const p = msg.id ? this.pending.get(msg.id) : undefined;
       if (msg.type === 'error') {
         this.opts.logger?.warn('vieneu error', { message: msg.message });
+        // A failed preload means no Vietnamese voice; say so instead of leaving calls ringing.
+        if (!msg.id) this.onFailed?.();
         if (p) { this.pending.delete(msg.id!); p.fail(new Error(msg.message ?? 'vieneu error')); }
         return;
       }

@@ -90,7 +90,8 @@ const ears = env['ECHO_SERVER_STT'] === '1' ? new SharedEars(logger, undefined, 
 // Warm up at start, not on the first call: speaking first, then listening, so a call
 // only starts (the page waits on /api/ready) once both are there.
 const warm = { voice: !voice, ears: !ears, vi: !vieneu };
-void vieneu?.ready.then((ok) => { warm.vi = ok; });
+// Settled either way: without VieNeu a Vietnamese call still picks up (on Kokoro) rather than ringing forever.
+void vieneu?.ready.then(() => { warm.vi = true; });
 void (voice?.ready ?? Promise.resolve()).then(() => {
   warm.voice = true;
   return ears?.newListener().preload();

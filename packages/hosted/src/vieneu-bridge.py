@@ -31,6 +31,12 @@ def _patch_fetch():
         local = MODEL_DIR / repo.replace("/", "__")
         last = None
         for fn in files:
+            # Already baked into the image: use it as is. Asking the hub again would
+            # take a lock file, and the model directory isn't writable at runtime.
+            have = local / (subfolder or "") / fn
+            if have.is_file():
+                last = str(have)
+                continue
             try:
                 last = hf_hub_download(repo, fn, repo_type="model", subfolder=subfolder or None, local_dir=local)
             except Exception:

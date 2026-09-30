@@ -24,8 +24,9 @@ WORKDIR /app
 # onnxruntime (Kokoro, Whisper, VieNeu) ships glibc binaries: Debian, not Alpine.
 RUN apt-get update && apt-get install -y --no-install-recommends dumb-init ca-certificates python3 && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/vieneu /opt/vieneu
-COPY --from=builder /opt/vieneu-models /opt/vieneu-models
-COPY --from=builder /opt/hf /opt/hf
+# Owned by the runtime user: VieNeu's Hugging Face calls may still write locks and metadata.
+COPY --from=builder --chown=node:node /opt/vieneu-models /opt/vieneu-models
+COPY --from=builder --chown=node:node /opt/hf /opt/hf
 COPY --from=builder /app/node_modules node_modules/
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/packages/ packages/
