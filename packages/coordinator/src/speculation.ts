@@ -104,6 +104,8 @@ type Buffer = {
   done: boolean;
   fullText: string;
   startedAt: number;
+  /** The speculative reasoner failed because the API key was rejected. */
+  authRejected?: boolean;
 };
 
 export class SpeculationManager {
@@ -235,6 +237,7 @@ export class SpeculationManager {
       }
     } catch (err) {
       if (!buf.abort.signal.aborted) {
+        if (err instanceof Error && err.name === 'ReasonerAuthError') buf.authRejected = true;
         this.logger?.warn('speculation reasoner failed', { error: String(err) });
       }
     }
@@ -253,6 +256,12 @@ export class SpeculationManager {
     if (!buf) return { kind: 'miss', reason: 'not-found' };
     this.buffers.delete(id);
     if (buf.abort.signal.aborted) return { kind: 'miss', reason: 'aborted' };
+    // Let the committed turn re-run so the pipeline can tell the user
+    // their API key was rejected instead of playing an empty answer.
+    if (buf.authRejected) {
+      buf.abort.abort();
+      return { kind: 'miss', reason: 'aborted' };
+    }
 
     // Wait for routing to resolve — but with a hard deadline. A cold
     // SLM router can hang 10+ seconds on first call; if it's not back

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { PassthroughTts, type Router } from '@oasis-echo/coordinator';
-import type {
-  Reasoner,
-  ReasoningStreamEvent,
+import {
+  ReasonerAuthError,
+  type Reasoner,
+  type ReasoningStreamEvent,
 } from '@oasis-echo/reasoning';
 import { Metrics } from '@oasis-echo/telemetry';
 import type { DialogueState, Intent } from '@oasis-echo/types';
@@ -96,6 +97,31 @@ describe('Pipeline', () => {
     expect(turn.tier).toBe('escalated');
     const joined = chunks.join('');
     expect(joined).toContain('cloud answer');
+  });
+
+  it('tells the user when the LLM API key is rejected and emits an auth error event', async () => {
+    const reasoner: Reasoner = {
+      async *stream() {
+        throw new ReasonerAuthError('openai', 401);
+      },
+    };
+    const p = new Pipeline({
+      sessionId: 't',
+      router: escalateComplex,
+      reasoner,
+      tts: new PassthroughTts(),
+    });
+    const chunks: string[] = [];
+    const errors: Array<{ source: string; code?: string; message: string }> = [];
+    p.bus.on('tts.chunk', (e) => void chunks.push(e.text));
+    p.bus.on('error', (e) => void errors.push({ source: e.source, code: e.code, message: e.error.message }));
+    const turn = await p.handleTurn('why is the sky blue');
+    expect(turn.agentText).toContain('API key was rejected');
+    expect(chunks.join('')).toContain('API key was rejected');
+    expect(chunks.join('')).not.toContain("can't reach");
+    expect(errors).toEqual([
+      { source: 'reasoner', code: 'llm_auth', message: expect.stringContaining('API key rejected') },
+    ]);
   });
 
   it('uses the medium reasoner model for factual/simple escalations only', async () => {

@@ -1,6 +1,7 @@
 import type { Logger } from '@oasis-echo/telemetry';
 import { PERSONA_RULES, type DialogueState } from '@oasis-echo/types';
 import { CircuitBreaker } from './circuit-breaker.js';
+import { isAuthStatus, isReasonerAuthError, ReasonerAuthError } from './errors.js';
 import { PiiRedactor } from './redaction.js';
 import type { Reasoner, ReasoningStreamEvent } from './anthropic-client.js';
 
@@ -109,6 +110,7 @@ export class OpenAIReasoner implements Reasoner {
 
       if (!res.ok) {
         const body = await res.text().catch(() => '');
+        if (isAuthStatus(res.status)) throw new ReasonerAuthError('openai', res.status, body.slice(0, 200));
         throw new Error(`openai ${res.status}: ${body.slice(0, 200)}`);
       }
       if (!res.body) throw new Error('openai: missing response body');
@@ -207,7 +209,10 @@ export class OpenAIReasoner implements Reasoner {
       };
     } catch (err) {
       const isAbort = input.signal?.aborted || (err instanceof Error && err.name === 'AbortError');
-      if (!isAbort) {
+      if (isReasonerAuthError(err)) {
+        // A rejected key won't heal on retry; keep it out of the breaker.
+        this.logger?.error('openai API key rejected', { status: err.status });
+      } else if (!isAbort) {
         this.breaker.recordFailure();
         this.logger?.error('openai stream failed', { error: String(err) });
       }

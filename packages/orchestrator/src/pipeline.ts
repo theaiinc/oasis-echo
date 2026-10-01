@@ -10,7 +10,7 @@ import {
   type StreamingTts,
   type Summarizer,
 } from '@oasis-echo/coordinator';
-import type { Reasoner } from '@oasis-echo/reasoning';
+import { isReasonerAuthError, type Reasoner } from '@oasis-echo/reasoning';
 import type { Logger, Metrics, Tracer } from '@oasis-echo/telemetry';
 import type { Intent, RouterOutput, Turn } from '@oasis-echo/types';
 import { BargeInArbiter } from './bargein-arbiter.js';
@@ -680,6 +680,15 @@ export class Pipeline {
       if (signal.aborted) {
         interrupted = true;
         this.metrics?.inc('interruptions_total');
+      } else if (isReasonerAuthError(err)) {
+        // A revoked/invalid key is not an outage — tell the user plainly
+        // so they fix their config instead of hearing endless apologies.
+        this.logger?.error('escalation failed: API key rejected', { error: String(err) });
+        this.metrics?.inc('escalation_errors_total', { kind: 'auth' });
+        await this.bus.emit({ type: 'error', source: 'reasoner', code: err.code, error: err, atMs: Date.now() });
+        const notice = 'My API key was rejected. Please check the API key in settings.';
+        await this.streamTts(turnId, notice, signal).catch(() => undefined);
+        agentText = notice;
       } else {
         this.logger?.error('escalation failed', { error: String(err) });
         this.metrics?.inc('escalation_errors_total');
