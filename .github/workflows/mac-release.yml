@@ -178,6 +178,12 @@ jobs:
         working-directory: apps/mac
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          SIGNED: ${{ steps.sigcheck.outputs.have_signing }}
+          NOTARY: ${{ steps.notarycheck.outputs.have_notary }}
+          IDENTITY: ${{ vars.MAC_CODESIGN_IDENTITY }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
         run: |
           set -e
           ZIP="OasisEcho-${VERSION}-macos.zip"
@@ -198,6 +204,20 @@ jobs:
             -volname   "Oasis Echo $VERSION" \
             -fs HFS+ -format UDZO -ov \
             "$DMG"
+
+          # Sign, notarize and staple the disk image too, so opening the
+          # download passes Gatekeeper as well as the app inside it.
+          if [[ "$SIGNED" == "true" ]]; then
+            codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+            if [[ "$NOTARY" == "true" ]]; then
+              KEY="$RUNNER_TEMP/asc.p8"
+              printf '%s\n' "$ASC_API_KEY_P8" > "$KEY"
+              xcrun notarytool submit "$DMG" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait --timeout 45m
+              rm -f "$KEY"
+              xcrun stapler staple "$DMG"
+              xcrun stapler validate "$DMG"
+            fi
+          fi
 
           shasum -a 256 "$ZIP" "$DMG" | tee SHA256SUMS.txt
 
