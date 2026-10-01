@@ -118,6 +118,7 @@ export class Live {
         tools,
         context: () => this.context(),
         turnNote: () => this.languageNote(),
+        temperature: 0.8,
         // What matters comes from the notes above; a few turns are enough for the flow of talk.
         historyTurns: 3,
         ...(logger ? { logger } : {}),
@@ -139,8 +140,9 @@ export class Live {
       keepInterruptedReply: true,
       fillerLanguage: () => this.callLanguage(),
       maxFillersPerTurn: 3,
-      // Fillers are baked, so one can play almost at once when the answer isn't there yet.
-      fillerDelayMs: 250,
+      // A filler only when the answer is actually slow (a lookup); a normal answer starts
+      // in ~1.1 s, and a filler before every one of them sounds canned.
+      fillerDelayMs: 900,
       ...(logger ? { logger } : {}),
     });
     this.pipeline.bus.on('turn.complete', ({ turn }) => {
@@ -322,6 +324,7 @@ function talkerPrompt(agent: AgentConfig, user: EchoUser, persona?: string): str
   return [
     persona ?? `You are ${agent.name}, on a live call with ${user.email} (${agent.project}). Speak as yourself, in the first person.`,
     'This is speech: answer in one to three short, natural sentences. No markdown, lists, or links. Answer first; ask back only when you truly need to.',
+    'Sound like a person, not a script: vary how you start and end, react to what they actually said, and keep follow-ups short ("yep", "got it, one sec"). Don\'t end every reply with a question, don\'t open with the same words twice in a row, and never repeat a sentence or offer you already made in this call.',
     'Answer yourself whatever you can: conversation, general knowledge, planning, helping the user think.',
     'Language: each user message ends with a bracketed note naming the reply language. Follow it for every reply, even when the message itself is in another language. Only when the user explicitly asks to switch, call set_language, then reply in the new language. Never mention the note.',
     'Memory: you get only the last few turns, plus notes. Rely on the notes.',
@@ -329,12 +332,12 @@ function talkerPrompt(agent: AgentConfig, user: EchoUser, persona?: string): str
     ...(expert && expertIsSelf(agent) ? [
       `You are ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Their projects, boards, decisions and status come only from your background lookup: never guess those.`,
       `When a question needs that, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long it usually takes.`,
-      `Then say, in the first person, that you're looking into it and roughly how long it takes ("let me pull that up, about a minute"), and keep the call useful while waiting: say what you're checking, ask one thing that would sharpen the answer, or offer something quick you can answer yourself. Never talk about ${agent.name} as someone else, and don't repeat the wait time every turn.`,
-      `The answer is spoken to the user automatically when it arrives. If asked whether it's ready, use the background notes.`,
+      `Then say briefly, in the first person, that you're on it. Mention roughly how long it takes only the first time ("give me about a minute"). Don't fill the wait with the same follow-up question each time; only ask something if it would genuinely sharpen the answer, otherwise just carry on the conversation. Never talk about ${agent.name} as someone else.`,
+      `The answer is spoken to the user automatically when it arrives. If asked whether it's ready, check the background notes and answer in a few words without calling the lookup again.`,
     ] : expert ? [
       `${expert.name} is ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Only ${expert.name} knows their projects, boards, decisions and status: never guess those.`,
       `When a question needs ${expert.name}, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long ${expert.name} usually takes.`,
-      `Then say you've asked ${expert.name} and roughly how long it takes (round it: "about a minute"), and keep the call useful while waiting: say what you're checking, ask one thing that would sharpen the answer, or offer something quick you can answer yourself. Do not repeat the wait time every turn.`,
+      `Then say briefly that you've asked ${expert.name}, and roughly how long it takes only the first time ("about a minute"). Don't fill the wait with the same follow-up question each time; only ask something if it would genuinely sharpen the answer.`,
       `${expert.name}'s answer is spoken to the user automatically when it arrives. If asked whether it's ready, use the background notes.`,
     ] : []),
   ].join('\n');
