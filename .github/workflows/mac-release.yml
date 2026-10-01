@@ -9,25 +9,19 @@ name: Mac App – release
 #   - Manual `workflow_dispatch` with a `version` input (e.g. `0.1.0`) —
 #     creates a draft release with the same `mac-v<version>` tag.
 #
-# REQUIRED SECRETS for "ready to use immediately" releases
-# (when ALL are set, the workflow signs with Developer ID + notarizes +
-# staples, and the resulting bundle launches without Gatekeeper warnings):
-#   MAC_CERT_P12_BASE64      base64 of the exported .p12 of the
-#                            Developer ID Application certificate
-#                            (`base64 -i cert.p12 | pbcopy`)
-#   MAC_CERT_P12_PASSWORD    password for the .p12
-#   MAC_KEYCHAIN_PASSWORD    any string — used to lock the temp keychain
-#                            on the runner. Generate fresh per repo.
-#   MAC_CODESIGN_IDENTITY    the identity string codesign should match,
-#                            e.g. `Developer ID Application: Acme Inc (ABCDE12345)`
-#   MAC_NOTARY_APPLE_ID      Apple ID email for notarization
-#   MAC_NOTARY_PASSWORD      app-specific password (appleid.apple.com →
-#                            Sign-in & Security → App-Specific Passwords)
-#   MAC_NOTARY_TEAM_ID       10-char team ID (developer.apple.com → Membership)
-#
-# If any of those are missing the workflow STILL produces a release —
-# but the bundle is only ad-hoc signed and downloaders will hit a
-# "developer cannot be verified" prompt. The release notes flag this.
+# SIGNING (same setup as theaiinc/arcana and theaiinc/simasis):
+#   secrets  APPLE_DEVELOPER_ID_P12           base64 .p12 of the "Developer ID
+#                                             Application" identity
+#            APPLE_DEVELOPER_ID_P12_PASSWORD  its password
+#            ASC_API_KEY_P8                   App Store Connect API key (.p8)
+#                                             used to notarize
+#   vars     MAC_CODESIGN_IDENTITY            e.g. `Developer ID Application:
+#                                             Quang Anh Tran (48FPPY55D4)`
+#            ASC_KEY_ID, ASC_ISSUER_ID        the API key's id and issuer
+# With all of them the app is signed with Developer ID, notarized and
+# stapled, so it opens without Gatekeeper warnings. Without them the
+# workflow still publishes, ad-hoc signed, and the release notes say so.
+# The temporary keychain's password is generated per run.
 
 on:
   push:
@@ -94,26 +88,25 @@ jobs:
       - name: Detect signing secrets
         id: sigcheck
         env:
-          P12: ${{ secrets.MAC_CERT_P12_BASE64 }}
-          P12_PW: ${{ secrets.MAC_CERT_P12_PASSWORD }}
-          KC_PW: ${{ secrets.MAC_KEYCHAIN_PASSWORD }}
-          IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PW: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          IDENTITY: ${{ vars.MAC_CODESIGN_IDENTITY }}
         run: |
-          if [[ -n "$P12" && -n "$P12_PW" && -n "$KC_PW" && -n "$IDENTITY" ]]; then
+          if [[ -n "$P12" && -n "$P12_PW" && -n "$IDENTITY" ]]; then
             echo "have_signing=true" >> "$GITHUB_OUTPUT"
           else
             echo "have_signing=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Developer ID signing secrets not set — producing an ad-hoc-signed bundle. Downloaders will hit Gatekeeper. See mac-release.yml header for the full secret list."
+            echo "::warning::Developer ID signing secrets not set — producing an ad-hoc-signed bundle. Downloaders will hit Gatekeeper. See mac-release.yml header for the full list."
           fi
 
       - name: Detect notarization secrets
         id: notarycheck
         env:
-          APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
-          APPLE_PW: ${{ secrets.MAC_NOTARY_PASSWORD }}
-          TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
         run: |
-          if [[ -n "$APPLE_ID" && -n "$APPLE_PW" && -n "$TEAM_ID" ]]; then
+          if [[ -n "$ASC_API_KEY_P8" && -n "$ASC_KEY_ID" && -n "$ASC_ISSUER_ID" ]]; then
             echo "have_notary=true" >> "$GITHUB_OUTPUT"
           else
             echo "have_notary=false" >> "$GITHUB_OUTPUT"
@@ -122,11 +115,11 @@ jobs:
       - name: Import Developer ID certificate
         if: steps.sigcheck.outputs.have_signing == 'true'
         env:
-          P12_B64: ${{ secrets.MAC_CERT_P12_BASE64 }}
-          P12_PW:  ${{ secrets.MAC_CERT_P12_PASSWORD }}
-          KC_PW:   ${{ secrets.MAC_KEYCHAIN_PASSWORD }}
+          P12_B64: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PW:  ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
         run: |
           set -e
+          KC_PW="$(openssl rand -hex 24)"  # this run's throwaway keychain only
           KEYCHAIN="$RUNNER_TEMP/build.keychain"
           echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p "$KC_PW" "$KEYCHAIN"
@@ -145,7 +138,7 @@ jobs:
         env:
           OASIS_VERSION: ${{ steps.ver.outputs.version }}
           OASIS_BUILD_NUMBER: ${{ github.run_number }}
-          OASIS_CODESIGN_IDENTITY: ${{ steps.sigcheck.outputs.have_signing == 'true' && secrets.MAC_CODESIGN_IDENTITY || '-' }}
+          OASIS_CODESIGN_IDENTITY: ${{ steps.sigcheck.outputs.have_signing == 'true' && vars.MAC_CODESIGN_IDENTITY || '-' }}
         run: ./Scripts/make-app.sh release
 
       # ─── Notarize + staple (only if both signing AND notary secrets present) ───
@@ -153,21 +146,22 @@ jobs:
         if: steps.sigcheck.outputs.have_signing == 'true' && steps.notarycheck.outputs.have_notary == 'true'
         working-directory: apps/mac
         env:
-          APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
-          APPLE_PW: ${{ secrets.MAC_NOTARY_PASSWORD }}
-          TEAM_ID:  ${{ secrets.MAC_NOTARY_TEAM_ID }}
-          VERSION:  ${{ steps.ver.outputs.version }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID:     ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID:  ${{ vars.ASC_ISSUER_ID }}
+          VERSION:        ${{ steps.ver.outputs.version }}
         run: |
           set -e
           ZIP="OasisEcho-${VERSION}-macos.zip"
           # notarytool wants a zip, not a raw .app.
           /usr/bin/ditto -c -k --keepParent OasisEcho.app "$ZIP"
 
+          KEY="$RUNNER_TEMP/asc.p8"
+          printf '%s\n' "$ASC_API_KEY_P8" > "$KEY"
           xcrun notarytool submit "$ZIP" \
-            --apple-id  "$APPLE_ID" \
-            --password  "$APPLE_PW" \
-            --team-id   "$TEAM_ID"  \
-            --wait
+            --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+            --wait --timeout 45m
+          rm -f "$KEY"
 
           # Staple the ticket to the .app so it works offline.
           xcrun stapler staple OasisEcho.app
