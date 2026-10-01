@@ -1,0 +1,83 @@
+name: Windows App – release
+
+# Publishes the Windows tray app ("Hey Echo" wake word + Echo turns) as a
+# GitHub Release: a zip with one self-contained OasisEcho.exe (no .NET
+# install needed) and a README.
+#
+# TRIGGERS
+#   - Push a tag matching `win-v*` (e.g. `win-v0.1.0`): version from the tag,
+#     release published.
+#   - Manual `workflow_dispatch` with a `version` input: draft release
+#     tagged `win-v<version>`.
+#
+# The exe is not code-signed, so Windows SmartScreen shows "Windows
+# protected your PC" on first run (More info → Run anyway). The release
+# notes say so.
+
+on:
+  push:
+    tags:
+      - 'win-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.1.0). A `win-v<version>` tag will be created on the release commit.'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # needed for creating releases
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Version
+        id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then v="${{ inputs.version }}"; else v="${GITHUB_REF_NAME#win-v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=win-v$v" >> "$GITHUB_OUTPUT"
+
+      - name: Test core
+        working-directory: apps/windows
+        run: dotnet test tests/OasisEcho.Core.Tests -c Release
+
+      - name: Publish
+        working-directory: apps/windows
+        run: >
+          dotnet publish src/OasisEcho -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -p:DebugType=none
+          -p:Version=${{ steps.v.outputs.version }} -o out
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = "OasisEcho-Windows-${{ steps.v.outputs.version }}"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item apps/windows/out/OasisEcho.exe $dir/
+          Copy-Item apps/windows/README.md $dir/README.md
+          Compress-Archive -Path $dir -DestinationPath "$dir-x64.zip"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: Oasis Echo for Windows ${{ steps.v.outputs.version }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          files: OasisEcho-Windows-${{ steps.v.outputs.version }}-x64.zip
+          body: |
+            Oasis Echo for Windows: a tray app that listens for **"Hey Echo"** and talks to your Oasis Echo server.
+
+            **Install:** download `OasisEcho-Windows-${{ steps.v.outputs.version }}-x64.zip`, unzip, run `OasisEcho.exe` (Windows 10/11, x64; no .NET needed).
+            It needs an Oasis Echo server running (default `http://127.0.0.1:9187`, see the README).
+
+            **Not code-signed yet:** SmartScreen will say "Windows protected your PC" on first run. Choose **More info → Run anyway**.
