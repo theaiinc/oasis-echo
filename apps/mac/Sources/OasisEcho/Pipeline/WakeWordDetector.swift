@@ -17,7 +17,8 @@ final class WakeWordDetector: @unchecked Sendable {
     private var vadThreshold: Float = 0.018
     private var loudFrames = 0
     private let vadConfirmCount = 3
-    private var captureDuration: Double = 3.0
+    /// Which audio to recognize for the phrase (see WakePhraseWindow).
+    private var window = WakePhraseWindow(sampleRate: 48000)
     private var isActive = false
     private var recognizing = false
     private var cooldownUntil: Date = .distantPast
@@ -75,6 +76,7 @@ final class WakeWordDetector: @unchecked Sendable {
         engine.stop()
         buffer?.clear()
         loudFrames = 0
+        window.reset()
         recognizing = false
         log.notice("paused")
     }
@@ -101,6 +103,7 @@ final class WakeWordDetector: @unchecked Sendable {
         engine.stop()
         buffer?.clear()
         buffer = nil
+        window.reset()
         isActive = false
         recognizing = false
         log.notice("stopped")
@@ -119,8 +122,9 @@ final class WakeWordDetector: @unchecked Sendable {
         for i in 0..<n { let s = ch[i]; sum += s * s }
         let rms = sqrt(sum / Float(n))
 
+        let loud = rms > self.vadThreshold
         let wasSilent = self.loudFrames == 0
-        if rms > self.vadThreshold {
+        if loud {
             if wasSilent { log.debug("vad trigger: rms=\(rms)") }
             self.loudFrames += 1
         } else {
@@ -130,20 +134,26 @@ final class WakeWordDetector: @unchecked Sendable {
 
         self.buffer?.append(ch, count: n)
 
+        // A phrase in progress: recognize once it has been said (a short pause, or 3 s).
+        if self.window.isCapturing {
+            if let frames = self.window.push(count: n, loud: loud) { startRecognition(frames: frames) }
+            return
+        }
+
         if self.loudFrames >= self.vadConfirmCount, !self.recognizing, Date() >= self.cooldownUntil {
-            log.notice("vad fired: \(self.loudFrames) frames above threshold")
+            log.notice("vad fired: \(self.loudFrames) frames above threshold; capturing the phrase")
             self.loudFrames = 0
-            startRecognition()
+            self.window.sampleRate = self.hardwareRate
+            self.window.begin()
         }
     }
 
     // MARK: - Recognition
 
-    private func startRecognition() {
+    private func startRecognition(frames wanted: Int) {
         recognizing = true
-        let frameCount = Int(hardwareRate * captureDuration)
         let avail = buffer?.count ?? 0
-        let frames = min(frameCount, avail)
+        let frames = min(wanted, avail)
         guard Double(frames) > hardwareRate * 0.3 else {
             log.debug("too little audio: \(frames) frames")
             recognizing = false
@@ -160,7 +170,7 @@ final class WakeWordDetector: @unchecked Sendable {
             frameCapacity: AVAudioFrameCount(frames)
         ) else { recognizing = false; return }
         pcmBuf.frameLength = AVAudioFrameCount(frames)
-        buffer?.read(into: pcmBuf.floatChannelData![0], count: frames)
+        buffer?.readLatest(into: pcmBuf.floatChannelData![0], count: frames)
 
         log.notice("recognition pass: \(frames) frames at \(Int(self.hardwareRate)) Hz = \(String(format: "%.1f", Double(frames) / self.hardwareRate)) s")
 
@@ -230,7 +240,7 @@ final class WakeWordDetector: @unchecked Sendable {
 
 // MARK: - Ring buffer (mono float32)
 
-private final class RingBuffer {
+final class RingBuffer {
     private let buf: UnsafeMutablePointer<Float>
     private let capacity: Int
     private var head = 0
@@ -251,9 +261,11 @@ private final class RingBuffer {
         count = min(count + n, capacity)
     }
 
-    func read(into dest: UnsafeMutablePointer<Float>, count n: Int) {
+    /// The newest `n` samples, oldest first. (This used to read the OLDEST samples, so
+    /// once the buffer was full the window ended before the speech that triggered it.)
+    func readLatest(into dest: UnsafeMutablePointer<Float>, count n: Int) {
         let r = min(n, count)
-        let start = (head - count + capacity) % capacity
+        let start = (head - r + capacity) % capacity
         for i in 0..<r {
             dest[i] = buf[(start + i) % capacity]
         }
