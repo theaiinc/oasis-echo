@@ -73,6 +73,8 @@ fi
 # The AppleScript paste fallback (Automation → System Events) persists
 # across builds because it's tied to bundle ID, not the signing cert.
 SIGN_IDENTITY="${OASIS_CODESIGN_IDENTITY:--}"
+# Hardened Runtime entitlements for Developer ID signing (mic, Apple Events, MediaRemote).
+ENTITLEMENTS="OasisEcho.entitlements"
 if [[ "$SIGN_IDENTITY" == "-" || -z "$SIGN_IDENTITY" ]]; then
   echo "→ ad-hoc signing (local dev only)"
   codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
