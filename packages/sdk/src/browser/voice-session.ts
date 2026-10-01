@@ -89,6 +89,11 @@ export type VoiceSessionOpts = {
    * in this browser) falls back to 'energy' on its own.
    */
   vad?: 'recognition' | 'energy';
+  /**
+   * Energy VAD: silence (ms) before the page ends an utterance itself. A server
+   * that decides turn ends from the words (hosted Echo) sets this long, as a fallback.
+   */
+  vadEndSilenceMs?: number;
   /** Speech recognition language (BCP 47, e.g. "vi-VN"). Default: the browser's. */
   lang?: string;
   /** sendPartial min-word-count gate. Default 3. */
@@ -139,6 +144,7 @@ export class VoiceSession {
   private energyVad: EnergyVad | null = null;
   private micSource: AudioNode | null = null;
   private readonly silenceMs: number;
+  private readonly vadEndSilenceMs: number | undefined;
   private readonly debouncerOpts: Omit<TurnDebouncerOpts, 'onCommit' | 'onStateChange'>;
   private readonly audioConstraints: MediaTrackConstraints;
   private readonly partialMinWords: number;
@@ -158,6 +164,7 @@ export class VoiceSession {
 
   private audioCtx: AudioContext | null = null;
   private micStream: MediaStream | null = null;
+  private muted = false;
   private micCapture: MicCapture | null = null;
   private audioPlayer: AudioPlayer | null = null;
   private bargeInMonitor: BargeInMonitor | null = null;
@@ -183,6 +190,7 @@ export class VoiceSession {
     this.lang = opts.lang;
     this.vad = opts.vad ?? 'recognition';
     this.silenceMs = opts.silenceMs ?? 1200;
+    this.vadEndSilenceMs = opts.vadEndSilenceMs;
     this.debouncerOpts = opts.debouncer ?? {};
     this.audioConstraints = opts.audioConstraints ?? {
       echoCancellation: true,
@@ -244,6 +252,7 @@ export class VoiceSession {
 
     try {
       this.micStream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints });
+      this.muted = false;
     } catch (err) {
       this.voiceOn = false;
       this.emit('error', { kind: 'mic', message: (err as Error)?.name ?? String(err) });
@@ -454,9 +463,27 @@ export class VoiceSession {
     }
   }
 
+  /** Whether the user has muted their mic for this call. */
+  get isMuted(): boolean {
+    return this.muted;
+  }
+
+  /**
+   * Mute or unmute the mic during a call: the mic tracks go silent (so neither the
+   * page nor a listening server hears anything) and speech recognition stops.
+   * A new call always starts unmuted.
+   */
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    try { this.micStream?.getAudioTracks().forEach((t) => { t.enabled = !muted; }); } catch { /* ignore */ }
+    if (muted) this.pauseListen();
+    else if (this.voiceOn) this.requestListen();
+  }
+
   private requestListen(): void {
     this.shouldListen = true;
-    if (!this.recognition) return;
+    // Muted: stay deaf even when the agent finishes speaking and listening would resume.
+    if (this.muted || !this.recognition) return;
     try { this.recognition.start(); } catch { /* already started */ }
   }
 
@@ -471,6 +498,7 @@ export class VoiceSession {
   private startEnergyVad(): void {
     if (this.energyVad || !this.audioCtx || !this.micSource) return;
     this.energyVad = new EnergyVad({
+      ...(this.vadEndSilenceMs ? { endSilenceMs: this.vadEndSilenceMs } : {}),
       isListening: () => !this.micPausedForTts && !this.agentSpeaking,
       onStart: () => {
         if (!this.audioStream) return;
@@ -512,7 +540,7 @@ export class VoiceSession {
       this.emit('error', { kind: 'recognition', message: ev.error });
     };
     rec.onend = () => {
-      if (this.voiceOn && this.shouldListen) {
+      if (this.voiceOn && this.shouldListen && !this.muted) {
         try { rec.start(); } catch { /* ignore */ }
       }
     };

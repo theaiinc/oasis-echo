@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Tiered hybrid voice AI assistant — reflex / coordinator / reasoning",
+  "description": "Tiered hybrid voice AI assistant \u2014 reflex / coordinator / reasoning",
   "repository": {
     "type": "git",
     "url": "https://github.com/theaiinc/oasis-echo.git"
@@ -31,5 +31,10 @@
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vitest": "^1.4.0"
+  },
+  "overrides": {
+    "kokoro-js": {
+      "@huggingface/transformers": "^4.1.0"
+    }
   }
 }

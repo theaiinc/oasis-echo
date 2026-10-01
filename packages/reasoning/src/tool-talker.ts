@@ -29,6 +29,10 @@ export type ToolTalkerOptions = {
   systemPrompt: string;
   tools?: ToolRegistry;
   context?: () => string | undefined;
+  /** A short note added after the user's latest words (e.g. the reply language), where the model weighs it most. */
+  turnNote?: () => string | undefined;
+  /** How many recent turns of chat history to send (default 8). Fewer saves tokens when `context` carries what matters. */
+  historyTurns?: number;
   maxToolRounds?: number;
   timeoutMs?: number;
   temperature?: number;
@@ -59,7 +63,12 @@ export class ToolTalker implements Reasoner {
     const toolSpecs = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
     let inputTokens = 0;
     let outputTokens = 0;
+    let retriedEmpty = false;
+    const userAt = messages.length - 1;
     for (let round = 0; ; round++) {
+      // Re-read every round: a tool (e.g. set_language) may have just changed it.
+      const note = this.opts.turnNote?.();
+      messages[userAt] = { role: 'user', content: note ? `${input.userText}\n\n[${note}]` : input.userText };
       const canCall = toolSpecs.length > 0 && round < (this.opts.maxToolRounds ?? 3);
       const body = {
         messages,
@@ -93,6 +102,14 @@ export class ToolTalker implements Reasoner {
         }
       }
       const called = calls.filter((c) => c.function.name);
+      // Some providers end a round with finish_reason "tool_calls" but no call and no
+      // words (a malformed call dropped upstream). Ask again once rather than go silent.
+      if (!called.length && !text && finish === 'tool_calls' && !retriedEmpty) {
+        retriedEmpty = true;
+        this.opts.logger?.warn('talker empty tool round, retrying', { model: this.opts.model, round });
+        round--;
+        continue;
+      }
       if (!called.length || !canCall) {
         yield { type: 'done', stopReason: finish === 'length' ? 'length' : 'stop', inputTokens, outputTokens };
         return;
@@ -190,7 +207,7 @@ export class ToolTalker implements Reasoner {
     const context = this.opts.context?.();
     if (context) msgs.push({ role: 'system', content: context });
     if (state.summary) msgs.push({ role: 'system', content: `Conversation so far:\n${state.summary}` });
-    for (const turn of state.turns.slice(-8)) {
+    for (const turn of state.turns.slice(-(this.opts.historyTurns ?? 8))) {
       if (turn.userText) msgs.push({ role: 'user', content: turn.userText });
       if (turn.agentText) msgs.push({ role: 'assistant', content: turn.agentText });
     }

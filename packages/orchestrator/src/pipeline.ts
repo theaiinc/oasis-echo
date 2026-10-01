@@ -16,7 +16,7 @@ import type { Intent, RouterOutput, Turn } from '@oasis-echo/types';
 import { BargeInArbiter } from './bargein-arbiter.js';
 import { EventBus } from './event-bus.js';
 import type { FillerAdvisor } from './filler-advisor.js';
-import { pickApology, pickContinuationFiller, pickFirstFiller } from './filler.js';
+import { pickApology, pickContinuationFiller, pickFirstFiller, type FillerLanguage } from './filler.js';
 
 const LLM_STALL_TIMEOUT_MS = Number(process.env['OASIS_LLM_STALL_TIMEOUT_MS'] ?? 8_000);
 
@@ -39,6 +39,20 @@ export type PipelineOpts = {
    */
   mediumReasonerModel?: string;
   summarizeEveryNTurns?: number;
+  /** Open the turn after an interruption with a short apology. Default true. */
+  apologizeAfterInterruption?: boolean;
+  /**
+   * When the user interrupts a reply, keep the part that was generated but not yet
+   * spoken in the turn's history (marked as not said), so a follow-up can use it
+   * instead of starting over. Default false.
+   */
+  keepInterruptedReply?: boolean;
+  /** How long to wait for the answer's first sentence before a filler plays. Default 500–600 ms; lower when fillers are ready ahead of time. */
+  fillerDelayMs?: number;
+  /** At most this many fillers in one turn, then silence until the answer. Default unlimited. */
+  maxFillersPerTurn?: number;
+  /** Language for fillers and apologies, read per turn (e.g. the call's pinned language). Default English. */
+  fillerLanguage?: () => FillerLanguage;
 };
 
 /**
@@ -69,6 +83,13 @@ export class Pipeline {
   private readonly fillerAdvisor: FillerAdvisor | undefined;
   private readonly mediumReasonerModel: string | undefined;
   private readonly summarizeEveryNTurns: number;
+  private readonly apologizeAfterInterruption: boolean;
+  private readonly keepInterruptedReply: boolean;
+  private readonly fillerLanguage: () => FillerLanguage;
+  private readonly maxFillersPerTurn: number;
+  private readonly fillerDelayMs: number | undefined;
+  /** Total audio sent so far, to pace fillers by how long they play. */
+  private emittedAudioMs = 0;
   private turnCounter = 0;
   /**
    * Rolling set of recently-used filler phrases, scoped to the whole
@@ -111,6 +132,11 @@ export class Pipeline {
     this.fillerAdvisor = opts.fillerAdvisor;
     this.mediumReasonerModel = opts.mediumReasonerModel?.trim() || undefined;
     this.summarizeEveryNTurns = opts.summarizeEveryNTurns ?? 5;
+    this.apologizeAfterInterruption = opts.apologizeAfterInterruption ?? true;
+    this.keepInterruptedReply = opts.keepInterruptedReply ?? false;
+    this.fillerLanguage = opts.fillerLanguage ?? (() => 'en');
+    this.maxFillersPerTurn = opts.maxFillersPerTurn ?? Number.POSITIVE_INFINITY;
+    this.fillerDelayMs = opts.fillerDelayMs;
   }
 
   /**
@@ -130,7 +156,7 @@ export class Pipeline {
     const reflex = reflexClassify(userText);
     if (reflex) {
       const turn = await this.speakLocal(turnId, userText, reflex, 'reflex', startedAtMs);
-      this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+      this.pendingApology = this.apologizeAfterInterruption && turn.interrupted && turn.tier !== 'reflex';
       this.state.applyIntent(turn.intent ?? 'unknown');
       this.state.recordTurn(turn);
       if (turnSpan) this.tracer?.end(turnSpan, { tier: 'reflex', intent: turn.intent });
@@ -168,7 +194,7 @@ export class Pipeline {
     // If the agent got barge-in'd mid-response, apologize at the start
     // of the next turn. Skip tracking when the just-finished turn was
     // itself a reflex (too short to feel like a real interruption).
-    this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+    this.pendingApology = this.apologizeAfterInterruption && turn.interrupted && turn.tier !== 'reflex';
 
     this.state.applyIntent(turn.intent ?? 'unknown');
     this.state.recordTurn(turn);
@@ -277,7 +303,7 @@ export class Pipeline {
       // mid-tool-call and hadn't produced round-2 tokens yet. Race
       // first-sentence vs a short threshold; if the queue is still
       // empty, play short chained fillers until a sentence lands.
-      const FILLER_THRESHOLD_MS = 500;
+      const FILLER_THRESHOLD_MS = this.fillerDelayMs ?? 500;
       await Promise.race([
         (async () => {
           while (sentenceQueue.length === 0 && !signal.aborted && !drainDone) {
@@ -295,20 +321,22 @@ export class Pipeline {
         while (
           sentenceQueue.length === 0 &&
           !drainDone &&
-          !signal.aborted
+          !signal.aborted &&
+          fillersPlayed < this.maxFillersPerTurn
         ) {
           const filler = fillersPlayed === 0
-            ? pickFirstFiller(recentSet)
-            : pickContinuationFiller('thinking', usedFillers, recentSet);
+            ? pickFirstFiller(recentSet, this.fillerLanguage())
+            : pickContinuationFiller('thinking', usedFillers, recentSet, this.fillerLanguage());
           usedFillers.add(filler);
           this.trackRecentFiller(filler);
           const trailingSilenceMs = 300 + fillersPlayed * 250;
-          await this.streamTts(turnId, filler, signal, {
+          const playMs = await this.streamFiller(turnId, filler, signal, {
             filler: true,
             speed: fillerSpeed,
             trailingSilenceMs,
           });
           fillersPlayed++;
+          await this.untilPlayed(playMs, () => sentenceQueue.length > 0 || drainDone || signal.aborted);
         }
       }
 
@@ -362,7 +390,7 @@ export class Pipeline {
       interrupted,
     };
 
-    this.pendingApology = turn.interrupted && turn.tier !== 'reflex';
+    this.pendingApology = this.apologizeAfterInterruption && turn.interrupted && turn.tier !== 'reflex';
     this.state.applyIntent(turn.intent ?? 'unknown');
     this.state.recordTurn(turn);
 
@@ -418,7 +446,7 @@ export class Pipeline {
     const fillerReason = output.decision.reason;
     const recentSet = new Set(this.recentFillers);
     const fillerText =
-      output.decision.filler ?? pickFirstFiller(recentSet);
+      output.decision.filler ?? pickFirstFiller(recentSet, this.fillerLanguage());
     const usedFillers = new Set<string>();
     let advisedFiller: string | null = null;
     let fillerAdviceInFlight = false;
@@ -428,6 +456,7 @@ export class Pipeline {
     const signal = this.arbiter.beginTurn(turnId, () => {});
 
     let agentText = '';
+    let fullText = '';
     let interrupted = false;
     const markTimeline = (stage: string, detail?: string): void => {
       void this.bus.emit({
@@ -460,7 +489,6 @@ export class Pipeline {
       let streamStopReason: string | null = null;
       let streamCompletedCleanly = false;
       let watchdogTimedOut = false;
-      let fullText = '';
       // Stateful filter that captures <think>...</think> blocks and
       // routes them via bus.emit('think.token') for the UI, while
       // stripping them from the TTS sentence stream.
@@ -605,7 +633,7 @@ export class Pipeline {
       // token, so wait for sentenceQueue to actually have something.
       // If the model is fast enough that a sentence lands before the
       // threshold, we skip the filler entirely.
-      const FILLER_THRESHOLD_MS = 600;
+      const FILLER_THRESHOLD_MS = this.fillerDelayMs ?? 600;
       const { fillerSpeed } = this.fillerStrategy();
       await Promise.race([
         (async () => {
@@ -630,7 +658,8 @@ export class Pipeline {
       while (
         sentenceQueue.length === 0 &&
         !signal.aborted &&
-        !streamDone
+        !streamDone &&
+        fillersPlayed < this.maxFillersPerTurn
       ) {
         let text = fillerText;
         if (fillersPlayed > 0) {
@@ -640,7 +669,7 @@ export class Pipeline {
             usedFillers.add(text);
             this.trackRecentFiller(text);
           } else {
-            text = pickContinuationFiller(fillerReason, usedFillers, recentSet);
+            text = pickContinuationFiller(fillerReason, usedFillers, recentSet, this.fillerLanguage());
             this.trackRecentFiller(text);
           }
         } else if (text) {
@@ -651,13 +680,14 @@ export class Pipeline {
         // position (later fillers → longer pause) so the pacing feels
         // like someone genuinely hesitating rather than reading a list.
         const trailingSilenceMs = 300 + fillersPlayed * 250;
-        await this.streamTts(turnId, text, signal, {
+        const playMs = await this.streamFiller(turnId, text, signal, {
           filler: true,
           speed: fillerSpeed,
           trailingSilenceMs,
         });
         fillersPlayed++;
         requestFillerAdvice();
+        await this.untilPlayed(playMs, () => sentenceQueue.length > 0 || signal.aborted || streamDone);
       }
 
       // Drain sentences as they arrive. Each synth starts right after
@@ -724,7 +754,7 @@ export class Pipeline {
       endedAtMs: Date.now(),
       userText,
       intent: output.intent as Intent,
-      agentText: agentText.trim(),
+      agentText: interrupted && this.keepInterruptedReply ? withUnsaidRest(agentText, fullText) : agentText.trim(),
       tier: 'escalated',
       interrupted,
     };
@@ -771,7 +801,7 @@ export class Pipeline {
     if (!this.pendingApology || signal.aborted) return;
     this.pendingApology = false;
     const recent = new Set(this.recentApologies);
-    const apology = pickApology(recent);
+    const apology = pickApology(recent, this.fillerLanguage());
     this.recentApologies.push(apology);
     while (this.recentApologies.length > 4) this.recentApologies.shift();
     await this.streamTts(turnId, apology, signal, {
@@ -779,6 +809,28 @@ export class Pipeline {
       speed: 0.95,
       trailingSilenceMs: 250,
     });
+  }
+
+  /**
+   * A filler, returning how long its audio plays. Synthesis used to pace the filler
+   * loops by accident; with fillers ready ahead of time they'd be sent back to back
+   * as fast as the loop spins, so the loops wait on playback instead.
+   */
+  private async streamFiller(
+    turnId: string,
+    text: string,
+    signal: AbortSignal,
+    opts: { filler?: boolean; speed?: number; trailingSilenceMs?: number },
+  ): Promise<number> {
+    const before = this.emittedAudioMs;
+    await this.streamTts(turnId, text, signal, opts);
+    return this.emittedAudioMs - before;
+  }
+
+  /** Wait until audio of `ms` would have played (a little less, to keep speech continuous), or `done()`. */
+  private async untilPlayed(ms: number, done: () => boolean): Promise<void> {
+    const until = Date.now() + Math.max(0, ms - 150);
+    while (!done() && Date.now() < until) await sleep(20);
   }
 
   private async streamTts(
@@ -800,6 +852,7 @@ export class Pipeline {
         chunk.final && chunk.pcm && opts.trailingSilenceMs
           ? appendSilence(chunk.pcm, chunk.sampleRate, opts.trailingSilenceMs)
           : chunk.pcm;
+      if (pcm && chunk.sampleRate) this.emittedAudioMs += (pcm.length / chunk.sampleRate) * 1000;
       await this.bus.emit({
         type: 'tts.chunk',
         turnId,
@@ -892,7 +945,8 @@ function evaluateResponseCompletion(
   if (!trimmed) {
     return { complete: false, reason: 'empty answer', stopReason };
   }
-  if (!/[.!?]["')\]]?$/.test(trimmed)) {
+  // Latin, CJK (。！？), Arabic (؟) and Devanagari (।) sentence ends.
+  if (!/[.!?。！？؟।…]["')\]」』]?$/.test(trimmed)) {
     return { complete: false, reason: 'missing sentence terminator', stopReason };
   }
   return { complete: true, stopReason };
@@ -1093,4 +1147,17 @@ function appendSilence(pcm: Int16Array, sampleRate: number, ms: number): Int16Ar
   out.set(pcm, 0);
   // trailing samples default to 0 = silence
   return out;
+}
+
+/**
+ * An interrupted reply as history: what was said, then what had been generated but
+ * not said yet, marked so the model knows the user never heard it.
+ */
+export function withUnsaidRest(spoken: string, generated: string): string {
+  const said = spoken.trim();
+  const all = generated.replace(/\s+/g, ' ').trim();
+  const norm = (t: string) => t.replace(/\s+/g, ' ').trim();
+  const rest = norm(said) && all.startsWith(norm(said)) ? all.slice(norm(said).length).trim() : said ? '' : all;
+  const head = said ? `${said} [interrupted here]` : '[interrupted before saying anything]';
+  return rest ? `${head} [not yet said: ${rest}]` : head;
 }

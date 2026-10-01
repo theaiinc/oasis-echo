@@ -13,6 +13,8 @@ import type { Logger } from '@oasis-echo/telemetry';
  */
 
 export type WhisperStreamingSttOpts = {
+  /** Language to transcribe with a multilingual model (ignored by `*.en` models). Default 'en'. */
+  language?: string;
   /**
    * HuggingFace model id. Default `Xenova/whisper-base.en` (~74M params,
    * ~100MB q8). `whisper-tiny.en` is ~40MB and faster but has
@@ -69,6 +71,7 @@ const SAMPLE_RATE = 16000;
  */
 export class WhisperStreamingStt {
   private readonly modelId: string;
+  private readonly language: string;
   private readonly dtype: string;
   private readonly maxBufferSamples: number;
   private readonly partialEveryMs: number;
@@ -92,6 +95,7 @@ export class WhisperStreamingStt {
 
   constructor(opts: WhisperStreamingSttOpts = {}) {
     this.modelId = opts.modelId ?? 'Xenova/whisper-base.en';
+    this.language = opts.language ?? 'en';
     this.dtype = opts.dtype ?? 'q8';
     this.maxBufferSamples = (opts.maxBufferSeconds ?? 30) * SAMPLE_RATE;
     this.partialEveryMs = opts.partialEveryMs ?? 900;
@@ -273,7 +277,7 @@ export class WhisperStreamingStt {
       condition_on_previous_text: false,
     };
     if (!isEnglishOnly) {
-      genOpts['language'] = 'en';
+      genOpts['language'] = this.language;
       genOpts['task'] = 'transcribe';
     }
     try {
