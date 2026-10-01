@@ -208,8 +208,16 @@
   $('serverstt').addEventListener('change', (e) => { store.set('echo.serverstt', e.target.checked ? '1' : '0'); rebuild(); });
   $('serverstt').checked = store.get('echo.serverstt') !== '0';
 
-  const res = await fetch('/api/me');
-  if (res.status === 401) location.href = '/auth/login';
+  // The UI can come from cache while the server is still cold-starting, so
+  // /api/me may fail for a few seconds: wait it out instead of erroring.
+  let res = null;
+  for (let i = 0; i < 20; i++) {
+    res = await fetch('/api/me').catch(() => null);
+    if (res && res.status < 500) break;
+    if (i === 0) add('Waking up Echo…', 'note');
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  if (!res || res.status === 401) { location.href = '/auth/login'; throw new Error('sign in'); }
   const me = await res.json();
   $('sttrow').hidden = !me.serverStt;
   sttLanguages = me.serverSttLanguages ?? ['en-US'];

@@ -190,15 +190,19 @@ const server = createServer(async (req, res) => {
       return res.end();
     }
 
-    const user = whoIs(req);
+    // The page is a static shell with no per-user content; it sends itself to
+    // /auth/login when /api/me says 401. Serving it unauthenticated and
+    // cacheable lets the CDN show the UI while a scaled-to-zero instance
+    // cold-starts, instead of the visitor seeing Cloud Run's 500.
     if (url.pathname === '/') {
-      if (!user) {
-        res.writeHead(302, { location: '/auth/login' });
-        return res.end();
-      }
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400',
+      });
       return res.end(page);
     }
+
+    const user = whoIs(req);
     if (!user) return json(res, 401, { error: 'sign_in' });
 
     if (url.pathname === '/api/ready') {
