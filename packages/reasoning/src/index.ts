@@ -1,5 +1,6 @@
 export * from './redaction.js';
 export * from './circuit-breaker.js';
+export * from './errors.js';
 export * from './tools.js';
 export * from './mcp-registry.js';
 export * from './anthropic-client.js';

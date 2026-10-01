@@ -48,6 +48,7 @@ import {
 } from '@oasis-echo/reasoning';
 import { createLogger, Metrics, Tracer } from '@oasis-echo/telemetry';
 import { loadConfig } from './config.js';
+import { haApiError } from './ha-errors.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -367,7 +368,7 @@ async function main(): Promise<void> {
           headers,
           body: JSON.stringify(body),
         });
-        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        if (!res.ok) return haApiError(res);
         return { result: await res.json() };
       },
     });
@@ -389,7 +390,7 @@ async function main(): Promise<void> {
           headers,
           body: JSON.stringify({ entity_id: input.entity_id }),
         });
-        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        if (!res.ok) return haApiError(res);
         return { result: await res.json() };
       },
     });
@@ -409,7 +410,7 @@ async function main(): Promise<void> {
         const res = await fetch(`${baseUrl}/api/states/${input.entity_id}`, {
           headers,
         });
-        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        if (!res.ok) return haApiError(res);
         return { result: await res.json() };
       },
     });
@@ -427,7 +428,7 @@ async function main(): Promise<void> {
       handler: async (input: { area_id?: string }) => {
         if (!haToken) return { error: 'HA_TOKEN not configured \u2014 set HA_TOKEN in your environment' };
         const res = await fetch(`${baseUrl}/api/states`, { headers });
-        if (!res.ok) return { error: `HA API error: ${res.status} ${res.statusText}` };
+        if (!res.ok) return haApiError(res);
         const states = (await res.json()) as Array<{ entity_id: string; area_id?: string }>;
         const filtered = input.area_id
           ? states.filter((s) => s.area_id === input.area_id)
@@ -790,6 +791,14 @@ async function main(): Promise<void> {
       hub.broadcast('tts.chunk', payload);
     } else if (event.type === 'audio.frame') {
       // skip — very noisy, not useful in the UI
+    } else if (event.type === 'error') {
+      // Error objects JSON-serialize to {}; send the message instead.
+      hub.broadcast('error', {
+        source: event.source,
+        ...(event.code ? { code: event.code } : {}),
+        error: event.error.message,
+        atMs: event.atMs,
+      });
     } else {
       // All other events serialize cleanly
       hub.broadcast(event.type, event);

@@ -72,7 +72,14 @@ export type TtsStartEvent = { type: 'tts.start'; turnId: string; atMs: number };
 export type TtsDoneEvent = { type: 'tts.done'; turnId: string; atMs: number };
 export type BargeInEvent = { type: 'bargein'; atMs: number; interruptedTurnId: string };
 export type TurnCompleteEvent = { type: 'turn.complete'; turn: Turn };
-export type ErrorEvent = { type: 'error'; source: string; error: Error; atMs: number };
+export type ErrorEvent = {
+  type: 'error';
+  source: string;
+  /** Machine-readable kind, e.g. `llm_auth` when the provider rejected the API key. */
+  code?: string;
+  error: Error;
+  atMs: number;
+};
 
 export type PipelineEvent =
   | AudioFrameEvent

@@ -110,6 +110,8 @@ export type EmotionDirectivesEvent = BaseEvent & {
 
 export type ErrorEvent = {
   source: string;
+  /** e.g. `llm_auth` when the LLM provider rejected the API key. */
+  code?: string;
   error: string;
   atMs: number;
 };

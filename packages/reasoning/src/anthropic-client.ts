@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from '@oasis-echo/telemetry';
 import { PERSONA_RULES, type DialogueState } from '@oasis-echo/types';
 import { CircuitBreaker } from './circuit-breaker.js';
+import { isAuthStatus, ReasonerAuthError } from './errors.js';
 import { PiiRedactor } from './redaction.js';
 import type { ToolRegistry } from './tools.js';
 
@@ -180,6 +181,14 @@ export class AnthropicReasoner implements Reasoner {
     } catch (err) {
       // Distinguish user-initiated aborts (barge-in) from real errors.
       const isAbort = input.signal?.aborted || (err instanceof Error && err.name === 'AbortError');
+      // A rejected key won't heal on retry — surface it distinctly and
+      // keep it out of the breaker so it doesn't masquerade as an outage.
+      const status = (err as { status?: unknown } | null)?.status;
+      if (!isAbort && isAuthStatus(status)) {
+        const authErr = new ReasonerAuthError('anthropic', status);
+        this.logger?.error('anthropic API key rejected', { status });
+        throw authErr;
+      }
       if (!isAbort) {
         this.breaker.recordFailure();
         this.logger?.error('anthropic stream failed', { error: String(err) });
