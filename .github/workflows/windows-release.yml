@@ -10,9 +10,13 @@ name: Windows App – release
 #   - Manual `workflow_dispatch` with a `version` input: draft release
 #     tagged `win-v<version>`.
 #
-# The exe is not code-signed, so Windows SmartScreen shows "Windows
-# protected your PC" on first run (More info → Run anyway). The release
-# notes say so.
+# SIGNING (optional, SignPath: free for open-source projects via the SignPath
+# Foundation). Set the secret SIGNPATH_API_TOKEN and the variables
+# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG
+# (signing policy "release-signing" by convention). Then the exe is submitted
+# to SignPath and the signed one is released. Without them the exe is
+# unsigned and SmartScreen shows "Windows protected your PC" on first run
+# (More info → Run anyway); the release notes say which it is.
 
 on:
   push:
@@ -58,6 +62,40 @@ jobs:
           -p:EnableCompressionInSingleFile=true -p:DebugType=none
           -p:Version=${{ steps.v.outputs.version }} -o out
 
+      - name: Detect signing
+        id: sig
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          ORG: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+        run: |
+          if [ -n "$TOKEN" ] && [ -n "$ORG" ]; then echo "signed=true" >> "$GITHUB_OUTPUT"; else echo "signed=false" >> "$GITHUB_OUTPUT"; echo "::warning::SignPath not configured; releasing an unsigned exe."; fi
+
+      - name: Upload unsigned exe for signing
+        if: steps.sig.outputs.signed == 'true'
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: OasisEcho-unsigned
+          path: apps/windows/out/OasisEcho.exe
+
+      - name: Sign with SignPath
+        if: steps.sig.outputs.signed == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: apps/windows/signed
+
+      - name: Use the signed exe
+        if: steps.sig.outputs.signed == 'true'
+        shell: pwsh
+        run: Copy-Item -Force apps/windows/signed/OasisEcho.exe apps/windows/out/OasisEcho.exe
+
       - name: Package
         shell: pwsh
         run: |
@@ -80,4 +118,4 @@ jobs:
             **Install:** download `OasisEcho-Windows-${{ steps.v.outputs.version }}-x64.zip`, unzip, run `OasisEcho.exe` (Windows 10/11, x64; no .NET needed).
             It needs an Oasis Echo server running (default `http://127.0.0.1:9187`, see the README).
 
-            **Not code-signed yet:** SmartScreen will say "Windows protected your PC" on first run. Choose **More info → Run anyway**.
+            ${{ steps.sig.outputs.signed == 'true' && '**Code-signed** (SignPath).' || '**Not code-signed yet:** SmartScreen will say "Windows protected your PC" on first run. Choose **More info → Run anyway**.' }}
