@@ -20,6 +20,13 @@ It needs an **Oasis Echo server** to talk to: the same Node server the macOS app
 by default. To use a server elsewhere, choose **Edit settings…** in the tray menu and
 change `ServerUrl`, then restart the app.
 
+### Code signing
+
+Windows releases are signed through the SignPath Foundation's free program for open-source
+projects: free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/). (Until that's approved, releases are unsigned; each
+release's notes say which.)
+
 ## Use
 
 - Say **"Hey Echo"**. A chime means it's listening: ask your question, then pause.
