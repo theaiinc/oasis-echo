@@ -22,10 +22,8 @@ change `ServerUrl`, then restart the app.
 
 ### Code signing
 
-Windows releases are signed through the SignPath Foundation's free program for open-source
-projects: free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/). (Until that's approved, releases are unsigned; each
-release's notes say which.)
+Windows releases aren't code-signed yet, so SmartScreen warns on first run (see Install).
+`windows-release.yml` signs automatically once a signing service is configured.
 
 ## Use
 
