@@ -1,6 +1,10 @@
 import AppKit
 import AVFoundation
 import Foundation
+import ObjCExceptionCatcher
+import os
+
+private let log = Logger(subsystem: "ai.oasis.echo.mac", category: "mic")
 
 // Opens the default input, installs a tap at the hardware format, and
 // forwards PCM buffers to a consumer. We keep the hardware sample rate
@@ -17,6 +21,7 @@ import Foundation
 enum MicCaptureError: LocalizedError {
     case accessDenied
     case accessNotDetermined
+    case tapFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +29,8 @@ enum MicCaptureError: LocalizedError {
             return "Microphone access is disabled for Oasis Echo. Enable it in System Settings › Privacy & Security › Microphone, then try again."
         case .accessNotDetermined:
             return "Microphone access hasn't been granted yet — check for a permission prompt, then try again."
+        case .tapFailed(let reason):
+            return "Couldn't open the microphone (\(reason)). The audio device may have just changed — try again."
         }
     }
 }
@@ -37,8 +44,12 @@ final class MicCapture: @unchecked Sendable {
     private var onBuffer: ((AVAudioPCMBuffer) -> Void)?
     private var onLevel: ((Float) -> Void)?
     private var isRunning = false
+    private var tapFormat: AVAudioFormat?
 
-    var format: AVAudioFormat { engine.inputNode.outputFormat(forBus: 0) }
+    /// The format buffers are actually delivered in — the installed tap's
+    /// format once started (it can differ from the input node's cached
+    /// output format after a device change; see installTap(on:block:)).
+    var format: AVAudioFormat { tapFormat ?? engine.inputNode.outputFormat(forBus: 0) }
 
     /// For the menu bar's "Grant Microphone Access" item — true only once
     /// TCC has actually authorized the app, matching what mic.start() itself
@@ -82,9 +93,7 @@ final class MicCapture: @unchecked Sendable {
         self.onLevel = onLevel
 
         let input = engine.inputNode
-        let fmt = input.outputFormat(forBus: 0)
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { [weak self] buf, _ in
+        tapFormat = try Self.installTap(on: input) { [weak self] buf in
             guard let self else { return }
             self.onBuffer?(buf)
             if let level = Self.rms(buf) { self.onLevel?(level) }
@@ -122,6 +131,55 @@ final class MicCapture: @unchecked Sendable {
             engine.stop()
         }
         isRunning = false
+        tapFormat = nil
+    }
+
+    /// Installs a tap without ever letting an NSException escape into Swift.
+    ///
+    /// Aha (2026-10-01): a hotkey capture started mid-meeting raised
+    /// "Failed to create tap due to format mismatch" — the shared engine's
+    /// input device had vanished/changed (hw now 16 kHz, cached node format
+    /// still 48 kHz). That NSException unwound through Swift on the main
+    /// actor and wedged Swift concurrency: clip uploads, heartbeats and
+    /// draft autosave all stopped for 45 minutes while the audio threads
+    /// kept recording, and the next button click segfaulted. Now: try the
+    /// cached format, retry once at the hardware's real sample rate, and
+    /// otherwise throw a normal error. Returns the format actually used.
+    @discardableResult
+    static func installTap(
+        on input: AVAudioInputNode,
+        block: @escaping (AVAudioPCMBuffer) -> Void
+    ) throws -> AVAudioFormat {
+        let cached = input.outputFormat(forBus: 0)
+        var candidates = [cached]
+        let hw = input.inputFormat(forBus: 0)
+        if hw.sampleRate > 0, hw.sampleRate != cached.sampleRate,
+           let fallback = AVAudioFormat(
+               commonFormat: .pcmFormatFloat32,
+               sampleRate: hw.sampleRate,
+               channels: max(1, min(cached.channelCount, max(hw.channelCount, 1))),
+               interleaved: false
+           ) {
+            candidates.append(fallback)
+        }
+        var lastError: Error?
+        for fmt in candidates {
+            input.removeTap(onBus: 0)
+            do {
+                try OEExceptionCatcher.catchException {
+                    input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { buf, _ in block(buf) }
+                }
+                if fmt !== cached {
+                    log.notice("mic tap installed at hw rate \(fmt.sampleRate, privacy: .public) Hz (cached node format was \(cached.sampleRate, privacy: .public) Hz)")
+                }
+                return fmt
+            } catch {
+                log.error("installTap failed at \(fmt.sampleRate, privacy: .public) Hz: \(error.localizedDescription, privacy: .public)")
+                lastError = error
+            }
+        }
+        input.removeTap(onBus: 0)
+        throw MicCaptureError.tapFailed(lastError?.localizedDescription ?? "unknown error")
     }
 
     /// Throws unless the mic is already authorized. `.notDetermined` fires
