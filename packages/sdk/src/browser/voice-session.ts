@@ -165,6 +165,11 @@ export class VoiceSession {
   private audioCtx: AudioContext | null = null;
   private micStream: MediaStream | null = null;
   private muted = false;
+  private speakerMuted = false;
+  private outputGain: GainNode | null = null;
+  private inputAnalyser: AnalyserNode | null = null;
+  private outputAnalyser: AnalyserNode | null = null;
+  private levelBuf: Float32Array<ArrayBuffer> | null = null;
   private micCapture: MicCapture | null = null;
   private audioPlayer: AudioPlayer | null = null;
   private bargeInMonitor: BargeInMonitor | null = null;
@@ -263,8 +268,21 @@ export class VoiceSession {
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     const source = this.audioCtx.createMediaStreamSource(this.micStream);
 
+    // Agent audio goes through one output bus so the speaker can be switched off
+    // and both directions can be metered for visualisations (see `levels`).
+    this.outputGain = this.audioCtx.createGain();
+    this.outputGain.gain.value = this.speakerMuted ? 0 : 1;
+    this.outputGain.connect(this.audioCtx.destination);
+    this.outputAnalyser = this.audioCtx.createAnalyser();
+    this.outputAnalyser.fftSize = 512;
+    this.outputGain.connect(this.outputAnalyser);
+    this.inputAnalyser = this.audioCtx.createAnalyser();
+    this.inputAnalyser.fftSize = 512;
+    source.connect(this.inputAnalyser);
+
     this.audioPlayer = new AudioPlayer({
       audioContext: this.audioCtx,
+      destinationNode: this.outputGain,
       onEnd: () => this.onAudioQueueEmpty(),
     });
 
@@ -333,6 +351,9 @@ export class VoiceSession {
     this.micStream = null;
     try { this.audioCtx?.close(); } catch { /* ignore */ }
     this.audioCtx = null;
+    this.outputGain = null;
+    this.inputAnalyser = null;
+    this.outputAnalyser = null;
 
     this.agentSpeaking = false;
     this.micPausedForTts = false;
@@ -461,6 +482,35 @@ export class VoiceSession {
       this.emit('hint', { text: 'listening…' });
       this.requestListen();
     }
+  }
+
+  /** Whether the agent's voice is switched off (kept across calls). */
+  get isSpeakerMuted(): boolean {
+    return this.speakerMuted;
+  }
+
+  /** Switch the agent's voice off or on. The call carries on; you just don't hear it. */
+  setSpeakerMuted(muted: boolean): void {
+    this.speakerMuted = muted;
+    if (this.outputGain && this.audioCtx) this.outputGain.gain.setTargetAtTime(muted ? 0 : 1, this.audioCtx.currentTime, 0.02);
+  }
+
+  /**
+   * Current loudness (RMS, roughly 0..1) of the mic and of the agent's voice, for
+   * meters and visualisations. Both are 0 when no call is running. Cheap enough to
+   * read every animation frame.
+   */
+  get levels(): { input: number; output: number } {
+    return { input: this.rms(this.inputAnalyser), output: this.rms(this.outputAnalyser) };
+  }
+
+  private rms(analyser: AnalyserNode | null): number {
+    if (!analyser) return 0;
+    if (!this.levelBuf || this.levelBuf.length !== analyser.fftSize) this.levelBuf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(this.levelBuf);
+    let sum = 0;
+    for (const v of this.levelBuf) sum += v * v;
+    return Math.sqrt(sum / this.levelBuf.length);
   }
 
   /** Whether the user has muted their mic for this call. */

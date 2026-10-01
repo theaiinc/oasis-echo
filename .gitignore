@@ -24,4 +24,3 @@ experiments/wakeword/__pycache__
 experiments/wakeword/models/*
 !experiments/wakeword/models/hey_echo_verifier.pkl
 experiments/wakeword/recordings
-packages/hosted/phrases.json
