@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>OasisEcho</RootNamespace>
+    <AssemblyName>OasisEcho</AssemblyName>
+    <Version>0.1.0</Version>
+    <!-- Lets the Windows app build (not run) on macOS/Linux too. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OasisEcho.Core\OasisEcho.Core.csproj" />
+    <EmbeddedResource Include="tray.png" LogicalName="tray.png" />
+  </ItemGroup>
+</Project>
