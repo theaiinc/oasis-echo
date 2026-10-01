@@ -49,7 +49,14 @@ export type AgentConfig = {
   expert?: ExpertConfig;
 };
 
-export type EchoUser = { sub: string; email: string };
+export type EchoUser = { sub: string; email: string; name?: string };
+
+/** What to call the user: their account name, else one made from their email ("steve.tran@…" → "Steve Tran"). */
+export function displayName(user: EchoUser): string {
+  if (user.name?.trim()) return user.name.trim();
+  const local = user.email.split('@')[0] ?? user.email;
+  return local.split(/[._-]+/).filter(Boolean).map((w) => w[0]!.toUpperCase() + w.slice(1)).join(' ') || user.email;
+}
 
 export function loadAgents(json: string | undefined): AgentConfig[] {
   if (!json?.trim()) return [];

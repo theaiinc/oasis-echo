@@ -17,6 +17,7 @@
  * Env: ECHO_AGENTS (agents.ts), ECHO_TALKER_* and the keys they name,
  * AEGIS_ISSUER, AEGIS_CLIENT_ID, AEGIS_CLIENT_SECRET, ECHO_PUBLIC_URL,
  * ECHO_SESSION_SECRET, ECHO_TTS=kokoro|browser (default kokoro),
+ * ECHO_ALLOWED_USERS=a@x,b@y to let only those emails in.
  * ECHO_SERVER_STT=1 to offer Whisper listening. ECHO_DEV_USER=email skips
  * sign-in outside production.
  */
@@ -121,6 +122,13 @@ function required(name: string): string {
   return v;
 }
 
+// Who may use this Echo at all (comma-separated emails). Unset: anyone who signs in
+// (agents still have their own allow lists).
+const allowedUsers = (env['ECHO_ALLOWED_USERS'] ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+function isAllowed(email: string): boolean {
+  return !allowedUsers.length || allowedUsers.includes(email.toLowerCase());
+}
+
 function whoIs(req: IncomingMessage): EchoUser | null {
   if (devUser) return { sub: `dev:${devUser}`, email: devUser.toLowerCase() };
   return auth!.session(req.headers.cookie);
@@ -176,6 +184,11 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/auth/callback' && auth) {
       try {
         const done = await auth.finish(url.searchParams, req.headers.cookie);
+        if (!isAllowed(done.session.email)) {
+          logger.warn('sign-in refused', { email: done.session.email });
+          res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'set-cookie': [cookie('echo_session', '', 0), cookie('echo_login', '', 0)] });
+          return res.end(`This Echo is private, and ${done.session.email} isn't on its list.`);
+        }
         logger.info('signed in', { email: done.session.email });
         res.writeHead(302, { location: done.next, 'set-cookie': [done.cookie, cookie('echo_login', '', 0)] });
       } catch (err) {
@@ -204,6 +217,7 @@ const server = createServer(async (req, res) => {
 
     const user = whoIs(req);
     if (!user) return json(res, 401, { error: 'sign_in' });
+    if (!isAllowed(user.email)) return json(res, 403, { error: 'not_allowed', email: user.email });
 
     if (url.pathname === '/api/ready') {
       // A Vietnamese call also waits for VieNeu; an English one doesn't.
@@ -285,7 +299,7 @@ server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', publicUrl);
   const m = /^\/a\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
   const user = whoIs(req);
-  const agent = m && user ? agentFor(user, m[1]) : undefined;
+  const agent = m && user && isAllowed(user.email) ? agentFor(user, m[1]) : undefined;
   if (!ears || !agent || !sameOrigin(req)) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();

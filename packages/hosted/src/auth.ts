@@ -133,6 +133,7 @@ export class AegisAuth {
     const session: Session = {
       sub: String(claims['sub']),
       email: String(claims['email']).toLowerCase(),
+      ...(nameFrom(claims) ? { name: nameFrom(claims)! } : {}),
       exp: Math.floor(Date.now() / 1000) + (this.cfg.sessionHours ?? 12) * 3600,
     };
     return {
@@ -180,4 +181,12 @@ export class AegisAuth {
     if (!k) throw new Error('id_token signed with an unknown key');
     return k;
   }
+}
+
+/** The person's name from OIDC profile claims, if the account has one. */
+function nameFrom(claims: Record<string, unknown>): string | undefined {
+  const name = typeof claims['name'] === 'string' ? claims['name'].trim() : '';
+  if (name) return name.slice(0, 80);
+  const parts = [claims['given_name'], claims['family_name']].filter((p): p is string => typeof p === 'string' && !!p.trim());
+  return parts.length ? parts.join(' ').slice(0, 80) : undefined;
 }

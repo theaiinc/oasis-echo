@@ -153,3 +153,33 @@ export class KeptFacts {
     }
   }
 }
+
+/**
+ * Mishearings the user corrected during a call ("no, I said Arion"), applied to every
+ * later transcript before the talker sees it: a word swap, so it costs no time.
+ */
+export class HearingFixes {
+  private readonly fixes: Array<{ heard: string; meant: string; re: RegExp }> = [];
+
+  add(heard: string, meant: string): boolean {
+    const h = heard.trim();
+    const m = meant.trim();
+    if (!h || !m || h.toLowerCase() === m.toLowerCase() || h.length > 60) return false;
+    const escaped = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    // Whole words only (Unicode-aware, so Vietnamese words work too).
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu');
+    const at = this.fixes.findIndex((f) => f.heard.toLowerCase() === h.toLowerCase());
+    if (at >= 0) this.fixes.splice(at, 1);
+    this.fixes.push({ heard: h, meant: m, re });
+    while (this.fixes.length > 30) this.fixes.shift();
+    return true;
+  }
+
+  apply(text: string): string {
+    return this.fixes.reduce((t, f) => t.replace(f.re, f.meant), text);
+  }
+
+  list(): string[] {
+    return this.fixes.map((f) => `"${f.heard}" means "${f.meant}"`);
+  }
+}

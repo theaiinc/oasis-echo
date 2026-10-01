@@ -42,6 +42,8 @@ export type ExpertJob = {
   error?: string;
   /** Progress notes already given for this job. */
   updates: number;
+  /** The answer was spoken to the user (the notes then carry what was said, not the raw answer). */
+  delivered?: boolean;
 };
 
 export type DeskEvents = {
@@ -128,9 +130,11 @@ export class ExpertDesk {
       return `- ${this.name} is working on "${j.question}" (asked ${asked}s ago; ${left > 0 ? `about ${left}s left` : 'running late'}).`;
     });
     for (const j of recent) {
-      lines.push(j.status === 'done'
-        ? `- ${this.name} answered "${j.question}": ${clip(j.answer ?? '', 600)}`
-        : `- Asking ${this.name} "${j.question}" failed (${j.error}).`);
+      lines.push(j.status !== 'done'
+        ? `- Asking ${this.name} "${j.question}" failed (${j.error}).`
+        : j.delivered
+          ? `- "${j.question}" is answered and already told to the user (see what you told them).`
+          : `- ${this.name} answered "${j.question}": ${clip(j.answer ?? '', 600)}`);
     }
     return `Background work with ${this.name}:\n${lines.join('\n')}`;
   }

@@ -3,9 +3,9 @@ import { alwaysEscalate, PassthroughTts, type StreamingTts } from '@oasis-echo/c
 import { Pipeline } from '@oasis-echo/orchestrator';
 import { ToolRegistry, ToolTalker, type Reasoner } from '@oasis-echo/reasoning';
 import type { Logger } from '@oasis-echo/telemetry';
-import { makeExpert, talkerFor, type AgentConfig, type EchoUser } from './agents.js';
+import { displayName, makeExpert, talkerFor, type AgentConfig, type EchoUser } from './agents.js';
 import { ExpertDesk, LatencyEstimate, lateNote, progressNote, type ExpertJob } from './experts.js';
-import { KeptFacts, WorkingNotes, userKey, type FactStore } from './memory.js';
+import { HearingFixes, KeptFacts, WorkingNotes, userKey, type FactStore } from './memory.js';
 import { isVietnamese } from './vieneu.js';
 import { SharedVoice } from './voice.js';
 
@@ -22,6 +22,11 @@ export class Live {
   lastUsed = Date.now();
   private busy = 0;
   private readonly queue: string[] = [];
+  readonly expert: { ask(q: string, signal?: AbortSignal): Promise<string> } | null;
+  /** Who the user is and what they're working on, looked up once in the background (see Sessions). */
+  profile: (() => string | undefined) | null = null;
+  /** Words the listener got wrong this call and what the user meant, fixed in every later transcript. */
+  readonly hearing = new HearingFixes();
   /** Short-lived notes for the talker (e.g. a reply the user cut off); they fade when unused. */
   readonly notes = new WorkingNotes();
   /** What this user explicitly asked to be remembered, kept across calls. */
@@ -43,6 +48,7 @@ export class Live {
     this.facts = new KeptFacts(deps.facts ?? null, userKey(user.sub), logger);
     const talker = talkerFor(agent, env);
     const expert = agent.expert ? makeExpert(agent.expert, user, env, logger) : null;
+    this.expert = expert;
     this.desk = talker && expert && agent.expert
       ? new ExpertDesk(expertIsSelf(agent) ? 'Your background lookup' : agent.expert.name, (q, signal) => expert.ask(q, signal), deps.latency(agent.id), {
           answered: (job) => void this.onAnswer(job, talker),
@@ -75,6 +81,19 @@ export class Live {
           },
         });
       }
+      tools.register<{ heard?: string; meant?: string }, unknown>({
+        name: 'note_correction',
+        description: 'The user corrected a word you misheard ("no, I said Arion", "it\'s Bookkeeper, not book keeper"). Record it so later transcripts get it right. Use the exact misheard words from their earlier message.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            heard: { type: 'string', description: 'What the transcript said (misheard).' },
+            meant: { type: 'string', description: 'What the user actually said.' },
+          },
+          required: ['heard', 'meant'],
+        },
+        handler: async ({ heard, meant }) => (heard?.trim() && meant?.trim() ? { ok: this.hearing.add(heard, meant) } : { error: 'heard and meant are required' }),
+      });
       tools.register<{ fact?: string }, unknown>({
         name: 'remember',
         description: 'Save a fact the user asked you to remember (in any language: "remember", "keep in mind", "nhớ giúp tôi", "don\'t make me repeat"). Kept across calls. Required whenever the user asks you to remember something; only then.',
@@ -168,10 +187,11 @@ export class Live {
   }
 
   /** Something the user said. A new turn interrupts whatever was playing. */
-  async turn(text: string): Promise<void> {
+  async turn(raw: string): Promise<void> {
     this.busy++;
     try {
       await this.pipeline.bargeIn();
+      const text = this.hearing.apply(raw);
       this.send('user.input', { text, atMs: Date.now() });
       this.firstWords ??= text.slice(0, 200);
       await this.pipeline.handleTurn(text);
@@ -210,6 +230,10 @@ export class Live {
     const parts: string[] = [];
     const facts = this.facts.list();
     if (facts.length) parts.push(`What the user asked you to remember:\n${facts.map((f) => `- ${f}`).join('\n')}`);
+    const profile = this.profile?.();
+    if (profile) parts.push(`About ${displayName(this.user)} (from your background knowledge): ${profile}`);
+    const fixes = this.hearing.list();
+    if (fixes.length) parts.push(`Misheard earlier in this call (already fixed in what you see): ${fixes.join('; ')}`);
     const notes = this.notes.read();
     if (notes.length) parts.push(`Notes from this call:\n${notes.map((n) => `- ${n}`).join('\n')}`);
     const desk = this.desk?.contextNote();
@@ -274,7 +298,12 @@ export class Live {
     // Summaries go to the dependable model when there are two.
     const summarizer = { ...talker, model: talker.fallbackModel ?? talker.model };
     const fallback = self ? `Here's what I found: ${job.answer.slice(0, 600)}` : `${name} says: ${job.answer.slice(0, 600)}`;
-    this.say(await spoken(job.question, job.answer, self ? null : name, lang, summarizer).catch(() => fallback));
+    // What the user already heard this call, so a repeat lookup reports only what's new.
+    const already = this.notes.read().filter((n) => n.startsWith(TOLD));
+    const said = await spoken(job.question, job.answer, self ? null : name, lang, summarizer, already.map((n) => n.slice(TOLD.length))).catch(() => fallback);
+    job.delivered = true;
+    this.notes.put(`told-${job.id}`, `${TOLD}${said}`);
+    this.say(said);
   }
 }
 
@@ -287,18 +316,25 @@ export function expertIsSelf(agent: AgentConfig): boolean {
   return !!agent.expert && agent.expert.name.trim().toLowerCase() === agent.name.trim().toLowerCase();
 }
 
+/** Working-note prefix for lookup answers already spoken to the user (they fade like other notes). */
+const TOLD = 'Already told the user (don\'t repeat unless they ask): ';
+
 /** What the agent says when a call picks up. */
 export function greeting(name: string, lang: 'en' | 'vi'): string {
   return lang === 'vi' ? `Chào bạn, mình là ${name}. Mình giúp gì được cho bạn?` : `Hi, this is ${name}. How can I help?`;
 }
 
 /** The expert's answer, as a few sentences worth saying out loud. */
-async function spoken(question: string, answer: string, expert: string | null, lang: 'en' | 'vi', talker: { apiKey: string; baseUrl: string; model: string }): Promise<string> {
+async function spoken(question: string, answer: string, expert: string | null, lang: 'en' | 'vi', talker: { apiKey: string; baseUrl: string; model: string }, already: string[] = []): Promise<string> {
   // expert null: the agent looked it up itself, so it reports in the first person.
   const who = expert
     ? `${expert} just answered a question the user asked a moment ago. Tell the user what ${expert} said in at most four short spoken sentences: lead with "${expert} says" or similar,`
     : `You just finished looking into a question the user asked a moment ago. Tell the user what you found, in the first person, in at most four short spoken sentences: lead with "Okay, here's what I found" or similar, never refer to yourself by name or as someone else,`;
   const language = lang === 'vi' ? ' Speak Vietnamese.' : '';
+  // Each lookup returns the full picture (e.g. the whole board list); say only what the user hasn't heard.
+  const earlier = already.length
+    ? ` Earlier in this call the user was already told:\n${already.map((a) => `- ${a}`).join('\n')}\nDon't repeat any of that. Say only what is new or answers this exact question; if nothing is new, say so in one short sentence. If this contradicts something they were told, say so plainly ("Actually, correction: …").`
+    : '';
   const res = await fetch(`${talker.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${talker.apiKey}` },
@@ -306,7 +342,7 @@ async function spoken(question: string, answer: string, expert: string | null, l
       model: talker.model,
       temperature: 0.3,
       messages: [
-        { role: 'system', content: `You are speaking on a live voice call. ${who} keep names and numbers exact, no markdown, no lists, no links. Offer the details if there is more.${language}` },
+        { role: 'system', content: `You are speaking on a live voice call. ${who} keep names and numbers exact, no markdown, no lists, no links, address the user as "you" (never by name). Offer the details if there is more.${earlier}${language}` },
         { role: 'user', content: `Question: ${question}\n\nAnswer found:\n${answer}` },
       ],
     }),
@@ -322,21 +358,25 @@ async function spoken(question: string, answer: string, expert: string | null, l
 function talkerPrompt(agent: AgentConfig, user: EchoUser, persona?: string): string {
   const expert = agent.expert;
   return [
-    persona ?? `You are ${agent.name}, on a live call with ${user.email} (${agent.project}). Speak as yourself, in the first person.`,
+    persona ?? `You are ${agent.name}, on a live call with ${displayName(user)} (${user.email}), about ${agent.project}. Speak as yourself, in the first person.`,
+    `Who's who: in their messages, "I", "me", "my" mean ${displayName(user)}; "you" means you, ${agent.name}. Anyone else they name, or "he", "she", "they", is another person: keep track of who's who and don't mix them up with the user. The notes say what's known about them.`,
     'This is speech: answer in one to three short, natural sentences. No markdown, lists, or links. Answer first; ask back only when you truly need to.',
     'Sound like a person, not a script: vary how you start and end, react to what they actually said, and keep follow-ups short ("yep", "got it, one sec"). Don\'t end every reply with a question, don\'t open with the same words twice in a row, and never repeat a sentence or offer you already made in this call.',
     'Answer yourself whatever you can: conversation, general knowledge, planning, helping the user think.',
     'Language: each user message ends with a bracketed note naming the reply language. Follow it for every reply, even when the message itself is in another language. Only when the user explicitly asks to switch, call set_language, then reply in the new language. Never mention the note.',
-    'Memory: you get only the last few turns, plus notes. Rely on the notes.',
+    'Hearing: the user\'s words come from speech recognition and can be misheard (a project name, a technical term, a word that sounds alike). Read them by what makes sense in context, especially names from their projects and the notes; only if it\'s genuinely unclear, check briefly ("Arion, you mean?"). When they explicitly correct a word you misheard ("no, I said…"), take it without fuss, call note_correction once for that word, and answer what they meant. Don\'t call it otherwise.',
+    'Self-correction: if the notes, a lookup, or the user show something you said earlier was wrong, say so plainly and give the right version ("Actually, I had that wrong: …"). Don\'t defend or repeat a mistake.',
+    'Address the user as "you", never by their name or email.',
+    'Memory: you get only the last few turns, plus notes. Rely on the notes. Notes marked "already told the user" are things they have heard this call: don\'t repeat them unless asked; build on them, and look something up again only for a new or more specific question.',
     'When the user asks you to remember something, keep it in mind, or not make them repeat it (in any language, e.g. "nhớ giúp tôi", "remember that"), you must call remember with that fact before you reply; never say you will remember without calling it. Call forget when they ask you to forget. Never store anything they did not ask you to keep.',
     ...(expert && expertIsSelf(agent) ? [
       `You are ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Their projects, boards, decisions and status come only from your background lookup: never guess those.`,
-      `When a question needs that, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long it usually takes.`,
+      `When a question needs that, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question written in the user's own voice, as they would ask it ("What needs my attention today?"), never "the user". It returns at once with how long it usually takes.`,
       `Then say briefly, in the first person, that you're on it. Mention roughly how long it takes only the first time ("give me about a minute"). Don't fill the wait with the same follow-up question each time; only ask something if it would genuinely sharpen the answer, otherwise just carry on the conversation. Never talk about ${agent.name} as someone else.`,
       `The answer is spoken to the user automatically when it arrives. If asked whether it's ready, check the background notes and answer in a few words without calling the lookup again.`,
     ] : expert ? [
       `${expert.name} is ${expert.about ?? `the ${agent.project} assistant who knows this user's projects and work`}. Only ${expert.name} knows their projects, boards, decisions and status: never guess those.`,
-      `When a question needs ${expert.name}, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question. It returns at once with how long ${expert.name} usually takes.`,
+      `When a question needs ${expert.name}, call ask_${expert.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')} with a complete, self-contained question written in the user's own voice ("What needs my attention today?"), never "the user". It returns at once with how long ${expert.name} usually takes.`,
       `Then say briefly that you've asked ${expert.name}, and roughly how long it takes only the first time ("about a minute"). Don't fill the wait with the same follow-up question each time; only ask something if it would genuinely sharpen the answer.`,
       `${expert.name}'s answer is spoken to the user automatically when it arrives. If asked whether it's ready, use the background notes.`,
     ] : []),
@@ -391,9 +431,29 @@ export class Sessions {
         },
       });
       this.live.set(key, live);
+      const userKey = `${user.sub}\u0000${agent.id}`;
+      live.profile = () => this.profiles.get(userKey)?.text;
+      this.refreshProfile(userKey, live);
     }
     live.lastUsed = Date.now();
     return live;
+  }
+
+  /** Per user and agent: a short "who they are and what they're working on", refreshed every 12 h. */
+  private readonly profiles = new Map<string, { text?: string; at: number }>();
+
+  private refreshProfile(key: string, live: Live): void {
+    const have = this.profiles.get(key);
+    if (!live.expert || (have && Date.now() - have.at < 12 * 3600_000)) return;
+    this.profiles.set(key, { ...have, at: Date.now() });
+    void live.expert
+      .ask("Briefly, for my voice assistant: who am I, what's my role, and what am I mainly working on right now? Three short sentences at most.", AbortSignal.timeout(120_000))
+      .then((text) => {
+        const t = text.trim();
+        if (t) this.profiles.set(key, { text: t.slice(0, 700), at: Date.now() });
+        this.deps.logger?.info('profile ready', { chars: t.length });
+      })
+      .catch((err) => this.deps.logger?.warn('profile lookup failed', { error: String(err) }));
   }
 
   private sweep(): void {

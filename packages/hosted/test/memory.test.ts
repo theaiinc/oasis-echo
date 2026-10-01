@@ -2,7 +2,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { DirFactStore, KeptFacts, WorkingNotes, userKey } from '../src/memory.js';
+import { DirFactStore, HearingFixes, KeptFacts, WorkingNotes, userKey } from '../src/memory.js';
 import { progressNote } from '../src/experts.js';
 
 describe('working notes', () => {
@@ -52,5 +52,19 @@ describe('desk progress notes', () => {
   it('are fixed lines, so the voice can prepare them ahead of time', () => {
     expect(progressNote(1)).toBe(progressNote(1));
     expect(progressNote(2)).not.toBe(progressNote(1));
+  });
+});
+
+describe('hearing fixes', () => {
+  it('fixes corrected mishearings in later transcripts, whole words only', () => {
+    const h = new HearingFixes();
+    h.add('Orion', 'Arion');
+    h.add('book keeper', 'Bookkeeper');
+    h.add('tiếng nhặt', 'tiếng Nhật');
+    expect(h.apply('What about orion one?')).toBe('What about Arion one?');
+    expect(h.apply('Check the book  keeper board')).toBe('Check the Bookkeeper board');
+    expect(h.apply('Horizon')).toBe('Horizon');
+    expect(h.apply('Nói tiếng nhặt đi')).toBe('Nói tiếng Nhật đi');
+    expect(h.add('same', 'Same')).toBe(false);
   });
 });

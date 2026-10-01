@@ -218,6 +218,12 @@
     await new Promise((r) => setTimeout(r, 3000));
   }
   if (!res || res.status === 401) { location.href = '/auth/login'; throw new Error('sign in'); }
+  if (res.status === 403) {
+    const who = await res.json().catch(() => ({}));
+    add(`This Echo is private${who.email ? `, and ${who.email} isn't on its list` : ''}.`, 'note');
+    call.disabled = true;
+    throw new Error('not allowed');
+  }
   const me = await res.json();
   $('sttrow').hidden = !me.serverStt;
   sttLanguages = me.serverSttLanguages ?? ['en-US'];
