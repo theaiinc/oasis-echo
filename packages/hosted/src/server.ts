@@ -317,7 +317,10 @@ function listen(ws: WebSocket, live: Live): void {
   // Audio time of the speech an early transcript covers; later speech makes it stale.
   let lastLoudAt = 0;
   let loudAfterCommitMs = 0;
-  let early: Promise<string> | null = null;
+  // At most one transcription per call at a time. Starting a fresh one on every
+  // little pause let them pile up on Cloud Run's CPUs (15 s transcripts, 20 s
+  // barge-ins, 429s); a stale one now finishes and the latest audio goes next.
+  let running: { promise: Promise<string>; at: number } | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let committed = false;
   let carry = '';
@@ -328,7 +331,8 @@ function listen(ws: WebSocket, live: Live): void {
     committed = true;
     loudAfterCommitMs = 0;
     const full = [carry, text.trim()].filter(Boolean).join(' ');
-    logger.info('stt final', { ms: sttMs, how, quietMs: Math.round(gate.quietMs), words: full.split(/\s+/).filter(Boolean).length });
+    logger.info('stt final', { ms: sttMs, how, passes, quietMs: Math.round(gate.quietMs), words: full.split(/\s+/).filter(Boolean).length });
+    passes = 0;
     // Start the turn here rather than wait for the page to post it back; the page's
     // own post of this utterance is then ignored (see /turn).
     if (full) {
@@ -338,13 +342,11 @@ function listen(ws: WebSocket, live: Live): void {
     send({ type: 'stt.final', text: full, utteranceId, speculationId, atMs: Date.now() });
     carry = full;
     stt.reset();
-    early = null;
     gate.reset();
   };
   const reset = () => {
     clearTimer();
     stt.reset();
-    early = null;
     gate.reset();
     committed = false;
     carry = '';
@@ -359,13 +361,36 @@ function listen(ws: WebSocket, live: Live): void {
       logger.warn('audio message failed', { error: String(err) });
     }
   });
+  let passes = 0;
+  const transcribe = () => {
+    passes++;
+    const job = { promise: stt.transcribeAll(), at: lastLoudAt };
+    running = job;
+    job.promise.then(() => { if (running === job) running = null; }, () => { if (running === job) running = null; });
+    return job;
+  };
+  // Transcribe once the user has paused; answer after endpointMs(text) of quiet.
+  const tryEarly = (): void => {
+    if (running || committed || !gate.spoke || gate.quietMs < EARLY_MS) return;
+    const started = Date.now();
+    const job = transcribe();
+    job.promise.then((text) => {
+      if (committed) return;
+      if (job.at !== lastLoudAt) return tryEarly(); // more speech came: go again on the latest audio
+      if (!text.trim()) return; // nothing heard: leave it to the page's end
+      const wait = endpointMs([carry, text].filter(Boolean).join(' '));
+      clearTimer();
+      timer = setTimeout(() => {
+        if (job.at === lastLoudAt && !committed) commit(text, `endpoint ${wait}ms`, Date.now() - started);
+      }, Math.max(0, wait - gate.quietMs));
+    }).catch(() => undefined);
+  };
   const onMessage = (data: Buffer, isBinary: boolean): void => {
     if (isBinary) {
       // 32-bit float PCM; copied so it is aligned whatever Buffer it came in.
       const samples = new Float32Array(Math.floor(data.byteLength / 4));
       new Uint8Array(samples.buffer).set(data.subarray(0, samples.byteLength));
       stt.feed(samples);
-      const now = Date.now();
       if (gate.push(samples)) {
         if (committed) {
           // Talking again after the answer started: past a short blip, stop it and keep listening.
@@ -374,22 +399,10 @@ function listen(ws: WebSocket, live: Live): void {
           committed = false;
           void live.pipeline.bargeIn();
         }
-        lastLoudAt = gate.lastSpeechMs;
-        early = null; // more speech: an early transcript would miss it
+        lastLoudAt = gate.lastSpeechMs; // makes a running transcript stale
         clearTimer();
-      } else if (gate.spoke && !committed && !early && gate.quietMs >= EARLY_MS) {
-        const at = lastLoudAt;
-        const started = now;
-        const pending = stt.transcribeAll();
-        early = pending;
-        pending.then((text) => {
-          if (early !== pending || lastLoudAt !== at || committed) return;
-          if (!text.trim()) return; // nothing heard: leave it to the page's end
-          const wait = endpointMs([carry, text].filter(Boolean).join(' '));
-          timer = setTimeout(() => {
-            if (early === pending && lastLoudAt === at && !committed) commit(text, `endpoint ${wait}ms`, Date.now() - started);
-          }, Math.max(0, wait - gate.quietMs));
-        }).catch(() => undefined);
+      } else {
+        tryEarly();
       }
       return;
     }
@@ -409,7 +422,15 @@ function listen(ws: WebSocket, live: Live): void {
       // (Even if the server never heard it as loud: a quiet mic must still get an answer.)
       if (committed) return;
       const started = Date.now();
-      void (early ?? stt.transcribeAll()).then((text) => {
+      void (async () => {
+        // Use the running transcript if it's current; otherwise let it finish, then one fresh pass.
+        const job = running;
+        if (job) {
+          const text = await job.promise;
+          if (job.at === lastLoudAt) return text;
+        }
+        return transcribe().promise;
+      })().then((text) => {
         if (!committed) commit(text, 'page end', Date.now() - started);
       }).catch(() => undefined);
     } else if (msg.type === 'abort') {

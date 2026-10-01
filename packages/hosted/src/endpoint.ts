@@ -13,8 +13,8 @@ export function endpointMs(text: string): number {
   if (/[?？]$/.test(t)) return 300;
   // Whisper ends almost everything with a full stop, mid-thought too ("I want to check
   // the" came back as "I want to check, though."), so a full stop alone is weak evidence.
-  if (/[.!。！]$/.test(t)) return 800;
-  return 900;
+  if (/[.!。！]$/.test(t)) return 1000;
+  return 1100;
 }
 
 /**
