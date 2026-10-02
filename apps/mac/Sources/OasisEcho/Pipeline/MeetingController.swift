@@ -232,8 +232,6 @@ final class MeetingController: ObservableObject {
         let engine = ServerSTTEngine(serverBaseURL: url)
         do {
             let audioURL = Self.audioURL(startedAt: startedAtMs, resuming: resuming)
-            try audioRecorder.start(url: audioURL, format: mic.format)
-            currentAudioURL = audioURL
             try engine.start(
                 onPartial: { [weak self] text in
                     Task { @MainActor [weak self] in self?.liveSegment = text }
@@ -253,6 +251,11 @@ final class MeetingController: ObservableObject {
                 },
                 onLevel: { _ in }
             )
+            // Open the file only now: mic.format is the tap's real format,
+            // which can differ from the node's cached one after a device
+            // change. Buffers that land first are dropped (file not open).
+            try audioRecorder.start(url: audioURL, format: mic.format)
+            currentAudioURL = audioURL
             timer?.invalidate()
             let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in

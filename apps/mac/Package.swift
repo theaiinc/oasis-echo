@@ -11,9 +11,16 @@ let package = Package(
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0")
     ],
     targets: [
+        // Tiny ObjC shim: Swift can't catch NSException, and AVAudioEngine
+        // raises them (e.g. installTap on a stale input format).
+        .target(
+            name: "ObjCExceptionCatcher",
+            path: "Sources/ObjCExceptionCatcher"
+        ),
         .executableTarget(
             name: "OasisEcho",
             dependencies: [
+                "ObjCExceptionCatcher",
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
             ],
             path: "Sources/OasisEcho",

@@ -53,16 +53,13 @@ final class WakeWordDetector: @unchecked Sendable {
         }
 
         let input = engine.inputNode
-        let fmt = input.outputFormat(forBus: 0)
+        let fmt = try MicCapture.installTap(on: input) { [weak self] buf in
+            self?.processAudio(buf)
+        }
         hardwareRate = fmt.sampleRate
         let bufferCapacity = Int(hardwareRate * 4.0)
         buffer = RingBuffer(capacity: bufferCapacity)
         log.notice("hw rate: \(fmt.sampleRate) Hz, ring: \(bufferCapacity)")
-
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { [weak self] buf, _ in
-            self?.processAudio(buf)
-        }
 
         engine.prepare()
         try engine.start()
@@ -84,12 +81,16 @@ final class WakeWordDetector: @unchecked Sendable {
     func resume() {
         guard isActive else { return }
         let input = engine.inputNode
-        let fmt = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { [weak self] buf, _ in
-            self?.processAudio(buf)
-        }
-        engine.prepare()
         do {
+            let fmt = try MicCapture.installTap(on: input) { [weak self] buf in
+                self?.processAudio(buf)
+            }
+            if fmt.sampleRate != hardwareRate {
+                // Ring buffer is sized/rated for the old device.
+                hardwareRate = fmt.sampleRate
+                buffer = RingBuffer(capacity: Int(hardwareRate * 4.0))
+            }
+            engine.prepare()
             try engine.start()
             log.notice("resumed")
         } catch {
