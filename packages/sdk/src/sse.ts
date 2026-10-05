@@ -24,6 +24,14 @@ export type SseOpts = {
   onMessage: (msg: SseMessage) => void;
   onError?: (err: unknown) => void;
   onOpen?: () => void;
+  /** Event names beyond the built-in list (EventSource only delivers names it was told about). */
+  extraEvents?: string[];
+  /**
+   * Fetch path only (EventSource reconnects by itself): reopen the stream this many ms
+   * after it ends or fails, or after the server's `retry:` value when it sent one.
+   * Unset: don't reconnect.
+   */
+  reconnectMs?: number;
 };
 
 export type EventSourceLike = {
@@ -70,8 +78,11 @@ export function openSse(opts: SseOpts): SseHandle {
       'turn.summary',
       'bargein',
       'emotion.directives',
+      'tool.use',
+      'tool.result',
       'error',
       'message',
+      ...(opts.extraEvents ?? []),
     ];
     for (const name of events) {
       es.addEventListener(name, (ev) => {
@@ -92,9 +103,11 @@ export function openSse(opts: SseOpts): SseHandle {
 
 function openSseViaFetch(opts: SseOpts): SseHandle {
   const fetchFn = opts.fetch ?? fetch;
-  const ctrl = new AbortController();
+  let ctrl = new AbortController();
   let closed = false;
-  (async () => {
+  let retryMs = opts.reconnectMs;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const run = async (): Promise<void> => {
     try {
       const res = await fetchFn(opts.url, {
         headers: { Accept: 'text/event-stream' },
@@ -117,6 +130,8 @@ function openSseViaFetch(opts: SseOpts): SseHandle {
         while ((sep = findFrameEnd(buf)) !== -1) {
           const frame = buf.slice(0, sep);
           buf = buf.slice(sep + 2); // skip the terminating \n\n
+          const retry = /^retry:\s*(\d+)\s*$/m.exec(frame);
+          if (retry && opts.reconnectMs !== undefined) retryMs = Number(retry[1]);
           const parsed = parseFrame(frame);
           if (parsed) opts.onMessage(parsed);
         }
@@ -124,10 +139,23 @@ function openSseViaFetch(opts: SseOpts): SseHandle {
     } catch (err) {
       if (!closed) opts.onError?.(err);
     }
-  })();
+  };
+  const loop = (): void => {
+    void run().then(() => {
+      if (closed || retryMs === undefined) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (closed) return;
+        ctrl = new AbortController();
+        loop();
+      }, retryMs);
+    });
+  };
+  loop();
   return {
     close: () => {
       closed = true;
+      if (timer) clearTimeout(timer);
       try { ctrl.abort(); } catch { /* ignore */ }
     },
   };

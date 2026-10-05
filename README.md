@@ -35,6 +35,7 @@ packages/
   orchestrator/  typed event bus, overlapping-execution pipeline, barge-in arbiter
   app/           Node HTTP + SSE server, web UI
   sdk/           reusable client SDK (browser + Node)
+  expo/          voice calls from Expo apps (Android + iOS)
 
 apps/
   mac/           native SwiftUI menu-bar app (issue #2)
@@ -211,6 +212,7 @@ All of the voice-pipeline logic is available as a reusable package so you can wi
 - **Backend integration patterns**: wire into Slack / Discord / Twilio / IVR by subscribing to `emotion.directives` and forwarding the SSML fragment (or numeric directives) to your downstream TTS engine.
 - `packages/app/src/index.html` now uses the SDK via an import map, and `packages/app/src/server.ts` serves the compiled `/sdk/*` bundle so browsers can import it directly.
 - Full API, examples (`node-text-only.ts`, `browser.ts`), and behavioural invariants in [packages/sdk/README.md](packages/sdk/README.md).
+- **Expo** (`@oasis-echo/expo`): voice calls from Android and iOS apps, with the phone's own speech recognition and voice (or the server's voice). See [packages/expo/README.md](packages/expo/README.md).
 
 ## Where to plug future backends in
 

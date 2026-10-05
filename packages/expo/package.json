@@ -1,0 +1,53 @@
+{
+  "name": "@oasis-echo/expo",
+  "version": "0.1.0",
+  "description": "Voice calls with an oasis-echo server from Expo apps (Android and iOS): the phone's own speech recognition and voice, or the server's voice",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./expo": {
+      "types": "./dist/expo.d.ts",
+      "default": "./dist/expo.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@oasis-echo/sdk": "0.1.0"
+  },
+  "peerDependencies": {
+    "expo": ">=52",
+    "expo-audio": "*",
+    "expo-file-system": "*",
+    "expo-speech": "*",
+    "expo-speech-recognition": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo": {
+      "optional": true
+    },
+    "expo-audio": {
+      "optional": true
+    },
+    "expo-file-system": {
+      "optional": true
+    },
+    "expo-speech": {
+      "optional": true
+    },
+    "expo-speech-recognition": {
+      "optional": true
+    }
+  }
+}
