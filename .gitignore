@@ -24,3 +24,7 @@ experiments/wakeword/__pycache__
 experiments/wakeword/models/*
 !experiments/wakeword/models/hey_echo_verifier.pkl
 experiments/wakeword/recordings
+!experiments/wakeword/models/arion_oi.onnx
+!experiments/wakeword/models/hey_arion.onnx
+!experiments/wakeword/models/README_arion_wakeword.md
+!experiments/wakeword/models/*_eval.json
