@@ -236,6 +236,13 @@ export class AudioStreamUpload {
    * doesn't re-send this utterance's tail.
    */
   private drainLookback(): Float32Array | null {
+    const out = this.recentAudio();
+    this.resetLookback();
+    return out;
+  }
+
+  /** The lookback ring's contents (16 kHz, oldest first), without draining it. */
+  recentAudio(): Float32Array | null {
     if (this.lookbackSize === 0) return null;
     const validLen = this.lookbackFilled ? this.lookbackSize : this.lookbackWrite;
     if (validLen === 0) return null;
@@ -248,7 +255,6 @@ export class AudioStreamUpload {
     } else {
       out.set(this.lookback.subarray(0, this.lookbackWrite));
     }
-    this.resetLookback();
     return out;
   }
 

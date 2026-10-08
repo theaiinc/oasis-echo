@@ -5,3 +5,4 @@ export * from './mcp-registry.js';
 export * from './anthropic-client.js';
 export * from './ollama-client.js';
 export * from './openai-client.js';
+export * from './tool-talker.js';

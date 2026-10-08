@@ -1,0 +1,79 @@
+import { describe, expect, it, vi } from 'vitest';
+import { ToolRegistry } from '../src/tools.js';
+import { ToolTalker } from '../src/tool-talker.js';
+
+const state = { sessionId: 's', phase: 'idle', allowedIntents: [], slots: {}, turns: [{ id: '1', startedAtMs: 0, userText: 'hi', agentText: 'Hello!', tier: 'local', interrupted: false }], summary: '', startedAtMs: 0, lastActivityMs: 0 } as any;
+const sse = (chunks: object[]) => new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+
+async function collect(it: AsyncIterable<any>) { const out: any[] = []; for await (const e of it) out.push(e); return out; }
+
+describe('ToolTalker', () => {
+  it('calls a tool, feeds the result back, and keeps talking', async () => {
+    const tools = new ToolRegistry();
+    const handler = vi.fn(async () => ({ status: 'asked', eta_seconds: 60 }));
+    tools.register({ name: 'ask_expert', description: 'd', input_schema: { type: 'object', properties: { question: { type: 'string' } } }, handler });
+    const bodies: any[] = [];
+    const fetchImpl = vi.fn(async (_u: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return bodies.length === 1
+        ? sse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'ask_expert', arguments: '{"question":"What ' } }] } }] },
+               { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'is late?"}' } }] }, finish_reason: 'tool_calls' }] }])
+        : sse([{ choices: [{ delta: { content: "I've asked the expert; about a minute." }, finish_reason: 'stop' }] }]);
+    });
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm', systemPrompt: 'be brief', tools, context: () => 'The expert is idle.', fetchImpl: fetchImpl as any });
+    const events = await collect(talker.stream({ userText: 'what is late?', state }));
+    expect(handler).toHaveBeenCalledWith({ question: 'What is late?' });
+    expect(events.map((e) => e.type)).toEqual(['tool_use', 'tool_result', 'token', 'done']);
+    expect(events.at(-1)).toMatchObject({ stopReason: 'stop' });
+    expect(bodies[0].messages.map((m: any) => m.role)).toEqual(['system', 'system', 'user', 'assistant', 'user']);
+    expect(bodies[1].messages.at(-1)).toEqual({ role: 'tool', tool_call_id: 'c1', content: '{"status":"asked","eta_seconds":60}' });
+  });
+
+  it('just talks when no tool is needed, and offers no tools when told not to', async () => {
+    const bodies: any[] = [];
+    const fetchImpl = vi.fn(async (_u: string, init: any) => { bodies.push(JSON.parse(init.body)); return sse([{ choices: [{ delta: { content: 'Sure.' }, finish_reason: 'stop' }] }]); });
+    const tools = new ToolRegistry();
+    tools.register({ name: 't', description: 'd', input_schema: { type: 'object' }, handler: async () => ({}) });
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm', systemPrompt: 's', tools, fetchImpl: fetchImpl as any });
+    const events = await collect(talker.stream({ userText: 'hey', state, allowTools: false }));
+    expect(events.map((e) => e.type)).toEqual(['token', 'done']);
+    expect(bodies[0].tools).toBeUndefined();
+  });
+
+  it('asks again once when a round ends in "tool_calls" with no call and no words', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls++;
+      return calls === 1
+        ? sse([{ choices: [{ delta: { content: null }, finish_reason: 'tool_calls' }] }])
+        : sse([{ choices: [{ delta: { content: 'Checking now.' }, finish_reason: 'stop' }] }]);
+    });
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm', systemPrompt: 's', fetchImpl: fetchImpl as any });
+    const events = await collect(talker.stream({ userText: 'what is new?', state }));
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.type === 'token').map((e: any) => e.text).join('')).toBe('Checking now.');
+  });
+
+  it('uses the fallback when the free model errors or is slow to start, and skips it after repeated failures', async () => {
+    const models: string[] = [];
+    let primaryMode: 'error' | 'slow' = 'error';
+    const fetchImpl = vi.fn(async (_u: string, init: any) => {
+      const { model } = JSON.parse(init.body);
+      models.push(model);
+      if (model === 'free') {
+        if (primaryMode === 'error') return new Response('busy', { status: 503 });
+        return new Promise<Response>((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+      }
+      return sse([{ choices: [{ delta: { content: 'Hi.' }, finish_reason: 'stop' }] }]);
+    });
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'free', fallbackModel: 'cheap', firstTokenMs: 30, systemPrompt: 's', fetchImpl: fetchImpl as any });
+    const say = async () => (await collect(talker.stream({ userText: 'hi', state }))).find((e) => e.type === 'token')?.text;
+    expect(await say()).toBe('Hi.');
+    primaryMode = 'slow';
+    expect(await say()).toBe('Hi.');
+    expect(await say()).toBe('Hi.');
+    expect(models).toEqual(['free', 'cheap', 'free', 'cheap', 'free', 'cheap']);
+    await say();
+    expect(models.slice(6)).toEqual(['cheap']);
+  });
+});
