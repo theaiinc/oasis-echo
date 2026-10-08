@@ -19,6 +19,16 @@ export type OasisClientOpts = {
   eventSourceCtor?: new (url: string, init?: unknown) => EventSourceLike;
   /** Automatically open the SSE stream on construction. Default `false` — caller calls `connect()`. */
   autoConnect?: boolean;
+  /**
+   * Headers for every request (e.g. `Authorization` for a native app, which can't
+   * share a browser's cookies). Called per request, so a refreshed token is picked up.
+   * Not applied to a browser `EventSource`, which can't send headers.
+   */
+  headers?: () => Record<string, string> | Promise<Record<string, string>>;
+  /** Server event names beyond the built-in ones, delivered through `on()` like the rest. */
+  extraEvents?: string[];
+  /** Fetch-based SSE only: reopen the stream this long after it ends (or the server's `retry:`). */
+  reconnectMs?: number;
 };
 
 type Listeners = {
@@ -45,20 +55,34 @@ export class OasisClient {
   private readonly listeners: Listeners = {};
   private sse: SseHandle | null = null;
   private connectState: 'idle' | 'open' | 'closed' = 'idle';
+  private readonly extraEvents?: string[];
+  private readonly reconnectMs?: number;
 
   constructor(opts: OasisClientOpts) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     // Bind to globalThis — storing the native `fetch` on a plain object
     // and calling it as `this.fetchFn(...)` detaches its `this` context
     // and throws "Illegal invocation" in browsers.
-    this.fetchFn =
+    const base =
       opts.fetch ??
       ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
+    const headers = opts.headers;
+    this.fetchFn = headers
+      ? (async (input: RequestInfo | URL, init?: RequestInit) =>
+          base(input, { ...init, headers: { ...(await headers()), ...(init?.headers as Record<string, string> | undefined) } })) as typeof fetch
+      : base;
     if (opts.eventSourceCtor) this.eventSourceCtor = opts.eventSourceCtor;
+    if (opts.extraEvents) this.extraEvents = opts.extraEvents;
+    if (opts.reconnectMs !== undefined) this.reconnectMs = opts.reconnectMs;
     if (opts.autoConnect) this.connect();
   }
 
   /* ──────────────── Event subscription ──────────────── */
+
+  /** A server event outside the built-in map (see `extraEvents`), e.g. a hosted server's own. */
+  onEvent(event: string, handler: (payload: unknown) => void): () => void {
+    return this.on(event as EventName, handler as EventHandler<EventName>);
+  }
 
   on<E extends EventName>(event: E, handler: EventHandler<E>): () => void {
     const arr = (this.listeners[event] ??= []) as EventHandler<E>[];
@@ -106,6 +130,8 @@ export class OasisClient {
       },
       ...(this.eventSourceCtor ? { eventSourceCtor: this.eventSourceCtor } : {}),
       ...(this.fetchFn !== fetch ? { fetch: this.fetchFn } : {}),
+      ...(this.extraEvents ? { extraEvents: this.extraEvents } : {}),
+      ...(this.reconnectMs !== undefined ? { reconnectMs: this.reconnectMs } : {}),
     };
     this.sse = openSse(sseOpts);
   }

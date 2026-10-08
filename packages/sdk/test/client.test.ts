@@ -184,3 +184,66 @@ describe('OasisClient', () => {
 // Silence unused-import warning for the reference type
 const _s: SseMessage | undefined = undefined;
 void _s;
+
+describe('OasisClient for native apps', () => {
+  /** A fetch whose /events responses are streams of `frames` (one stream per call). */
+  const streamingFetch = (streams: string[][], seen: Array<{ url: string; headers: Record<string, string> }>) =>
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+      if (!url.endsWith('/events')) return { ok: true, status: 202, json: async () => ({ accepted: true }) } as Response;
+      const frames = streams.shift() ?? [];
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          for (const f of frames) c.enqueue(new TextEncoder().encode(f));
+          c.close();
+        },
+      });
+      return { ok: true, status: 200, body } as Response;
+    }) as unknown as typeof fetch;
+
+  it('sends its headers on every request, the event stream included', async () => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    let n = 0;
+    const client = new OasisClient({ baseUrl: 'http://test', fetch: streamingFetch([[]], seen), headers: async () => ({ authorization: `Bearer t${++n}` }) });
+    client.connect();
+    await client.sendTurn({ text: 'hi' });
+    await vi.waitFor(() => expect(seen.length).toBe(2));
+    expect(seen.find((s) => s.url.endsWith('/events'))?.headers['authorization']).toMatch(/^Bearer t\d$/);
+    expect(seen.find((s) => s.url.endsWith('/turn'))?.headers).toMatchObject({ 'Content-Type': 'application/json' });
+    expect(seen.find((s) => s.url.endsWith('/turn'))?.headers['authorization']).toMatch(/^Bearer t\d$/);
+    client.close();
+  });
+
+  it('reopens the stream when the server ends it, after the server\'s retry, and delivers extra events', async () => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    const streams = [
+      ['retry: 5\n: connected\n\n', 'event: idle\ndata: {}\n\n'],
+      ['event: call.language\ndata: {"lang":"vi-VN"}\n\n'],
+    ];
+    const client = new OasisClient({ baseUrl: 'http://test', fetch: streamingFetch(streams, seen), reconnectMs: 10_000, extraEvents: ['idle', 'call.language'] });
+    const got: unknown[] = [];
+    client.onEvent('idle', (p) => got.push(['idle', p]));
+    client.onEvent('call.language', (p) => got.push(['lang', p]));
+    client.connect();
+    await vi.waitFor(() => expect(got).toEqual([['idle', {}], ['lang', { lang: 'vi-VN' }]]), { timeout: 1000 });
+    client.close();
+  });
+
+  it('tells an EventSource about tool events and extra events', () => {
+    const client = new OasisClient({
+      baseUrl: 'http://test',
+      eventSourceCtor: MockEventSource as unknown as new (url: string) => EventSourceLike,
+      extraEvents: ['expert.answer'],
+    });
+    client.connect();
+    const tool = vi.fn();
+    const extra = vi.fn();
+    client.on('tool.use', tool);
+    client.onEvent('expert.answer', extra);
+    MockEventSource.lastInstance!.dispatch('tool.use', JSON.stringify({ toolCallId: 'c', name: 'x', input: {} }));
+    MockEventSource.lastInstance!.dispatch('expert.answer', JSON.stringify({ answer: 'ok' }));
+    expect(tool).toHaveBeenCalledTimes(1);
+    expect(extra).toHaveBeenCalledWith({ answer: 'ok' });
+  });
+});
