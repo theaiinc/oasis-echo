@@ -32,7 +32,8 @@ export interface StreamingTts {
  */
 export class SentenceChunker {
   private buffer = '';
-  private readonly sentenceBoundary = /[.!?]+[\s"')\]]*(?=\s|$)/g;
+  // CJK sentence ends (。！？) need no following space.
+  private readonly sentenceBoundary = /[.!?]+[\s"')\]]*(?=\s|$)|[。！？]+[」』"')\]]*/g;
   private readonly clauseBoundary = /[,;:][\s"')\]]*(?=\s|$)/g;
   private readonly minClauseWords = 10;
   private readonly minClauseChars = 80;
