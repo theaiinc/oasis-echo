@@ -329,8 +329,8 @@ export class Pipeline {
           fillersPlayed < this.maxFillersPerTurn
         ) {
           const filler = fillersPlayed === 0
-            ? pickFirstFiller(recentSet, this.fillerLanguage(), this.fillerPool())
-            : pickContinuationFiller('thinking', usedFillers, recentSet, this.fillerLanguage(), this.fillerPool());
+            ? pickFirstFiller(recentSet, this.fillerLanguage(), this.fillerPool(), userText)
+            : pickContinuationFiller('thinking', usedFillers, recentSet, this.fillerLanguage(), this.fillerPool(), userText);
           usedFillers.add(filler);
           this.trackRecentFiller(filler);
           const trailingSilenceMs = 300 + fillersPlayed * 250;
@@ -450,7 +450,7 @@ export class Pipeline {
     const fillerReason = output.decision.reason;
     const recentSet = new Set(this.recentFillers);
     const fillerText =
-      output.decision.filler ?? pickFirstFiller(recentSet, this.fillerLanguage(), this.fillerPool());
+      output.decision.filler ?? pickFirstFiller(recentSet, this.fillerLanguage(), this.fillerPool(), userText);
     const usedFillers = new Set<string>();
     let advisedFiller: string | null = null;
     let fillerAdviceInFlight = false;
@@ -673,7 +673,7 @@ export class Pipeline {
             usedFillers.add(text);
             this.trackRecentFiller(text);
           } else {
-            text = pickContinuationFiller(fillerReason, usedFillers, recentSet, this.fillerLanguage(), this.fillerPool());
+            text = pickContinuationFiller(fillerReason, usedFillers, recentSet, this.fillerLanguage(), this.fillerPool(), userText);
             this.trackRecentFiller(text);
           }
         } else if (text) {
