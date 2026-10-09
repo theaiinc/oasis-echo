@@ -4,9 +4,14 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "composite": true,
-    "lib": ["ES2022", "DOM"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
     "types": []
   },
-  "include": ["src/**/*"],
-  "references": [{ "path": "../sdk" }]
+  "include": [
+    "src/**/*"
+  ],
+  "references": []
 }

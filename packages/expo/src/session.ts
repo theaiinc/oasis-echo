@@ -1,7 +1,9 @@
-import { OasisClient } from '@oasis-echo/sdk';
 import type { EchoAdapters, RecognizerEvent } from './adapters.js';
+import { EchoConnection, EchoRefused } from './connection.js';
+import { base64ToBytes } from './pcm.js';
+import type { ActionRequest, EchoEvent, Refusal, TtsChunkEvent } from './protocol.js';
 import { chooseVoice } from './voices.js';
-import { base64ToBytes, pcm16ToWav, pcmDurationMs } from './wav.js';
+import { pcm16ToWav, pcmDurationMs } from './wav.js';
 
 /**
  * A voice call with an oasis-echo server from a phone.
@@ -12,8 +14,8 @@ import { base64ToBytes, pcm16ToWav, pcmDurationMs } from './wav.js';
  * Same rules as the web VoiceSession: the mic is off while the agent speaks (so it
  * can't hear itself), and comes back only once that reply is complete and played.
  *
- *   const s = new EchoVoiceSession({ baseUrl: 'https://echo.example/a/maya',
- *     adapters: createExpoAdapters(), fetch: expoFetch, headers: async () => ({ authorization: `Bearer ${token}` }) });
+ *   const s = new EchoVoiceSession({ baseUrl: 'https://echo.example/a/assistant',
+ *     adapters: createExpoAdapters(), headers: async () => ({ authorization: `Bearer ${token}` }) });
  *   s.on('userText', ({ text, final }) => …);
  *   await s.start();
  */
@@ -22,7 +24,7 @@ export type VoiceMode = 'device' | 'server';
 export type CallState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
 export type EchoVoiceSessionOpts = {
-  /** The server (or a hosted agent's base, e.g. https://echo.example/a/maya). */
+  /** The server (or a hosted agent's base, e.g. https://echo.example/a/assistant). */
   baseUrl: string;
   adapters: EchoAdapters;
   /** Who speaks the agent's words. Default 'device'. */
@@ -31,12 +33,17 @@ export type EchoVoiceSessionOpts = {
   lang?: string;
   /** Headers for every request (auth). */
   headers?: () => Record<string, string> | Promise<Record<string, string>>;
-  /** A fetch that streams response bodies; on React Native pass `fetch` from 'expo/fetch'. */
-  fetch?: typeof fetch;
-  /** Reopen the event stream this long after it drops (or the server's `retry:`). Default 1000. */
-  reconnectMs?: number;
-  /** Server event names beyond the built-in ones (read them with `session.client.onEvent`). */
-  extraEvents?: string[];
+  /**
+   * Things the app can do for the agent (servers with client actions, e.g. hosted Echo): offered to the server with
+   * hello whenever the stream opens (call refreshActions() when they change), and run when the agent asks.
+   */
+  actions?: {
+    names(): string[];
+    context?(): unknown;
+    run(req: ActionRequest): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  };
+  /** Platform overrides for the connection (tests, other runtimes). */
+  connection?: Pick<ConstructorParameters<typeof EchoConnection>[0], 'XMLHttpRequest' | 'WebSocket' | 'fetch'>;
   /** Speaking rate per language, e.g. { vi: 1.15 }. Default 1. */
   rate?: Record<string, number>;
   /** Ask the recognizer to stay on the device (Android 13+, iOS when supported). Default false. */
@@ -56,6 +63,10 @@ type SessionEvents = {
   /** What the agent is saying, a line at a time. */
   agentText: { turnId: string; text: string; filler: boolean };
   error: { kind: 'permission' | 'recognition' | 'network' | 'speech'; message: string };
+  /** The server refused the app (signed out, not allowed, unavailable): the call stops; say `message` if given. */
+  refused: Refusal;
+  /** Every server event, for anything the session doesn't handle itself (e.g. a server's own events). */
+  event: EchoEvent;
 };
 type Handler<K extends keyof SessionEvents> = (payload: SessionEvents[K]) => void;
 
@@ -63,7 +74,7 @@ type Handler<K extends keyof SessionEvents> = (payload: SessionEvents[K]) => voi
 const QUIET_ERRORS = new Set(['no-speech', 'speech-timeout', 'aborted']);
 
 export class EchoVoiceSession {
-  readonly client: OasisClient;
+  readonly connection: EchoConnection;
   private readonly opts: EchoVoiceSessionOpts;
   private readonly handlers: { [K in keyof SessionEvents]?: Array<Handler<K>> } = {};
   private voiceMode: VoiceMode;
@@ -98,12 +109,15 @@ export class EchoVoiceSession {
     this.opts = opts;
     this.voiceMode = opts.voice ?? 'device';
     this.lang = opts.lang ?? 'en-US';
-    this.client = new OasisClient({
-      baseUrl: opts.baseUrl,
-      ...(opts.fetch ? { fetch: opts.fetch } : {}),
+    this.connection = new EchoConnection({
+      url: opts.baseUrl,
       ...(opts.headers ? { headers: opts.headers } : {}),
-      ...(opts.extraEvents ? { extraEvents: opts.extraEvents } : {}),
-      reconnectMs: opts.reconnectMs ?? 1000,
+      ...opts.connection,
+      onEvent: (e) => this.onEvent(e),
+      onStream: (state, refusal) => {
+        if (refusal) return this.refused(refusal);
+        if (state === 'open') void this.sendHello();
+      },
     });
   }
 
@@ -145,15 +159,10 @@ export class EchoVoiceSession {
       return false;
     }
     this.on_ = true;
-    const c = this.client;
-    this.unsubs.push(
-      this.opts.adapters.recognizer.listen((e) => this.onRecognizer(e)),
-      c.on('tts.chunk', (p) => this.onChunk(p)),
-      c.on('turn.complete', (p) => { this.completed.add(p.turn.id); this.maybeResume(); }),
-      c.on('bargein', (p) => { if (p.interruptedTurnId) this.abandoned.add(p.interruptedTurnId); this.silence(); }),
-      c.on('error', (p) => { if (p.source === 'sse') this.emit('error', { kind: 'network', message: p.error }); }),
-    );
-    c.connect();
+    this.unsubs.push(this.opts.adapters.recognizer.listen((e) => this.onRecognizer(e)));
+    this.connection.open().catch((err) => {
+      if (!(err instanceof EchoRefused)) this.emit('error', { kind: 'network', message: String((err as Error)?.message ?? err) });
+    });
     this.emit('started', undefined);
     this.listen();
     return true;
@@ -169,7 +178,8 @@ export class EchoVoiceSession {
     this.listening = false;
     this.stopSpeech();
     this.agentSpeaking = false;
-    this.client.close();
+    this.connection.close();
+    this.sentHello = null;
     this.setState('idle');
     this.emit('stopped', undefined);
   }
@@ -195,7 +205,7 @@ export class EchoVoiceSession {
   interrupt(): void {
     if (!this.agentSpeaking) return;
     if (this.currentTurn) this.abandoned.add(this.currentTurn);
-    void this.client.bargeIn().catch(() => undefined);
+    void this.connection.bargeIn().catch(() => undefined);
     this.silence();
   }
 
@@ -206,7 +216,55 @@ export class EchoVoiceSession {
     if (this.agentSpeaking) this.interrupt();
     this.emit('userText', { text: t, final: true });
     this.setState('thinking');
-    await this.client.sendTurn({ text: t });
+    await this.connection.turn(t);
+  }
+
+  /** What the app can do changed (e.g. a route started): tell the server, if connected. */
+  refreshActions(): void {
+    void this.sendHello();
+  }
+
+  /* ---------------- the server ---------------- */
+
+  private sentHello: string | null = null;
+
+  private async sendHello(): Promise<void> {
+    const a = this.opts.actions;
+    if (!a || this.connection.state !== 'open') return;
+    const body = { actions: a.names(), context: a.context?.() };
+    const key = JSON.stringify(body);
+    if (key === this.sentHello) return;
+    this.sentHello = key;
+    try {
+      await this.connection.hello(body);
+    } catch (err) {
+      this.sentHello = null;
+      if (err instanceof EchoRefused) this.refused(err.refusal);
+    }
+  }
+
+  private onEvent(e: EchoEvent): void {
+    if (!this.on_) return;
+    this.emit('event', e);
+    switch (e.type) {
+      case 'tts.chunk': return this.onChunk(e);
+      case 'turn.complete': this.completed.add(e.turnId); return this.maybeResume();
+      case 'bargein': if (e.interruptedTurnId) this.abandoned.add(e.interruptedTurnId); return this.silence();
+      case 'action.request': {
+        const a = this.opts.actions;
+        const req = { id: e.id, name: e.name, args: e.args };
+        void (a ? a.run(req).catch((err) => ({ ok: false, error: String((err as Error)?.message ?? err) })) : Promise.resolve({ ok: false, error: 'unsupported' }))
+          .then((r) => this.connection.actionResult({ id: e.id, ...r }))
+          .catch(() => undefined);
+        return;
+      }
+      default:
+    }
+  }
+
+  private refused(r: Refusal): void {
+    this.emit('refused', r);
+    this.stop();
   }
 
   /* ---------------- listening ---------------- */
@@ -261,7 +319,10 @@ export class EchoVoiceSession {
     this.heard = '';
     this.emit('userText', { text, final: true });
     this.setState('thinking');
-    this.client.sendTurn({ text }).catch((err) => this.emit('error', { kind: 'network', message: String((err as Error)?.message ?? err) }));
+    this.connection.turn(text).catch((err) => {
+      if (err instanceof EchoRefused) this.refused(err.refusal);
+      else this.emit('error', { kind: 'network', message: String((err as Error)?.message ?? err) });
+    });
   }
 
   /** Listen again soon after the recognizer stopped (it does after each utterance or a silence). */
@@ -275,7 +336,7 @@ export class EchoVoiceSession {
 
   /* ---------------- speaking ---------------- */
 
-  private onChunk(p: { turnId: string; text: string; audio?: string; sampleRate: number; final: boolean; filler: boolean }): void {
+  private onChunk(p: TtsChunkEvent): void {
     if (!this.on_ || this.abandoned.has(p.turnId)) return;
     const text = p.text?.trim() ?? '';
     const server = this.voiceMode === 'server' && !!p.audio && !!this.opts.adapters.player;

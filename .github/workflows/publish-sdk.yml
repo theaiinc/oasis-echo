@@ -1,0 +1,67 @@
+name: Publish SDKs to npm
+
+# A release tagged sdk-vX.Y.Z publishes @theaiinc/oasis-echo-sdk and @theaiinc/oasis-echo-expo at X.Y.Z,
+# with npm trusted publishing (GitHub OIDC, no stored token), the same way as Bugmole: npm >= 11.5.1 exchanges the
+# workflow's OIDC token itself. Each package needs this repo + workflow (+ environment "release") as its trusted
+# publisher on npmjs.com (`npm trust github <pkg> --repo theaiinc/oasis-echo --file publish-sdk.yml --env release`).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    environment: release
+    if: startsWith(github.event.release.tag_name, 'sdk-v')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Set up npm trusted publishing
+        run: npm install --global npm@11.5.1
+
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#sdk-v}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "Invalid semver: $VERSION"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install, build, test
+        run: |
+          npm ci
+          npx tsc -b packages/sdk packages/expo
+          npx vitest run packages/sdk packages/expo
+
+      - name: Set versions
+        run: |
+          for p in packages/sdk packages/expo; do
+            (cd "$p" && npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version)
+          done
+
+      - name: Publish the SDK
+        working-directory: packages/sdk
+        run: npm publish --access public
+
+      - name: Publish the Expo SDK
+        working-directory: packages/expo
+        run: npm publish --access public

@@ -1,10 +1,10 @@
 /**
- * Browser-only entrypoints for @oasis-echo/sdk — Web Audio playback,
+ * Browser-only entrypoints for @theaiinc/oasis-echo-sdk — Web Audio playback,
  * mic PCM capture via AudioWorklet, SER emotion detector, and the
  * adaptive barge-in volume monitor. Import from:
  *
  *   import { AudioPlayer, MicCapture, EmotionDetector, BargeInMonitor }
- *     from '@oasis-echo/sdk/browser';
+ *     from '@theaiinc/oasis-echo-sdk/browser';
  */
 
 export * from './audio-player.js';
