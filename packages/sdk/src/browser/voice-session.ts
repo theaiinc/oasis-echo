@@ -25,6 +25,7 @@ import type { OasisClient } from '../client.js';
 import type { TurnRequest, EmotionPayload } from '../types.js';
 import { TurnDebouncer, type TurnDebouncerOpts } from '../turn-debouncer.js';
 import { AudioPlayer } from './audio-player.js';
+import { DeviceSpeaker } from './device-speaker.js';
 import { AudioStreamUpload } from './audio-stream.js';
 import { BargeInMonitor } from './barge-in-monitor.js';
 import { EmotionDetector } from './emotion-detector.js';
@@ -107,6 +108,12 @@ export type VoiceSessionOpts = {
   bargeInBy?: 'page' | 'server';
   /** Speech recognition language (BCP 47, e.g. "vi-VN"). Default: the browser's. */
   lang?: string;
+  /**
+   * Who speaks the agent's words: the server's audio ('server', default) or the
+   * device's own voice ('device', speechSynthesis), for chunks that arrive as text only.
+   * Can change mid-call (setVoice), e.g. when the server says what the call's plan allows.
+   */
+  voice?: 'server' | 'device';
   /** sendPartial min-word-count gate. Default 3. */
   partialMinWords?: number;
   /** Interim-stability window (ms) before firing the backchannel check. Default 300. */
@@ -187,6 +194,8 @@ export class VoiceSession {
   private levelBuf: Float32Array<ArrayBuffer> | null = null;
   private micCapture: MicCapture | null = null;
   private audioPlayer: AudioPlayer | null = null;
+  private deviceSpeaker: DeviceSpeaker | null = null;
+  private voice: 'server' | 'device';
   private bargeInMonitor: BargeInMonitor | null = null;
   private turnDebouncer: TurnDebouncer | null = null;
   private emotionDetector: EmotionDetector | null = null;
@@ -208,6 +217,7 @@ export class VoiceSession {
     this.serverStt = opts.serverStt ?? false;
     this.baseUrl = (opts.baseUrl ?? '').replace(/\/+$/, '');
     this.lang = opts.lang;
+    this.voice = opts.voice ?? 'server';
     this.vad = opts.vad ?? 'recognition';
     this.silenceMs = opts.silenceMs ?? 1200;
     this.vadEndSilenceMs = opts.vadEndSilenceMs;
@@ -304,6 +314,8 @@ export class VoiceSession {
       destinationNode: this.outputGain,
       onEnd: () => this.onAudioQueueEmpty(),
     });
+    this.deviceSpeaker = new DeviceSpeaker({ onEnd: () => this.onAudioQueueEmpty() });
+    this.deviceSpeaker.setVolume(this.speakerMuted ? 0 : 1);
 
     this.micCapture = new MicCapture();
     try {
@@ -323,7 +335,9 @@ export class VoiceSession {
       // With the server checking the voice, the page can flag talk-over sooner and more
       // readily: someone else (or a cough) is turned down there, not cut off here.
       ...(this.bargeInBy === 'server' ? { confirmMs: 280, baselineMultiplier: 1.35 } : {}),
-      isActive: () => this.agentSpeaking,
+      // The device's own voice isn't in the echo canceller's reference on most
+      // platforms, so the mic would hear it as talk-over: no barge-in by loudness then.
+      isActive: () => this.agentSpeaking && !this.deviceSpeaker?.activeCount,
       onBargeIn: () => (this.bargeInBy === 'server' ? void this.askBargeIn() : this.bargeIn()),
       // A possible interruption lowers the agent's voice until it's confirmed (or not).
       onDuck: (ducked) => this.setOutputLevel(ducked ? this.duckLevel : 1),
@@ -368,6 +382,8 @@ export class VoiceSession {
     this.emotionDetector = null;
     this.audioPlayer?.stopAll();
     this.audioPlayer = null;
+    this.deviceSpeaker?.stopAll();
+    this.deviceSpeaker = null;
     this.audioStream?.close();
     this.audioStream = null;
     this.audioStreamReady = false;
@@ -473,10 +489,12 @@ export class VoiceSession {
 
   /* ──────────────── Internal: mic / TTS arbitration ──────────────── */
 
-  private onTtsChunk(p: { turnId: string; audio?: string; sampleRate: number; filler?: boolean }): void {
+  private onTtsChunk(p: { turnId: string; audio?: string; text?: string; sampleRate: number; filler?: boolean }): void {
     if (this.abandonedTurns.has(p.turnId)) return;
     if (!this.audioPlayer) return;
-    if (!p.audio) return;
+    // Text only: the device speaks it, when this call uses the device's voice.
+    const device = !p.audio && !!p.text && this.voice === 'device' && !!this.deviceSpeaker;
+    if (!p.audio && !device) return;
     this.currentTurnIdPlaying = p.turnId;
     if (!this.agentSpeaking) {
       this.agentSpeaking = true;
@@ -487,10 +505,31 @@ export class VoiceSession {
         this.emit('hint', { text: 'agent speaking — mic paused' });
       }
     }
-    this.audioPlayer.playPcm(p.audio, p.sampleRate, {
+    if (device) {
+      this.deviceSpeaker!.speak(p.text!, this.lang || navigator.language || 'en-US');
+      return;
+    }
+    this.audioPlayer.playPcm(p.audio!, p.sampleRate, {
       turnId: p.turnId,
       filler: p.filler === true,
     });
+  }
+
+  /** Switch who speaks the agent's words for the rest of the call. */
+  setVoice(voice: 'server' | 'device'): void {
+    if (voice === this.voice) return;
+    this.voice = voice;
+    if (voice === 'server') this.deviceSpeaker?.stopAll();
+  }
+
+  /** Who speaks the agent's words. */
+  get voiceMode(): 'server' | 'device' {
+    return this.voice;
+  }
+
+  /** Audio (or device speech) still queued or playing. */
+  private get playing(): number {
+    return (this.audioPlayer?.activeCount ?? 0) + (this.deviceSpeaker?.activeCount ?? 0);
   }
 
   private onTurnComplete(p: { turn: { id: string } }): void {
@@ -505,7 +544,7 @@ export class VoiceSession {
     // If the last chunk already drained before turn.complete arrived,
     // resume the mic immediately — otherwise it would stay paused
     // forever because onAudioQueueEmpty gated on completedTurns.
-    if (this.audioPlayer && this.audioPlayer.activeCount === 0 && this.agentSpeaking) {
+    if (this.audioPlayer && this.playing === 0 && this.agentSpeaking) {
       this.agentSpeaking = false;
       this.emit('speakingChange', false);
       this.micPausedForTts = false;
@@ -528,7 +567,7 @@ export class VoiceSession {
     this.agentSpeaking = false;
     this.emit('speakingChange', false);
     setTimeout(() => {
-      if (this.audioPlayer && this.audioPlayer.activeCount === 0) {
+      if (this.audioPlayer && this.playing === 0) {
         this.micPausedForTts = false;
         if (this.voiceOn) {
           this.emit('hint', { text: 'listening…' });
@@ -540,6 +579,7 @@ export class VoiceSession {
 
   private stopSpeaking(): void {
     try { this.audioPlayer?.stopAll(); } catch { /* ignore */ }
+    this.deviceSpeaker?.stopAll();
     this.agentSpeaking = false;
     this.emit('speakingChange', false);
     if (this.voiceOn) {
@@ -609,6 +649,7 @@ export class VoiceSession {
   setSpeakerMuted(muted: boolean): void {
     this.speakerMuted = muted;
     this.setOutputLevel(1);
+    this.deviceSpeaker?.setVolume(muted ? 0 : 1);
   }
 
   /** The agent's voice at `level` (0..1) of normal, unless the speaker is off. */
@@ -846,7 +887,7 @@ export class VoiceSession {
     this.lastBackchannelAt = now;
     try {
       const res = await fetch(`${this.baseUrl}/backchannel`).then((r) => r.json());
-      if (!res?.ready || !res.audio || !this.audioPlayer) return;
+      if (!res?.ready || !res.audio || !this.audioPlayer || this.voice === 'device') return;
       this.audioPlayer.playPcm(res.audio, res.sampleRate, {
         filler: true,
         gain: 0.8,
