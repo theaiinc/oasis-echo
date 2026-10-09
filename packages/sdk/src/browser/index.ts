@@ -8,6 +8,7 @@
  */
 
 export * from './audio-player.js';
+export * from './device-speaker.js';
 export * from './mic-capture.js';
 export * from './emotion-detector.js';
 export * from './barge-in-monitor.js';
