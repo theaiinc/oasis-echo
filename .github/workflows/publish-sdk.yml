@@ -1,8 +1,9 @@
 name: Publish SDKs to npm
 
 # A release tagged sdk-vX.Y.Z publishes @theaiinc/oasis-echo-sdk and @theaiinc/oasis-echo-expo at X.Y.Z,
-# with npm trusted publishing (GitHub OIDC, no stored token), the same way as @theaiinc/aegis-sdk. Each package needs
-# this repo + workflow (+ environment "release") set as its trusted publisher on npmjs.com.
+# with npm trusted publishing (GitHub OIDC, no stored token), the same way as Bugmole: npm >= 11.5.1 exchanges the
+# workflow's OIDC token itself. Each package needs this repo + workflow (+ environment "release") as its trusted
+# publisher on npmjs.com (`npm trust github <pkg> --repo theaiinc/oasis-echo --file publish-sdk.yml --env release`).
 
 on:
   release:
@@ -32,6 +33,9 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Set up npm trusted publishing
+        run: npm install --global npm@11.5.1
+
       - name: Resolve version
         id: version
         run: |
@@ -54,18 +58,10 @@ jobs:
             (cd "$p" && npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version)
           done
 
-      - name: Publish (trusted publishing)
-        run: |
-          JWT=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" \
-            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).value")
-          for pair in "sdk:@theaiinc%2foasis-echo-sdk" "expo:@theaiinc%2foasis-echo-expo"; do
-            dir="packages/${pair%%:*}"
-            pkg="${pair#*:}"
-            TOKEN=$(curl -sS -X POST "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$pkg" \
-              -H "Authorization: Bearer $JWT" \
-              | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).token")
-            echo "//registry.npmjs.org/:_authToken=$TOKEN" > ~/.npmrc
-            (cd "$dir" && npm publish --access public)
-          done
-          rm -f ~/.npmrc
+      - name: Publish the SDK
+        working-directory: packages/sdk
+        run: npm publish --access public
+
+      - name: Publish the Expo SDK
+        working-directory: packages/expo
+        run: npm publish --access public
