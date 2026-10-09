@@ -65,6 +65,8 @@ type SessionEvents = {
   error: { kind: 'permission' | 'recognition' | 'network' | 'speech'; message: string };
   /** The server refused the app (signed out, not allowed, unavailable): the call stops; say `message` if given. */
   refused: Refusal;
+  /** The server ended the call (`reason`, e.g. out_of_credits, max_length); the session stops once its last words are said. */
+  ended: { reason: string; message: string };
   /** Every server event, for anything the session doesn't handle itself (e.g. a server's own events). */
   event: EchoEvent;
 };
@@ -257,6 +259,17 @@ export class EchoVoiceSession {
           .then((r) => this.connection.actionResult({ id: e.id, ...r }))
           .catch(() => undefined);
         return;
+      }
+      case 'call.ended': {
+        this.emit('ended', { reason: e.reason, message: e.message });
+        // Let the agent finish saying why, then hang up.
+        const started = Date.now();
+        const hangUp = () => {
+          if (!this.on_) return;
+          if (this.agentSpeaking && Date.now() - started < 30_000) return void setTimeout(hangUp, 200);
+          this.stop();
+        };
+        return hangUp();
       }
       default:
     }

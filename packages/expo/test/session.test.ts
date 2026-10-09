@@ -170,6 +170,27 @@ describe('EchoVoiceSession', () => {
     s.stop();
   });
 
+  it('when the server ends the call, it hangs up once the agent has said why', async () => {
+    const p = phone();
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn });
+    const ended: unknown[] = [];
+    let stopped = 0;
+    s.on('ended', (e) => ended.push(e));
+    s.on('stopped', () => { stopped++; });
+    await s.start();
+    await connect();
+    FakeXhr.last!.event('tts.chunk', chunk('t9', "You've used all your talk time for this month.", { final: true }));
+    await flush();
+    FakeXhr.last!.event('turn.complete', { turn: { id: 't9', userText: '', agentText: "You've used all your talk time for this month." } });
+    FakeXhr.last!.event('call.ended', { reason: 'out_of_credits', message: "You've used all your talk time for this month.", atMs: 3 });
+    await flush();
+    expect(ended).toEqual([{ reason: 'out_of_credits', message: "You've used all your talk time for this month." }]);
+    expect(stopped).toBe(0); // still saying it
+    p.spoken[0]!.done();
+    await vi.advanceTimersByTimeAsync(800); // the reply's tail gap, then the next check
+    expect(stopped).toBe(1);
+  });
+
   it('without the mic permission it says so and doesn\'t start', async () => {
     const p = phone();
     p.recognizer.granted = false;
