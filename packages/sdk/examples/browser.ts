@@ -1,7 +1,7 @@
 /**
  * Browser example: wire the full voice stack (SSE + Web Audio +
  * AudioWorklet mic capture + SER emotion + barge-in) using
- * @oasis-echo/sdk — roughly what packages/app/src/index.html does
+ * @theaiinc/oasis-echo-sdk — roughly what packages/app/src/index.html does
  * at runtime, minus the UI rendering.
  *
  * Load this from a module script in an HTML page that has a mic
@@ -9,13 +9,13 @@
  * your UI framework of choice.
  */
 
-import { OasisClient, TurnDebouncer } from '@oasis-echo/sdk';
+import { OasisClient, TurnDebouncer } from '@theaiinc/oasis-echo-sdk';
 import {
   AudioPlayer,
   BargeInMonitor,
   EmotionDetector,
   MicCapture,
-} from '@oasis-echo/sdk/browser';
+} from '@theaiinc/oasis-echo-sdk/browser';
 
 export async function startVoiceStack(opts: {
   baseUrl: string;

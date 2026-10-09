@@ -1,4 +1,4 @@
-# @oasis-echo/sdk
+# @theaiinc/oasis-echo-sdk
 
 Client SDK for the [oasis-echo](https://github.com/theaiinc/oasis-echo) voice AI server. Works in **browsers and Node.js** — same `OasisClient` API, same typed event map, same correction / turn / barge-in endpoints.
 
@@ -11,7 +11,7 @@ Use it to:
 ## Install
 
 ```bash
-npm i @oasis-echo/sdk
+npm i @theaiinc/oasis-echo-sdk
 # optional, only if you want the browser SER classifier
 npm i @huggingface/transformers
 ```
@@ -19,7 +19,7 @@ npm i @huggingface/transformers
 ## Quick start — Node (text-only)
 
 ```ts
-import { OasisClient } from '@oasis-echo/sdk';
+import { OasisClient } from '@theaiinc/oasis-echo-sdk';
 
 const client = new OasisClient({ baseUrl: 'http://localhost:3001' });
 
@@ -41,9 +41,9 @@ Full Node example: [examples/node-text-only.ts](./examples/node-text-only.ts).
 ## Quick start — Browser (full voice stack)
 
 ```ts
-import { OasisClient, TurnDebouncer } from '@oasis-echo/sdk';
+import { OasisClient, TurnDebouncer } from '@theaiinc/oasis-echo-sdk';
 import { AudioPlayer, MicCapture, EmotionDetector, BargeInMonitor }
-  from '@oasis-echo/sdk/browser';
+  from '@theaiinc/oasis-echo-sdk/browser';
 
 const client = new OasisClient({ baseUrl: '' });        // same origin
 const audioCtx = new AudioContext();
@@ -151,7 +151,7 @@ deb.cancel();   // discard buffer
 Pure function that turns a PCM chunk's duration + optional emotion directives into a concrete Web Audio schedule. Useful even if you're not using the browser `AudioPlayer`.
 
 ```ts
-import { scheduleChunk } from '@oasis-echo/sdk';
+import { scheduleChunk } from '@theaiinc/oasis-echo-sdk';
 
 const plan = scheduleChunk({
   ctxTime: audioCtx.currentTime,
@@ -164,7 +164,7 @@ src.start(plan.startAt);
 queueEndsAt = plan.endAt;
 ```
 
-### Browser helpers (`@oasis-echo/sdk/browser`)
+### Browser helpers (`@theaiinc/oasis-echo-sdk/browser`)
 
 - **`AudioPlayer`** — Web Audio playback with per-turn emotion directives (playback rate, composed gain, inter-chunk silence). Applies `scheduleChunk` under the hood.
 - **`MicCapture`** — off-main-thread PCM ring buffer via an inline `AudioWorklet`. Exposes `snapshot(durationSec)` for classification / replay. Ships a `resampleTo16k()` helper.
@@ -193,14 +193,14 @@ Things the SDK deliberately prevents — each one is a real bug we've hit:
   <script type="importmap">
     {
       "imports": {
-        "@oasis-echo/sdk": "/sdk/index.js",
-        "@oasis-echo/sdk/browser": "/sdk/browser/index.js",
+        "@theaiinc/oasis-echo-sdk": "/sdk/index.js",
+        "@theaiinc/oasis-echo-sdk/browser": "/sdk/browser/index.js",
         "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0"
       }
     }
   </script>
   <script type="module">
-    import { OasisClient } from '@oasis-echo/sdk';
+    import { OasisClient } from '@theaiinc/oasis-echo-sdk';
     // …
   </script>
   ```

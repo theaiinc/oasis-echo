@@ -631,16 +631,16 @@
     <script type="importmap">
       {
         "imports": {
-          "@oasis-echo/sdk": "/sdk/index.js",
-          "@oasis-echo/sdk/browser": "/sdk/browser/index.js",
+          "@theaiinc/oasis-echo-sdk": "/sdk/index.js",
+          "@theaiinc/oasis-echo-sdk/browser": "/sdk/browser/index.js",
           "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0"
         }
       }
     </script>
 
     <script type="module">
-      import { OasisClient } from '@oasis-echo/sdk';
-      import { VoiceSession } from '@oasis-echo/sdk/browser';
+      import { OasisClient } from '@theaiinc/oasis-echo-sdk';
+      import { VoiceSession } from '@theaiinc/oasis-echo-sdk/browser';
 
       /* ─────────────────────── UI refs + helpers ─────────────────────── */
       const turnsEl = document.getElementById('turns');

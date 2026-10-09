@@ -2,7 +2,7 @@ import type { SystemVoice } from './voices.js';
 
 /**
  * What the session needs from the phone. `createExpoAdapters()` (from
- * '@oasis-echo/expo/expo') builds these from expo-speech, expo-speech-recognition and
+ * '@theaiinc/oasis-echo-expo/expo') builds these from expo-speech, expo-speech-recognition and
  * expo-audio; tests and other runtimes pass their own.
  */
 

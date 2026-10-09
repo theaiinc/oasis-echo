@@ -1,6 +1,7 @@
-# @oasis-echo/expo
+# @theaiinc/oasis-echo-expo
 
-Voice calls with an oasis-echo server from Expo apps on Android and iOS.
+Voice with an oasis-echo server from Expo apps on Android and iOS: `EchoConnection` (the transport, for apps that run
+their own turns) and `EchoVoiceSession` (a whole call on top of it).
 
 - **Listening:** the phone's own speech recognition ([expo-speech-recognition]). What the user says is
   sent to the server as a turn.
@@ -12,7 +13,7 @@ Voice calls with an oasis-echo server from Expo apps on Android and iOS.
 ## Install
 
 ```bash
-npx expo install @oasis-echo/expo @oasis-echo/sdk expo-speech expo-speech-recognition expo-audio expo-file-system
+npx expo install @theaiinc/oasis-echo-expo expo-speech expo-speech-recognition expo-audio expo-file-system
 ```
 
 `app.json` / `app.config`:
@@ -34,14 +35,11 @@ recognition is a native module: use a development build, not Expo Go.
 ## Use
 
 ```tsx
-import { EchoVoiceSession } from '@oasis-echo/expo';
-import { createExpoAdapters } from '@oasis-echo/expo/expo';
-import { fetch } from 'expo/fetch'; // streams the server's events (React Native's fetch doesn't)
-
+import { EchoVoiceSession } from '@theaiinc/oasis-echo-expo';
+import { createExpoAdapters } from '@theaiinc/oasis-echo-expo/expo';
 const session = new EchoVoiceSession({
   baseUrl: 'https://echo.example.com/a/maya',
   adapters: createExpoAdapters(),
-  fetch,
   lang: 'vi-VN',
   voice: 'device', // or 'server'
   rate: { vi: 1.15, en: 1.1 },
@@ -59,8 +57,36 @@ session.setLang('en-US');
 session.stop();        // hang up
 ```
 
-`session.client` is the underlying `OasisClient`; pass `extraEvents` for server events beyond the
-built-in ones and read them with `session.client.onEvent(name, …)`.
+Servers with client actions (hosted Echo): pass `actions: { names(), context(), run(req) }`. The session says hello
+with them whenever the stream opens (call `session.refreshActions()` when they change), runs what the agent asks and
+posts the result. `session.on('refused', r)` fires when the server says no (401/403/503), with `r.message[lang]` to
+speak; `session.on('event', e)` sees every server event.
+
+## EchoConnection: your own turns
+
+Apps with their own turn logic (push-to-talk, a wake word, a native audio pipeline) use the connection directly:
+
+```ts
+import { EchoConnection, EchoRefused, base64ToBytes } from '@theaiinc/oasis-echo-expo';
+
+const echo = new EchoConnection({
+  url: 'https://echo.example.com/a/arion',
+  headers: () => ({ Authorization: `Bearer ${token}` }),
+  onEvent: (e) => { /* tts.chunk, turn.complete, action.request, stt.*, bargein, idle, other */ },
+  onStream: (state, refusal) => { /* open | closed (+ refusal: stop and say why) */ },
+  onSocket: (m) => { /* ready | stt.partial | stt.final from the audio socket */ },
+});
+await echo.open();                       // the event stream: XHR (React Native has no EventSource), reconnects
+await echo.hello({ actions: ['nav_search'], context: { lang: 'vi' } });
+await echo.openAudio();                  // the audio socket, with the same headers
+echo.startUtterance('u1');
+echo.sendAudio(float32Le16kHzBytes);     // mic frames
+echo.endUtterance();
+await echo.actionResult({ id, ok: true, result });
+```
+
+`protocol.ts` has the shapes (`parseEvent`, `parseRefusal`, `actionResultBody`, socket messages, `echoPaths`);
+`pcm.ts` the base64 / float32 helpers that work in Hermes without `atob`.
 
 ## Adapters
 
@@ -71,8 +97,8 @@ navigation audio channel) or in tests.
 
 ## Not yet
 
-- Server listening (streaming the mic to the server's `/audio` socket, which is faster and can tell the
-  user's voice from others'): needs raw microphone PCM, e.g. via react-native-audio-api.
+- Server listening inside `EchoVoiceSession` (the connection has the audio socket; the session listens with the
+  phone's recognizer for now). Apps with their own mic PCM stream through `EchoConnection`.
 - Talking over the agent by voice: the mic is off while it speaks; use `interrupt()`.
 
 [expo-speech-recognition]: https://github.com/jamsch/expo-speech-recognition

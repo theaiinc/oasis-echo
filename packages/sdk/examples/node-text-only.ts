@@ -13,7 +13,7 @@
  *   node --loader tsx packages/sdk/examples/node-text-only.ts
  */
 
-import { OasisClient } from '@oasis-echo/sdk';
+import { OasisClient } from '@theaiinc/oasis-echo-sdk';
 
 const baseUrl = process.env.OASIS_URL ?? 'http://localhost:3001';
 

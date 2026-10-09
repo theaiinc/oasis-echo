@@ -1,15 +1,7 @@
 /**
  * The server's voice arrives as base64 16-bit mono PCM chunks; native players want a
- * file. Wrap PCM in a WAV header (no resampling, no copies beyond the one buffer).
+ * file. Wrap PCM in a WAV header (no resampling, no copies beyond the one buffer). Base64 is in pcm.ts.
  */
-
-/** Base64 to bytes, with the runtime's atob (Hermes has it since RN 0.74). */
-export function base64ToBytes(b64: string): Uint8Array {
-  const bin = globalThis.atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
 
 /** A WAV file holding these 16-bit little-endian mono PCM chunks back to back. */
 export function pcm16ToWav(chunks: Uint8Array[], sampleRate: number): Uint8Array {

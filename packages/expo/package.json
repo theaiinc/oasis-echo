@@ -1,7 +1,7 @@
 {
-  "name": "@oasis-echo/expo",
-  "version": "0.1.0",
-  "description": "Voice calls with an oasis-echo server from Expo apps (Android and iOS): the phone's own speech recognition and voice, or the server's voice",
+  "name": "@theaiinc/oasis-echo-expo",
+  "version": "0.2.0",
+  "description": "Voice with an oasis-echo server from Expo apps (Android and iOS): the connection (events, actions, audio socket) and whole calls with the phone's speech recognition and voice, or the server's voice",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,9 +22,6 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@oasis-echo/sdk": "0.1.0"
   },
   "peerDependencies": {
     "expo": ">=52",
@@ -49,5 +46,14 @@
     "expo-speech-recognition": {
       "optional": true
     }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/theaiinc/oasis-echo.git",
+    "directory": "packages/expo"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

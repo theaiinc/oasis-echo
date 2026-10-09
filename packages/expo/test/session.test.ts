@@ -2,17 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClipPlayer, DeviceSpeech, Recognizer, RecognizerEvent } from '../src/adapters.js';
 import { EchoVoiceSession } from '../src/session.js';
 import { chooseVoice } from '../src/voices.js';
-import { base64ToBytes, pcm16ToWav } from '../src/wav.js';
-
-/** Stands in for the server's event stream: the session's client finds it as the global EventSource. */
-class FakeEventSource {
-  static last: FakeEventSource | null = null;
-  private readonly listeners = new Map<string, Array<(ev: { data: string }) => void>>();
-  constructor(readonly url: string) { FakeEventSource.last = this; }
-  addEventListener(type: string, l: (ev: { data: string }) => void) { (this.listeners.get(type) ?? this.listeners.set(type, []).get(type)!).push(l); }
-  send(type: string, data: unknown) { for (const l of this.listeners.get(type) ?? []) l({ data: JSON.stringify(data) }); }
-  close() { this.listeners.clear(); }
-}
+import { base64ToBytes } from '../src/pcm.js';
+import { pcm16ToWav } from '../src/wav.js';
+import { FakeXhr } from './fakes.js';
 
 function phone() {
   let cb: ((e: RecognizerEvent) => void) | null = null;
@@ -43,26 +35,32 @@ const fakeFetch = (async (url: string, init?: RequestInit) => {
 }) as unknown as typeof fetch;
 
 const flush = () => vi.advanceTimersByTimeAsync(0);
+/** The session opened its event stream: answer it. */
+const connect = async () => { await flush(); FakeXhr.last!.respond(200); await flush(); return FakeXhr.last!; };
+const conn = { XMLHttpRequest: FakeXhr as unknown as typeof XMLHttpRequest, fetch: undefined as unknown as typeof fetch };
 const chunk = (turnId: string, text: string, extra: Record<string, unknown> = {}) => ({ turnId, text, sampleRate: 24000, final: false, filler: false, atMs: 1, ...extra });
 
 beforeEach(() => {
   vi.useFakeTimers();
   posted.length = 0;
-  (globalThis as { EventSource?: unknown }).EventSource = FakeEventSource;
+  FakeXhr.last = null;
+  FakeXhr.all = [];
+  conn.fetch = fakeFetch;
 });
 afterEach(() => {
   vi.useRealTimers();
-  delete (globalThis as { EventSource?: unknown }).EventSource;
 });
 
 describe('EchoVoiceSession', () => {
   it('listens, sends what was said as a turn, with the auth header', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://echo.test/a/maya', adapters: p, fetch: fakeFetch, lang: 'vi-VN', headers: () => ({ authorization: 'Bearer t' }) });
+    const s = new EchoVoiceSession({ baseUrl: 'https://echo.test/a/maya', adapters: p, connection: conn, lang: 'vi-VN', headers: () => ({ authorization: 'Bearer t' }) });
     const heard: Array<[string, boolean]> = [];
     s.on('userText', ({ text, final }) => heard.push([text, final]));
     expect(await s.start()).toBe(true);
-    expect(FakeEventSource.last?.url).toBe('https://echo.test/a/maya/events');
+    const xhr = await connect();
+    expect(xhr.url).toBe('https://echo.test/a/maya/events');
+    expect(xhr.headers).toMatchObject({ authorization: 'Bearer t' });
     expect(p.recognizer.start).toHaveBeenCalledWith({ lang: 'vi-VN', interimResults: true, continuous: true });
     expect(s.state).toBe('listening');
     p.recognizer.fire({ type: 'result', text: 'xin chào', isFinal: false });
@@ -76,7 +74,7 @@ describe('EchoVoiceSession', () => {
 
   it('ends an utterance after quiet when the recognizer never does, and sends a cut-off one', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch, endSilenceMs: 1000 });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn, endSilenceMs: 1000 });
     await s.start();
     p.recognizer.fire({ type: 'result', text: 'hello', isFinal: false });
     await vi.advanceTimersByTimeAsync(999);
@@ -93,11 +91,11 @@ describe('EchoVoiceSession', () => {
 
   it('speaks with the phone\'s voice, mic off meanwhile, back on once the reply is complete', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch, lang: 'vi-VN', rate: { vi: 1.15 } });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn, lang: 'vi-VN', rate: { vi: 1.15 } });
     await s.start();
-    const es = FakeEventSource.last!;
-    es.send('tts.chunk', chunk('t1', 'Dạ, anh đợi em một chút nhé.'));
-    es.send('tts.chunk', chunk('t1', 'Em xem rồi.'));
+    const es = await connect();
+    es.event('tts.chunk', chunk('t1', 'Dạ, anh đợi em một chút nhé.'));
+    es.event('tts.chunk', chunk('t1', 'Em xem rồi.'));
     await flush();
     expect(p.recognizer.abort).toHaveBeenCalled();
     expect(s.state).toBe('speaking');
@@ -109,7 +107,7 @@ describe('EchoVoiceSession', () => {
     p.spoken[1]!.done();
     await vi.advanceTimersByTimeAsync(1000);
     expect(p.recognizer.start).toHaveBeenCalledTimes(1); // the reply isn't complete yet: more may come
-    es.send('turn.complete', { turn: { id: 't1', tier: 'escalated', intent: 'x', interrupted: false, userText: '', startedAtMs: 0 } });
+    es.event('turn.complete', { turn: { id: 't1', tier: 'escalated', intent: 'x', interrupted: false, userText: '', startedAtMs: 0 } });
     await vi.advanceTimersByTimeAsync(350);
     expect(p.recognizer.start).toHaveBeenCalledTimes(2);
     expect(s.state).toBe('listening');
@@ -118,19 +116,19 @@ describe('EchoVoiceSession', () => {
 
   it('plays the server\'s voice as WAV clips, gathering chunks per clip', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch, voice: 'server', clipMs: 1000 });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn, voice: 'server', clipMs: 1000 });
     await s.start();
-    const es = FakeEventSource.last!;
+    const es = await connect();
     const half = btoa(String.fromCharCode(...new Uint8Array(24000))); // 0.5 s at 24 kHz
-    es.send('tts.chunk', chunk('t1', 'One.', { audio: half }));
+    es.event('tts.chunk', chunk('t1', 'One.', { audio: half }));
     await flush();
     expect(p.clips).toHaveLength(0);
-    es.send('tts.chunk', chunk('t1', 'Two.', { audio: half }));
+    es.event('tts.chunk', chunk('t1', 'Two.', { audio: half }));
     await flush();
     expect(p.clips).toHaveLength(1);
     expect(p.clips[0]!.wav.length).toBe(44 + 48000);
-    es.send('tts.chunk', chunk('t1', '', { audio: half, final: true }));
-    es.send('turn.complete', { turn: { id: 't1', tier: 'escalated', intent: 'x', interrupted: false, userText: '', startedAtMs: 0 } });
+    es.event('tts.chunk', chunk('t1', '', { audio: half, final: true }));
+    es.event('turn.complete', { turn: { id: 't1', tier: 'escalated', intent: 'x', interrupted: false, userText: '', startedAtMs: 0 } });
     await flush();
     expect(p.clips).toHaveLength(2);
     p.clips[0]!.end();
@@ -142,17 +140,17 @@ describe('EchoVoiceSession', () => {
 
   it('interrupting stops the agent, tells the server, ignores the rest of that reply, and listens', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn });
     await s.start();
-    const es = FakeEventSource.last!;
-    es.send('tts.chunk', chunk('t1', 'A long answer.'));
+    const es = await connect();
+    es.event('tts.chunk', chunk('t1', 'A long answer.'));
     await flush();
     s.interrupt();
     await flush();
     expect(p.speech.stop).toHaveBeenCalled();
     expect(posted.some((x) => x.url === 'https://e.test/bargein')).toBe(true);
     expect(p.recognizer.start).toHaveBeenCalledTimes(2);
-    es.send('tts.chunk', chunk('t1', 'More of it.'));
+    es.event('tts.chunk', chunk('t1', 'More of it.'));
     await flush();
     expect(p.spoken.map((x) => x.text)).toEqual(['A long answer.']);
     s.stop();
@@ -160,11 +158,12 @@ describe('EchoVoiceSession', () => {
 
   it('a server barge-in stops the agent too', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn });
     await s.start();
-    FakeEventSource.last!.send('tts.chunk', chunk('t1', 'Hi.'));
+    await connect();
+    FakeXhr.last!.event('tts.chunk', chunk('t1', 'Hi.'));
     await flush();
-    FakeEventSource.last!.send('bargein', { interruptedTurnId: 't1', atMs: 2 });
+    FakeXhr.last!.event('bargein', { interruptedTurnId: 't1', atMs: 2 });
     await flush();
     expect(p.speech.stop).toHaveBeenCalled();
     expect(s.state).toBe('listening');
@@ -174,18 +173,18 @@ describe('EchoVoiceSession', () => {
   it('without the mic permission it says so and doesn\'t start', async () => {
     const p = phone();
     p.recognizer.granted = false;
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn });
     const errors: string[] = [];
     s.on('error', (e) => errors.push(e.kind));
     expect(await s.start()).toBe(false);
     expect(errors).toEqual(['permission']);
-    expect(FakeEventSource.last === null || FakeEventSource.last.url !== 'x').toBe(true);
+    expect(FakeXhr.last).toBeNull();
     expect(p.recognizer.start).not.toHaveBeenCalled();
   });
 
   it('switches language: listening restarts in the new one', async () => {
     const p = phone();
-    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, fetch: fakeFetch, lang: 'en-US' });
+    const s = new EchoVoiceSession({ baseUrl: 'https://e.test', adapters: p, connection: conn, lang: 'en-US' });
     await s.start();
     s.setLang('vi-VN');
     expect(p.recognizer.abort).toHaveBeenCalled();
