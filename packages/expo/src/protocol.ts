@@ -62,6 +62,8 @@ export type EchoEvent =
   | { type: 'error'; source: string; error: string }
   /** The server recycled a quiet stream; reconnect if still in a call. */
   | { type: 'idle' }
+  /** The server ended the call (e.g. the plan's talk time or longest call), after saying `message`. */
+  | { type: 'call.ended'; reason: string; message: string }
   /** Any other event (a server's own, e.g. call.language), parsed JSON as sent. */
   | { type: 'other'; name: string; data: unknown };
 
@@ -109,6 +111,8 @@ export function parseEvent(name: string, data: string): EchoEvent | null {
       return { type: 'error', source: s(d['source']), error: s(d['error']) };
     case 'idle':
       return { type: 'idle' };
+    case 'call.ended':
+      return { type: 'call.ended', reason: s(d['reason']), message: s(d['message']) };
     default:
       return { type: 'other', name, data: d };
   }
