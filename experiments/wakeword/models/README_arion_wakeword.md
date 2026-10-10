@@ -72,6 +72,36 @@ At 0.4 the false wakes break down per hour as follows:
   - Almost always: "Orion" 94 %, "Hey Orion" 63 %.
   - "Hey Ryan" 38 % — counted under Ryan, which is now a positive.
 
+### `arion_any.onnx`: the shipping file (829,755 B)
+
+`arion_any.onnx` is `arion.onnx` and `arion_oi.onnx` merged into one graph whose output is `Max` of the two scores. I checked the output against the max of the two heads and it is identical. The app applies threshold, patience and refractory to that single score.
+
+Held-out evaluation, run exactly as the app uses the file (patience 2, 2 s refractory):
+
+| variant (clips) | quiet @0.4 | 5 dB @0.4 | quiet @0.5 | 5 dB @0.5 |
+|---|---|---|---|---|
+| Arion (384) | 97.1 % | 86.7 % | 96.6 % | 85.2 % |
+| "a ri on" (106) | 100 % | 89.6 % | 100 % | 88.7 % |
+| ri-on (160) | 99.4 % | 86.9 % | 98.8 % | 85.0 % |
+| Rion (150) | 94.0 % | 87.3 % | 90.7 % | 84.7 % |
+| Ryan (146) | 91.1 % | 76.0 % | 89.0 % | 72.6 % |
+| Arion ơi (222) | 99.1 % | 98.2 % | 98.2 % | 97.3 % |
+| Hey Arion (322) | 75.8 % | 65.2 % | 75.2 % | 62.4 % |
+| **all (1,490)** | **92.4 %** | **83.0 %** | **91.3 %** | **81.0 %** |
+
+False wakes per hour over 31.9 h of held-out audio:
+
+| threshold | false wakes / h |
+|---|---|
+| 0.3 | 1.51 |
+| **0.4** | **1.13** |
+| 0.5 | 0.82 |
+| 0.6 | 0.60 |
+
+The look-alike rates match `arion.onnx` with one exception: "Ari ơi" rises to 42 %, because the `arion_oi` head contributes. "Rồi", "rời", "ôn", "Ri ơi", "lion", "right on" and "Rhine" still never wake it. "Riêng" stays at 8 %, "Brian" at 31 %, "Marion ơi" at 83 % and "Orion" at 94–100 %.
+
+**Recommended threshold: 0.4.** It is about 1.1 false wakes per hour, within the owner's "~1 / h". Use 0.5 if ≤ 1 / h must be strict: it costs about 1–2 points of recall per variant (3.4 for Ryan at 5 dB, 2.8 for Hey Arion).
+
 ### Recommendation
 
 "Arion ơi" is much easier to detect reliably than a bare "Arion". Run **`arion.onnx` OR `arion_oi.onnx`** (the v1 head below, both at threshold 0.4 and patience 2):

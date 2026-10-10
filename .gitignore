@@ -29,3 +29,4 @@ experiments/wakeword/recordings
 !experiments/wakeword/models/README_arion_wakeword.md
 !experiments/wakeword/models/*_eval.json
 !experiments/wakeword/models/arion.onnx
+!experiments/wakeword/models/arion_any.onnx
