@@ -51,3 +51,26 @@ EN_SPEECH = [
  "That song is really good.", "Slow down, the light is red.", "We need to fill up the tank.", "Did you lock the house?",
  "This is the morning traffic report.", "Thanks, I'll call you back later.", "Can you open the window?",
 ]
+
+# --- v2 (2026-10-10): the wake word is just "Arion" -------------------------------------------------------------
+VI_POS_WORD = ["Arion.", "Arion!", "A-ri-ôn.", "A ri ôn!", "Arion?", "Aaa ri ôn.", "Ơ, Arion."]
+EN_POS_WORD = ["Arion.", "Arion!", "Arion?", "Air-ee-on.", "Uh-rye-on."]
+# Negative texts that now contain the wake word, or are near misses we must not punish ("a ri on" inside).
+# They are excluded from negatives (neither positive nor negative).
+NOT_NEGATIVE = {
+    "Arion.", "Ứng dụng Arion hay lắm.", "Xe này có gắn Arion.", "Mở Arion lên coi.", "Màn hình Arion sáng quá.",
+    "A ri ôn.", "Marion ơi.", "Orion.", "Hey Orion.", "Hey Marion.", "Hey Marian.", "Hey Darian.",
+    "The Arion display is on.", "Hey, Ari, on the left.", "Orion's belt is bright tonight.", "Rion.",
+}
+# clipped two-syllable "ri-on" (owner addition 2026-10-10) — positives
+VI_POS_RION = ["Ri ôn.", "Ri-ôn!", "Rion.", "Ri ôn ơi.", "Rion ơi!", "ri ôn"]
+EN_POS_RION = ["Rion.", "Ree-on!", "Ree-on?", "Rion!"]
+# common Vietnamese words close to "ri-on": negatives (train voices) and look-alike test (held-out voices)
+VI_LOOKALIKE = ["Rồi.", "Xong rồi.", "Ri.", "Rời đi.", "Riêng.", "Ôn bài.", "Ri ơi.", "Được rồi anh.", "Rồi ông ơi.",
+                "Riêng tôi.", "Rời khỏi đây.", "Ôn tập.", "Rõ rồi.", "Ra rồi.", "Ừ, rồi.", "Rì rầm.", "Đi rồi ơi.", "Bà Ri ơi."]
+# "Rion" / "Ryan" (owner addition 2026-10-10) — positives
+VI_POS_RYAN = ["Ryan.", "Ryan!", "Rai-ần.", "Rion!"]
+EN_POS_RYAN = ["Ryan.", "Ryan!", "Ryan?", "Rye-on.", "Rion.", "Rye-on!"]
+EN_LOOKALIKE = ["Brian.", "Hey Brian.", "A lion.", "The lion is sleeping.", "The Rhine river.", "Right on!",
+                "Right on time.", "Orion.", "Rio.", "Leon.", "Neon lights.", "Iron.", "Irene.", "Rain on the road."]
+NOT_NEGATIVE |= {"Hey Ryan!"}

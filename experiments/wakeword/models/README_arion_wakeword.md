@@ -1,6 +1,108 @@
-# Arion wake word ("Arion ơi" / "Hey Arion")
+# Arion wake word
 
-openWakeWord-style keyword heads for the Arion driving assistant. They run on the phone, fully offline.
+openWakeWord-style keyword heads for the Arion driving assistant. They run on the phone, fully offline, on the stock `melspectrogram.onnx` and `embedding_model.onnx`.
+
+## v2 (2026-10-11): `arion.onnx`, one head for "Arion" and its variants
+
+| file | size | wakes on |
+|---|---|---|
+| `arion.onnx` | 415 KB (414,670 B) | "Arion" (vi "a ri ôn", en "AIR-ee-on" / "uh-RYE-on"), clipped "ri-on", "Rion", "Ryan", plus "Arion ơi" and "Hey Arion" |
+| `arion_eval.json` | | full held-out results (patience 2, thresholds 0.1 to 0.7) |
+
+It uses the same I/O as the other heads: `input` [batch, 16, 96] → `output` [batch, 1].
+
+**Operating point: threshold 0.4, patience 2** (score ≥ 0.4 on 2 consecutive 80 ms frames), 2 s refractory.
+
+### The targets were not met
+
+The owner's targets were ≥ 99 % recall in a quiet car and ≥ 97 % at 5 dB car noise, with ≤ ~1 false wake per hour. One head cannot reach all three. Even at threshold 0.1, where false wakes rise to 3.5 / h, overall recall is 95 % quiet and 88 % at 5 dB.
+
+The short forms are the cost. "ri-on", "Rion" and "Ryan" are two syllables that sound like everyday words. I also tried splitting into two heads (three-syllable forms and short forms, OR-ed in the app) and a 2× larger head (128 units). At the same false-wake rate, neither gained more than about 1–2 points of recall.
+
+### Recall: held-out voices, threshold 0.4, patience 2
+
+| variant (clips) | quiet | car 10 dB | car 5 dB | car 0 dB |
+|---|---|---|---|---|
+| Arion (384) | 97.1 % | 92.7 % | 86.7 % | 74.7 % |
+| a ri on, spelled (106) | 100 % | 98.1 % | 89.6 % | 82.1 % |
+| ri-on (160) | 99.4 % | 91.3 % | 86.9 % | 73.1 % |
+| Rion (150) | 94.0 % | 84.7 % | 87.3 % | 69.3 % |
+| Ryan (146) | 91.1 % | 89.0 % | 76.0 % | 62.3 % |
+| Arion ơi (222) | 96.8 % | 96.4 % | 92.3 % | 78.8 % |
+| Hey Arion (322) | 75.8 % | 70.2 % | 65.2 % | 50.6 % |
+| **all (1,490)** | **92.0 %** | **87.5 %** | **82.2 %** | **68.7 %** |
+
+### Trade-off (patience 2)
+
+FA/h is false wakes per hour over 31.9 h of held-out audio: real Vietnamese speech (YouTube, FLEURS; clean and with car noise), music with car noise, car noise alone, MUSAN noise, and the English openWakeWord validation set.
+
+| threshold | recall quiet | recall 5 dB | FA/h |
+|---|---|---|---|
+| 0.1 | 95.2 % | 88.2 % | 3.5 |
+| 0.2 | 93.8 % | 85.4 % | 2.2 |
+| 0.3 | 92.6 % | 83.8 % | 1.4 |
+| **0.4** | **92.0 %** | **82.2 %** | **1.0** |
+| 0.5 | 91.0 % | 80.0 % | 0.72 |
+| 0.7 | 89.3 % | 75.8 % | 0.44 |
+
+Patience 1 gives a few points more recall but about twice the false wakes. For example, at threshold 0.7: 92.7 % quiet / 82.7 % at 5 dB with 1.7 / h.
+
+At 0.4 the false wakes break down per hour as follows:
+
+| source | FA/h |
+|---|---|
+| English openWakeWord validation speech | 2.1 |
+| FLEURS Vietnamese, clean | 1.6 |
+| YouTube Vietnamese + car noise | 0.58 |
+| FLEURS + car noise | 0.31 |
+| YouTube Vietnamese, clean | 0.19 |
+| music + car noise | 0 |
+| car noise | 0 |
+
+### Look-alikes: share of isolated held-out-voice clips that wake it (threshold 0.4, patience 2)
+
+- **Vietnamese:**
+  - Never: "rồi", "xong rồi", "được rồi anh", "rõ rồi", "ra rồi", "ừ, rồi", "rời đi", "rời khỏi đây", "ôn bài", "ôn tập", "Ri.", "Ri ơi", "rì rầm", "Rồi ông ơi", "anh ơi", "em ơi", "trời ơi".
+  - Sometimes: "riêng" 8 %, "Ari ơi" 8 %, "Bà Ri ơi" 8 %.
+  - Almost always: "Marion ơi" 83 %, "Orion" 100 %.
+  - Sentences that mention the product name ("Mở Arion lên coi" 50 %, "Ứng dụng Arion hay lắm" 58 %) wake it, as expected.
+- **English:**
+  - Never: "lion", "a lion", "the Rhine river", "right on", "right on time", "Irene", "neon lights", "rain on the road".
+  - Sometimes: "Brian" 31 %, "Rio" 25 %, "Hey Marion" 31 %, "Hey Darian" 25 %, "Hey Aaron" 13 %, "Iron" 6 %, "Leon" 6 %.
+  - Almost always: "Orion" 94 %, "Hey Orion" 63 %.
+  - "Hey Ryan" 38 % — counted under Ryan, which is now a positive.
+
+### Recommendation
+
+"Arion ơi" is much easier to detect reliably than a bare "Arion". Run **`arion.onnx` OR `arion_oi.onnx`** (the v1 head below, both at threshold 0.4 and patience 2):
+
+- "Arion ơi" recall rises to 99.1 % quiet / 98.2 % at 5 dB.
+- Total false wakes go to 1.13 / h.
+- Everything else keeps the numbers above.
+
+Encourage drivers to say "Arion ơi" (or "Arion" clearly) rather than "Ryan" / "Rion".
+
+### How v2 was trained
+
+The pipeline, augmentation and long negative streams are the same as v1. What is new:
+
+- **Positives:**
+  - VieNeu, all 25 voices: "Arion" spellings at 3 temperatures, plus "ri ôn" / "Rion" / "Ryan" (rejected by the PhoWhisper sanity filter: 4).
+  - Kokoro: 28 voices, 3 speeds.
+  - macOS `say`: 21 English voices plus Linh.
+  - "Arion ơi" and "Hey Arion" from v1.
+  - In 30 % of the "Arion" and "ri-on" augmentations the start fades in (a barely-voiced "A").
+  - Wider end jitter (0–350 ms) and noisier mixes (−5 to 22 dB SNR).
+- **Negatives:** v1 negatives, minus texts that now contain the word or near-misses we chose not to punish ("Arion", "Marion ơi", "Orion", "Hey Marian/Darian", …). Added Vietnamese look-alikes ("rồi", "rời", "riêng", "ôn", "Ri ơi", …) and English ones ("Brian", "lion", "Rhine", "right on", …), with held-out voices kept for the look-alike test.
+- **Model:** Head(64): 40k steps, best validation checkpoint (step 37.5k).
+
+### Limits
+
+All the v1 limits below still apply. The biggest: **no real human recordings**, so real recall may differ, and the FA/h numbers are counts of 1–30 events. The English-speech false wakes (2.1 / h at 0.4) matter less for Vietnamese cabins but are real.
+
+---
+
+# v1 (2026-10-08): "Arion ơi" / "Hey Arion" heads
 
 ## Files
 

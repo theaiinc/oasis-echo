@@ -64,13 +64,19 @@ def main():
     ap.add_argument("--max_neg_w", type=float, default=30.0)
     ap.add_argument("--drop", type=float, default=0.3); ap.add_argument("--noise", type=float, default=0.1)
     ap.add_argument("--wd", type=float, default=1e-2)
+    ap.add_argument("--groups", default="", help="comma list: train only on these positive variant groups (v2)")
+    ap.add_argument("--negtts", default="neg_tts_train"); ap.add_argument("--fa_target", type=float, default=0.3)
     a = ap.parse_args()
     tag = a.tag or f"{a.kw}_h{a.hidden}"
     rng = np.random.default_rng(0); torch.manual_seed(0)
 
     P = np.load(f"{FE}/pos_{a.kw}_train.npy").astype(np.float32)
     Pv = np.load(f"{FE}/pos_{a.kw}_val.npy").astype(np.float32)
-    NT = np.load(f"{FE}/neg_tts_train.npy", mmap_mode="r")
+    if a.groups:
+        keep = a.groups.split(",")
+        P = P[np.isin(np.load(f"{FE}/pos_{a.kw}_train_groups.npy"), keep)]
+        Pv = Pv[np.isin(np.load(f"{FE}/pos_{a.kw}_val_groups.npy"), keep)]
+    NT = np.load(f"{FE}/{a.negtts}.npy", mmap_mode="r")
     # the other keyword's positives are not used as negatives (both heads start the same assistant)
     streams, val_streams = {}, {}
     for nm in ["fleurs_train", "car_train", "music_train", "musan_train"]:
@@ -127,7 +133,7 @@ def main():
         av = score(model, np.asarray(A[a_val], np.float32))
         hours = sum(len(v) for v in vs.values()) * FRAME_S / 3600 + len(a_val) * FRAME_S / 3600
         res = {}
-        for thr in (0.3, 0.5, 0.7, 0.8, 0.9, 0.95):
+        for thr in (0.1, 0.2, 0.3, 0.5, 0.7, 0.9):
             fa = sum(count_fa(v, thr) for v in vs.values()) + count_fa(av, thr)
             res[thr] = (round(float((ps >= thr).mean()), 4), round(fa / hours, 3))
         print("   val FA@0.9 by source:", {k: count_fa(v, 0.9) for k, v in vs.items()}, flush=True)
@@ -147,8 +153,8 @@ def main():
             print(f"  mined {len(hard)} hard negatives (min score {hthr:.3f})", flush=True)
         if step % 2500 == 0 or step == a.steps:
             res, hours = validate()
-            # selection metric: recall at the lowest threshold with val FA/h <= 0.3
-            ok = [(r, thr) for thr, (r, fa) in res.items() if fa <= 0.3]
+            # selection metric: best recall at a threshold whose val FA/h <= fa_target
+            ok = [(r, thr) for thr, (r, fa) in res.items() if fa <= a.fa_target]
             m = max(ok) if ok else (0, None)
             print(f"step {step} loss {loss.item():.4f} wneg {wneg:.1f} t={time.time()-t0:.0f}s val({hours:.1f}h) {res} sel={m}", flush=True)
             if step >= a.steps * 0.5 and (best is None or m[0] >= best[0]):
