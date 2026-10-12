@@ -140,6 +140,28 @@ const VI_CONTINUATIONS = [
   'Ừm.',
 ];
 
+/** Fillers that praise the question: only said when the user asked one. */
+const QUESTION_ONLY = new Set(['Good question, one moment.', "That's a good one.", 'Câu hỏi hay, chờ chút nhé.']);
+
+/**
+ * Whether the user's words are a question: a question mark, or (transcripts often have
+ * none) an English question opening, or Vietnamese question words.
+ */
+export function isQuestion(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  if (/\?\s*$/.test(t)) return true;
+  if (/^(?:(?:so|and|but|okay|ok|hey|um|uh)[,\s]+)*(?:what|what's|whats|who|who's|whom|whose|when|where|where's|why|how|how's|which|is|are|was|were|am|do|does|did|can|could|will|would|should|shall|may|might|have|has|had|isn't|aren't|don't|doesn't|didn't|can't|won't)\b/.test(t)) return true;
+  return /(?:^|\s)(?:gì|sao|nào|ai|đâu|bao giờ|bao nhiêu|mấy|không|chưa|hả|à|nhỉ|chứ)\s*[.!]?\s*$|(?:^|\s)(?:tại sao|vì sao|làm sao|thế nào|như thế nào|có phải)(?:\s|$)/u.test(t);
+}
+
+/** The phrases fit for what the user said ("Good question" only after a question). */
+function fitting(pool: readonly string[], userText: string | undefined): readonly string[] {
+  if (userText === undefined || isQuestion(userText)) return pool;
+  const kept = pool.filter((p) => !QUESTION_ONLY.has(p));
+  return kept.length ? kept : pool;
+}
+
 /** A filler language this module has phrases for; anything else falls back to English. */
 export type FillerLanguage = 'en' | 'vi';
 
@@ -153,10 +175,11 @@ export type FillerPool = { first?: readonly string[]; continuation?: readonly st
  * Pick a random short "first-beat" filler that hasn't been used
  * recently (per the caller-provided `recent` set, which the caller
  * typically threads across turns so we don't repeat yesterday's word
- * as today's opener).
+ * as today's opener). With `userText`, phrases praising a question
+ * ("Good question") are only picked when it is one.
  */
-export function pickFirstFiller(recent?: Set<string>, lang: FillerLanguage = 'en', custom?: FillerPool): string {
-  const beats = custom?.first?.length ? custom.first : lang === 'vi' ? VI_FIRST_BEATS : FIRST_BEATS;
+export function pickFirstFiller(recent?: Set<string>, lang: FillerLanguage = 'en', custom?: FillerPool, userText?: string): string {
+  const beats = fitting(custom?.first?.length ? custom.first : lang === 'vi' ? VI_FIRST_BEATS : FIRST_BEATS, userText);
   const available = recent
     ? beats.filter((f) => !recent.has(f))
     : beats;
@@ -177,8 +200,9 @@ export function pickContinuationFiller(
   recent?: Set<string>,
   lang: FillerLanguage = 'en',
   custom?: FillerPool,
+  userText?: string,
 ): string {
-  const pool = custom?.continuation?.length ? custom.continuation : lang === 'vi' ? VI_CONTINUATIONS : CONTINUATIONS_BY_REASON[reason] ?? CONTINUATIONS_BY_REASON['unclassified'] ?? [FALLBACK];
+  const pool = fitting(custom?.continuation?.length ? custom.continuation : lang === 'vi' ? VI_CONTINUATIONS : CONTINUATIONS_BY_REASON[reason] ?? CONTINUATIONS_BY_REASON['unclassified'] ?? [FALLBACK], userText);
   // Prefer phrases we haven't used this turn OR recently across turns.
   const fresh = pool.filter((p) => !used.has(p) && !(recent?.has(p) ?? false));
   const unused = pool.filter((p) => !used.has(p));
