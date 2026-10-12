@@ -28,6 +28,31 @@ describe('EnergyVad', () => {
     for (let i = 0; i < 8; i++) vad.frame(0.1, (t += 30));
     expect(events).toEqual(['start']);
   });
+
+  it("hears a normal voice right after the agent's echo filled the mic", () => {
+    const events: string[] = [];
+    let listening = false;
+    const vad = new EnergyVad({ isListening: () => listening, onStart: () => events.push('start'), onEnd: () => events.push('end') });
+    let t = 0;
+    for (let i = 0; i < 20; i++) vad.frame(0.003, (t += 30)); // quiet room
+    for (let i = 0; i < 300; i++) vad.frame(0.009, (t += 30)); // 9 s of the agent's echo, just under the bar
+    listening = true;
+    // The user answers at once, at a normal level with gaps between words.
+    for (let i = 0; i < 40; i++) vad.frame(i % 10 < 8 ? 0.02 : 0.004, (t += 30));
+    expect(events).toEqual(['start']);
+  });
+
+  it("doesn't let soft speech raise the bar above the speaker", () => {
+    const events: string[] = [];
+    const vad = new EnergyVad({ onStart: () => events.push('start'), onEnd: () => events.push('end') });
+    let t = 0;
+    for (let i = 0; i < 20; i++) vad.frame(0.003, (t += 30));
+    // Murmuring just under the bar, in bursts too short to start an utterance...
+    for (let i = 0; i < 60; i++) vad.frame(i % 4 < 2 ? 0.0095 : 0.008, (t += 30));
+    // ...then talking normally is still heard.
+    for (let i = 0; i < 10; i++) vad.frame(0.02, (t += 30));
+    expect(events).toEqual(['start']);
+  });
 });
 
 describe('EnergyVad with background noise', () => {

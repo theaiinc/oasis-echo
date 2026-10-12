@@ -108,8 +108,11 @@ export class EnergyVad {
     const threshold = Math.max(this.opts.minRms ?? 0.01, this.floor * (this.opts.ratio ?? 3));
     const loud = rms > threshold;
     if (!this.speaking) {
-      // The floor follows the room while nobody talks.
-      if (!loud) this.floor = this.floor * 0.95 + rms * 0.05;
+      // The floor follows the room while nobody talks: down quickly, up slowly, and not
+      // while the agent speaks (its voice leaking into the mic isn't the room). Rising
+      // quickly let the agent's echo, or the user's own speech just under the bar, lift
+      // the floor toward their voice, keeping the bar ~3x above it until they shouted.
+      if (!loud && listening) this.floor = rms < this.floor ? this.floor * 0.7 + rms * 0.3 : this.floor * 0.995 + rms * 0.005;
       if (!listening || !loud) { this.loudSince = 0; return; }
       if (!this.loudSince) this.loudSince = now;
       if (now - this.loudSince >= (this.opts.startMs ?? 150)) {
