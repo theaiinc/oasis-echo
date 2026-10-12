@@ -76,4 +76,23 @@ describe('ToolTalker', () => {
     await say();
     expect(models.slice(6)).toEqual(['cheap']);
   });
+
+  it('logs where each round\'s time went, including reasoning streamed before the first word', async () => {
+    const tools = new ToolRegistry();
+    tools.register({ name: 'ask_expert', description: 'd', input_schema: { type: 'object', properties: {} }, handler: async () => ({ status: 'asked' }) });
+    let n = 0;
+    const fetchImpl = vi.fn(async () => (++n === 1
+      ? sse([{ choices: [{ delta: { reasoning_content: 'hmm, let me think' } }] },
+             { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'ask_expert', arguments: '{}' } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 900, completion_tokens: 12 } }])
+      : sse([{ choices: [{ delta: { content: 'Asked.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 950, completion_tokens: 3 } }])));
+    const info = vi.fn();
+    const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: () => logger } as any;
+    const talker = new ToolTalker({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm', systemPrompt: 's', tools, logger, fetchImpl: fetchImpl as any });
+    await collect(talker.stream({ userText: 'check', state }));
+    const rounds = info.mock.calls.filter(([msg]) => msg === 'talker round').map(([, f]) => f);
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]).toMatchObject({ model: 'm', round: 0, preChunks: 1, reasoningChars: 17, tools: 1, inputTokens: 900, outputTokens: 12, result: 'tool:ask_expert' });
+    expect(rounds[1]).toMatchObject({ round: 1, preChunks: 0, reasoningChars: 0, inputTokens: 950, outputTokens: 3, result: 'stop' });
+    for (const r of rounds) for (const k of ['headersMs', 'firstMs', 'totalMs', 'promptChars']) expect(typeof r[k]).toBe('number');
+  });
 });

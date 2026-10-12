@@ -77,7 +77,10 @@ export class ToolTalker implements Reasoner {
         temperature: this.opts.temperature ?? 0.6,
         ...(canCall ? { tools: toolSpecs, tool_choice: 'auto' } : {}),
       };
+      const roundAt = Date.now();
+      const tokensBefore = { input: inputTokens, output: outputTokens };
       const chunks = await this.open(body, input.signal);
+      const opened = this.lastOpen;
 
       let text = '';
       const calls: ToolCall[] = [];
@@ -102,6 +105,16 @@ export class ToolTalker implements Reasoner {
         }
       }
       const called = calls.filter((c) => c.function.name);
+      // Where a round's time goes: the connection (headers), the model's first word or
+      // tool call (first), and anything streamed before it (keep-alives, reasoning).
+      this.opts.logger?.info('talker round', {
+        model: opened?.model ?? this.opts.model, round,
+        headersMs: opened?.headersMs, firstMs: opened?.firstMs, totalMs: Date.now() - roundAt,
+        preChunks: opened?.preChunks, reasoningChars: opened?.reasoningChars,
+        promptChars: JSON.stringify(messages).length, messages: messages.length, tools: canCall ? toolSpecs.length : 0,
+        inputTokens: inputTokens - tokensBefore.input, outputTokens: outputTokens - tokensBefore.output,
+        result: called.length ? `tool:${called.map((c) => c.function.name).join(',')}` : finish ?? 'stop',
+      });
       // Some providers end a round with finish_reason "tool_calls" but no call and no
       // words (a malformed call dropped upstream). Ask again once rather than go silent.
       if (!called.length && !text && finish === 'tool_calls' && !retriedEmpty) {
@@ -158,6 +171,9 @@ export class ToolTalker implements Reasoner {
     return this.start(fallback!, body, signal, this.opts.timeoutMs ?? 30_000);
   }
 
+  /** Timings of the last stream started (for the per-round log). */
+  private lastOpen: { model: string; headersMs: number; firstMs: number; preChunks: number; reasoningChars: number } | null = null;
+
   /** Starts a stream and waits for its first chunk (so a slow model can be abandoned before anything is said). */
   private async start(model: string, body: Record<string, unknown>, signal: AbortSignal | undefined, firstChunkMs: number): Promise<AsyncIterable<StreamChunk>> {
     const ctl = new AbortController();
@@ -165,6 +181,7 @@ export class ToolTalker implements Reasoner {
     signal?.addEventListener('abort', onAbort, { once: true });
     const overall = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 30_000);
     const firstTimer = setTimeout(() => ctl.abort(), firstChunkMs);
+    const askedAt = Date.now();
     try {
       const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -172,6 +189,7 @@ export class ToolTalker implements Reasoner {
         body: JSON.stringify({ model, ...body }),
         signal: ctl.signal,
       });
+      const headersMs = Date.now() - askedAt;
       if (!res.ok || !res.body) throw new Error(`talker ${model} ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
       const it = sseJson(res.body, ctl.signal)[Symbol.asyncIterator]();
       // Wait for something to say (or a tool call), not keep-alives or reasoning.
@@ -184,6 +202,11 @@ export class ToolTalker implements Reasoner {
         if (d?.delta?.content || d?.delta?.tool_calls?.length || d?.finish_reason) break;
       }
       clearTimeout(firstTimer);
+      const reasoningChars = buffered.reduce((n, c) => {
+        const d = c.choices?.[0]?.delta as { reasoning_content?: string; reasoning?: string } | undefined;
+        return n + (d?.reasoning_content?.length ?? 0) + (d?.reasoning?.length ?? 0);
+      }, 0);
+      this.lastOpen = { model, headersMs, firstMs: Date.now() - askedAt, preChunks: Math.max(0, buffered.length - 1), reasoningChars };
       const rest = { [Symbol.asyncIterator]: () => it };
       return (async function* () {
         try {
