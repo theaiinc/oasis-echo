@@ -557,3 +557,46 @@ describe('Pipeline', () => {
     expect(snap.phase).not.toBe('idle');
   });
 });
+
+describe('Pipeline.announce', () => {
+  const recording = () => {
+    const said: Array<{ text: string; at: number }> = [];
+    return {
+      said,
+      tts: {
+        async *synthesize(text: string) {
+          said.push({ text, at: Date.now() });
+          yield { text, pcm: new Int16Array(240), sampleRate: 24_000, final: true };
+        },
+      },
+    };
+  };
+  const pipeline = (tts: { synthesize: (t: string) => AsyncIterable<any> }) =>
+    new Pipeline({ sessionId: 's', router: makeRouter('question_complex', 'r'), reasoner: new FakeReasoner({ tokens: [] }), tts });
+
+  it('speaks a streamed answer sentence by sentence, starting before the stream ends', async () => {
+    const { said, tts } = recording();
+    const started = Date.now();
+    async function* words() {
+      for (const w of ['Okay, here is ', 'what I found. ', 'You have three ', 'cards in progress. ', 'Two are yours.']) {
+        await new Promise((r) => setTimeout(r, 120));
+        yield w;
+      }
+    }
+    const turn = await pipeline(tts).announce(words());
+    expect(said.map((s) => s.text)).toEqual(['Okay, here is what I found.', 'You have three cards in progress.', 'Two are yours.']);
+    expect(said[0]!.at - started).toBeLessThan(400); // after the 2nd piece, not all 5 (~600 ms)
+    expect(turn.agentText).toBe('Okay, here is what I found. You have three cards in progress. Two are yours.');
+  });
+
+  it('keeps a short fixed line whole (it may be ready as one clip) and splits a long one', async () => {
+    const { said, tts } = recording();
+    const p = pipeline(tts);
+    await p.announce('Hi, this is Maya. How can I help?');
+    expect(said.map((s) => s.text)).toEqual(['Hi, this is Maya. How can I help?']);
+    said.length = 0;
+    await p.announce('First, the board has eighty-four cards in total right now. Second, three of them are in progress this week. Third, four are waiting in the todo column, and two of those have been there since last month.');
+    expect(said).toHaveLength(3);
+  });
+});
+

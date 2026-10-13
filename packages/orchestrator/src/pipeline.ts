@@ -230,7 +230,12 @@ export class Pipeline {
    * knows it was said. Callers should wait until no turn is in flight:
    * starting a turn interrupts whatever is playing.
    */
-  async announce(text: string): Promise<Turn> {
+  /**
+   * Say something outside a reply (a greeting, a lookup's answer). A stream of text is
+   * spoken sentence by sentence as it arrives, so a long answer starts playing after its
+   * first sentence instead of after the whole of it has been written and synthesized.
+   */
+  async announce(text: string | AsyncIterable<string>): Promise<Turn> {
     this.turnCounter++;
     const turnId = `a${this.turnCounter}-${Date.now().toString(36)}`;
     const startedAtMs = Date.now();
@@ -791,16 +796,27 @@ export class Pipeline {
 
   private async playText(
     turnId: string,
-    text: string,
+    text: string | AsyncIterable<string>,
   ): Promise<{ spoken: string; interrupted: boolean }> {
-    if (text.length === 0) return { spoken: '', interrupted: false };
+    if (typeof text === 'string' && text.length === 0) return { spoken: '', interrupted: false };
     const signal = this.arbiter.beginTurn(turnId, () => {});
+    const spoken: string[] = [];
     try {
-      await this.bus.emit({ type: 'tts.start', turnId, atMs: Date.now() });
-      await this.maybeApologize(turnId, signal);
-      await this.streamTts(turnId, text, signal);
-      await this.bus.emit({ type: 'tts.done', turnId, atMs: Date.now() });
-      return { spoken: text, interrupted: signal.aborted };
+      let started = false;
+      // One sentence at a time: each is synthesized and sent while the one before plays
+      // (TTS engines synthesize a whole input before returning any of it).
+      for await (const sentence of speakableSentences(text)) {
+        if (signal.aborted) break;
+        if (!started) {
+          started = true;
+          await this.bus.emit({ type: 'tts.start', turnId, atMs: Date.now() });
+          await this.maybeApologize(turnId, signal);
+        }
+        await this.streamTts(turnId, sentence, signal);
+        spoken.push(sentence);
+      }
+      if (started) await this.bus.emit({ type: 'tts.done', turnId, atMs: Date.now() });
+      return { spoken: spoken.join(' '), interrupted: signal.aborted };
     } finally {
       this.arbiter.endTurn(turnId);
     }
@@ -1173,4 +1189,24 @@ export function withUnsaidRest(spoken: string, generated: string): string {
   const rest = norm(said) && all.startsWith(norm(said)) ? all.slice(norm(said).length).trim() : said ? '' : all;
   const head = said ? `${said} [interrupted here]` : '[interrupted before saying anything]';
   return rest ? `${head} [not yet said: ${rest}]` : head;
+}
+
+/**
+ * Up to this long, a fixed line is spoken whole: greetings and fillers are often ready
+ * ahead of time as one clip, and a line this short synthesizes quickly anyway.
+ */
+const SPEAK_WHOLE_CHARS = 160;
+
+/** Text as sentences to speak, as soon as each is complete in a stream. */
+async function* speakableSentences(text: string | AsyncIterable<string>): AsyncIterable<string> {
+  if (typeof text === 'string' && text.length <= SPEAK_WHOLE_CHARS) {
+    if (text.trim()) yield text;
+    return;
+  }
+  const chunker = new SentenceChunker();
+  for await (const piece of typeof text === 'string' ? [text] : text) {
+    for (const sentence of chunker.feed(piece)) if (sentence.trim()) yield sentence;
+  }
+  const rest = chunker.flush();
+  if (rest?.trim()) yield rest;
 }
