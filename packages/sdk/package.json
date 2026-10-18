@@ -24,10 +24,14 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@huggingface/transformers": "^4.1.0"
+    "@huggingface/transformers": "^4.1.0",
+    "onnxruntime-web": "^1.30.0"
   },
   "peerDependenciesMeta": {
     "@huggingface/transformers": {
+      "optional": true
+    },
+    "onnxruntime-web": {
       "optional": true
     }
   },
@@ -39,5 +43,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "@lofcz/deepfilternet-web": "0.1.0",
+    "onnxruntime-web": "1.30.0"
   }
 }

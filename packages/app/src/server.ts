@@ -49,6 +49,7 @@ import {
 import { createLogger, Metrics, Tracer } from '@oasis-echo/telemetry';
 import { loadConfig } from './config.js';
 import { haApiError } from './ha-errors.js';
+import { serveVendor } from './vendor.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1057,6 +1058,9 @@ async function main(): Promise<void> {
       res.end(JSON.stringify(result));
       return;
     }
+
+    // The noise filter's and Silero VAD's browser files (vendor.ts).
+    if (serveVendor(req, res, url.pathname)) return;
 
     // Serve the compiled SDK as static ESM for the browser. We keep
     // this simple — no mimetype table, just .js files resolving into

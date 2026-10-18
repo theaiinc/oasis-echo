@@ -84,6 +84,7 @@ export class AudioStreamUpload {
   private sourceRate: number;
   private capturing = false;
   private handlers: Partial<AudioStreamEvents> = {};
+  private pcmListener: ((samples: Float32Array) => void) | null = null;
 
   // Client-side lookback ring buffer, sized to the configured number
   // of seconds at 16kHz. Always written to by the worklet; flushed
@@ -109,6 +110,11 @@ export class AudioStreamUpload {
     this.handlers[event] = fn;
   }
 
+  /** Every 16 kHz block from the mic, streaming or not (a client-side VAD listens here). */
+  onPcm(fn: ((samples: Float32Array) => void) | null): void {
+    this.pcmListener = fn;
+  }
+
   /** Open the WebSocket and load the resampling AudioWorklet. Idempotent. */
   async connect(): Promise<void> {
     if (this.ws) return;
@@ -128,6 +134,7 @@ export class AudioStreamUpload {
       // not actively streaming to the server. This is how we catch
       // audio from BEFORE startUtterance is called.
       this.writeLookback(resampled);
+      this.pcmListener?.(resampled);
       // Only send to server when an utterance is in progress.
       if (!this.capturing || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       try {
