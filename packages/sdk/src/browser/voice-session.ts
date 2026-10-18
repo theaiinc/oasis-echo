@@ -28,6 +28,8 @@ import { AudioPlayer } from './audio-player.js';
 import { DeviceSpeaker } from './device-speaker.js';
 import { AudioStreamUpload } from './audio-stream.js';
 import { BargeInMonitor } from './barge-in-monitor.js';
+import { createNoiseFilter, NOISE_FILTER_SAMPLE_RATE, type NoiseFilter } from './noise-filter.js';
+import { SileroVad } from './silero-vad.js';
 import { EmotionDetector } from './emotion-detector.js';
 import { MicCapture } from './mic-capture.js';
 import { EnergyVad } from './energy-vad.js';
@@ -48,6 +50,17 @@ export type VoiceSessionEvents = {
 };
 
 type Handler<T> = (payload: T) => void;
+
+export type VoiceSessionAssets = {
+  /** DeepFilterNet's AudioWorklet script (`worklet.js`). */
+  deepFilterWorklet?: string;
+  /** DeepFilterNet's wasm (`df_bg.wasm`). */
+  deepFilterWasm?: string;
+  /** Silero VAD v5 (`silero_vad_v5.onnx`). */
+  sileroModel?: string;
+  /** onnxruntime-web's wasm (`ort-wasm-simd-threaded.wasm`). */
+  ortWasm?: string;
+};
 
 export type VoiceSessionOpts = {
   /** Required — the SSE client whose events the session will react to. */
@@ -87,9 +100,31 @@ export type VoiceSessionOpts = {
    * SpeechRecognition ('recognition', the default) or the mic's loudness
    * ('energy', no dependency on the browser's speech service). A
    * recognition that fails for good (network, service not allowed, none
-   * in this browser) falls back to 'energy' on its own.
+   * in this browser) falls back to 'energy' on its own. 'silero' runs the
+   * Silero VAD model on the (filtered) mic: it tells speech from loud noise,
+   * so a noisy room doesn't hold a turn open; it falls back to 'energy' if
+   * the model can't load.
    */
-  vad?: 'recognition' | 'energy';
+  vad?: 'recognition' | 'energy' | 'silero';
+  /**
+   * Remove background noise from the mic before anything listens to it
+   * (VAD, server STT, barge-in): 'deepfilter' runs DeepFilterNet3 in the
+   * page (see noise-filter.ts). Turns the browser's own noise suppression
+   * off, which would fight it. Falls back to the raw mic if the model can't
+   * load. Default 'off'.
+   */
+  noiseFilter?: 'deepfilter' | 'off';
+  /**
+   * Where the noise filter's and Silero VAD's files are served:
+   * `<assetBase>/deepfilternet`, `/silero`, `/onnxruntime-web` (the app
+   * server's /vendor route). Default `<baseUrl>/vendor`.
+   */
+  assetBase?: string;
+  /**
+   * Exact URLs for those files, for apps that bundle them (e.g. Vite `?url`
+   * imports into hashed /assets). Each one given overrides `assetBase`.
+   */
+  assets?: VoiceSessionAssets;
   /**
    * Energy VAD: silence (ms) before the page ends an utterance itself. A server
    * that decides turn ends from the words (hosted Echo) sets this long, as a fallback.
@@ -158,8 +193,13 @@ export class VoiceSession {
   private readonly serverStt: boolean;
   private readonly baseUrl: string;
   private readonly lang: string | undefined;
-  private readonly vad: 'recognition' | 'energy';
+  private readonly vad: 'recognition' | 'energy' | 'silero';
   private energyVad: EnergyVad | null = null;
+  private sileroVad: SileroVad | null = null;
+  private readonly noiseFilterMode: 'deepfilter' | 'off';
+  private readonly assetBase: string;
+  private readonly assets: VoiceSessionAssets;
+  private noiseFilter: NoiseFilter | null = null;
   private micSource: AudioNode | null = null;
   private readonly silenceMs: number;
   private readonly vadEndSilenceMs: number | undefined;
@@ -219,6 +259,9 @@ export class VoiceSession {
     this.lang = opts.lang;
     this.voice = opts.voice ?? 'server';
     this.vad = opts.vad ?? 'recognition';
+    this.noiseFilterMode = opts.noiseFilter ?? 'off';
+    this.assetBase = (opts.assetBase ?? `${this.baseUrl}/vendor`).replace(/\/+$/, '');
+    this.assets = opts.assets ?? {};
     this.silenceMs = opts.silenceMs ?? 1200;
     this.vadEndSilenceMs = opts.vadEndSilenceMs;
     this.duckLevel = opts.duckLevel ?? 0.25;
@@ -226,7 +269,8 @@ export class VoiceSession {
     this.debouncerOpts = opts.debouncer ?? {};
     this.audioConstraints = opts.audioConstraints ?? {
       echoCancellation: true,
-      noiseSuppression: true,
+      // DeepFilterNet does this far better; both at once smear the voice.
+      noiseSuppression: this.noiseFilterMode !== 'deepfilter',
       autoGainControl: true,
     };
     // 5 instead of the old 3 — a 3-word partial ("currently I'm trying")
@@ -291,9 +335,13 @@ export class VoiceSession {
       return;
     }
 
-    this.audioCtx = new (window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-    const source = this.audioCtx.createMediaStreamSource(this.micStream);
+    const Ctx = window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    // The noise filter's model only runs at 48 kHz; the browser resamples the mic to it.
+    this.audioCtx = this.noiseFilterMode === 'deepfilter' ? new Ctx({ sampleRate: NOISE_FILTER_SAMPLE_RATE }) : new Ctx();
+    const rawSource = this.audioCtx.createMediaStreamSource(this.micStream);
+    // Everything below listens to the filtered mic.
+    const source = (await this.startNoiseFilter(rawSource)) ?? rawSource;
 
     // Agent audio goes through one output bus so the speaker can be switched off
     // and both directions can be metered for visualisations (see `levels`).
@@ -353,7 +401,8 @@ export class VoiceSession {
     });
 
     this.micSource = source;
-    if (this.serverStt && this.audioStreamReady && this.vad === 'energy') this.startEnergyVad();
+    if (this.serverStt && this.audioStreamReady && this.vad === 'silero') await this.startSileroVad();
+    else if (this.serverStt && this.audioStreamReady && this.vad === 'energy') this.startEnergyVad();
     else this.startRecognition();
 
     this.emit('hint', { text: 'say hello…' });
@@ -374,6 +423,8 @@ export class VoiceSession {
     this.recognition = null;
     this.energyVad?.stop();
     this.energyVad = null;
+    this.sileroVad?.stop();
+    this.sileroVad = null;
     this.micSource = null;
     this.bargeInMonitor?.stop();
     this.bargeInMonitor = null;
@@ -387,6 +438,8 @@ export class VoiceSession {
     this.audioStream?.close();
     this.audioStream = null;
     this.audioStreamReady = false;
+    this.noiseFilter?.destroy();
+    this.noiseFilter = null;
 
     try { this.micStream?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
     this.micStream = null;
@@ -707,10 +760,44 @@ export class VoiceSession {
 
   /* ──────────────── Internal: recognition + debouncer ──────────────── */
 
-  private startEnergyVad(): void {
-    if (this.energyVad || !this.audioCtx || !this.micSource) return;
-    this.energyVad = new EnergyVad({
+  /** The filtered mic node, or null to use the raw mic (filter off, or it couldn't load). */
+  private async startNoiseFilter(raw: AudioNode): Promise<AudioNode | null> {
+    if (this.noiseFilterMode !== 'deepfilter' || !this.audioCtx) return null;
+    try {
+      this.noiseFilter = await createNoiseFilter(this.audioCtx, raw, {
+        workletUrl: this.assets.deepFilterWorklet ?? `${this.assetBase}/deepfilternet/worklet.js`,
+        wasmUrl: this.assets.deepFilterWasm ?? `${this.assetBase}/deepfilternet/df_bg.wasm`,
+      });
+      return this.noiseFilter.output;
+    } catch (err) {
+      console.warn('[oasis] noise filter unavailable, using the raw mic', err);
+      return null;
+    }
+  }
+
+  /** Same turn handling as the energy VAD; falls back to it if the model can't load. */
+  private async startSileroVad(): Promise<void> {
+    if (this.sileroVad || this.energyVad || !this.audioStream) return;
+    const vad = new SileroVad({
+      modelUrl: this.assets.sileroModel ?? `${this.assetBase}/silero/silero_vad_v5.onnx`,
+      ortWasmUrl: this.assets.ortWasm ?? `${this.assetBase}/onnxruntime-web/ort-wasm-simd-threaded.wasm`,
       ...(this.vadEndSilenceMs ? { endSilenceMs: this.vadEndSilenceMs } : {}),
+      ...this.vadCallbacks(),
+    });
+    try {
+      await vad.load();
+    } catch (err) {
+      console.warn('[oasis] Silero VAD unavailable, using the energy VAD', err);
+      this.startEnergyVad();
+      return;
+    }
+    if (!this.voiceOn || !this.audioStream) return vad.stop();
+    this.sileroVad = vad;
+    this.audioStream.onPcm((samples) => vad.push(samples));
+  }
+
+  private vadCallbacks(): { isListening: () => boolean; onStart: () => void; onEnd: () => void; onCancel: () => void } {
+    return {
       isListening: () => !this.micPausedForTts && !this.agentSpeaking,
       onStart: () => {
         if (!this.audioStream) return;
@@ -722,12 +809,21 @@ export class VoiceSession {
         this.audioStream?.endUtterance();
         this.emit('hint', { text: 'thinking…' });
       },
-      // Steady background noise, not speech: drop it rather than make a turn of it.
+      // Noise, not speech: drop it rather than make a turn of it.
       onCancel: () => {
         this.audioStream?.abortUtterance();
         this.speculationId = null;
         this.emit('hint', { text: 'listening…' });
       },
+    };
+  }
+
+  private startEnergyVad(): void {
+    if (this.energyVad || this.sileroVad || !this.audioCtx || !this.micSource) return;
+    this.energyVad = new EnergyVad({
+      ...(this.vadEndSilenceMs ? { endSilenceMs: this.vadEndSilenceMs } : {}),
+      // onCancel: steady background noise, not speech.
+      ...this.vadCallbacks(),
     });
     this.energyVad.start(this.audioCtx, this.micSource);
   }

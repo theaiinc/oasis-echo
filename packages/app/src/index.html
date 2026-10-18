@@ -633,6 +633,7 @@
         "imports": {
           "@theaiinc/oasis-echo-sdk": "/sdk/index.js",
           "@theaiinc/oasis-echo-sdk/browser": "/sdk/browser/index.js",
+          "onnxruntime-web/wasm": "/vendor/onnxruntime-web/ort.wasm.bundle.min.mjs",
           "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.1.0"
         }
       }
@@ -795,10 +796,20 @@
       // Voice orchestration lives in the SDK now — mic/TTS arbitration,
       // speculation triggers, backchannel, interim-stability, etc.
       // This file's job is just to wire DOM updates to its events.
+      // Noisy rooms: DeepFilterNet cleans the mic, Silero VAD ends the turn when
+      // the user stops (not when the room goes quiet), and the server's STT hears
+      // the cleaned audio. ?classic=1 is the old path: the browser's own speech
+      // recognition on the raw mic (?serverstt=1 then sends audio to the server).
+      const classic = /[?&]classic=1/.test(location.search);
       const voiceSession = new VoiceSession({
         client,
         emotion: !/[?&]noemotion=1/.test(location.search),
-        serverStt: /[?&]serverstt=1/.test(location.search),
+        serverStt: !classic || /[?&]serverstt=1/.test(location.search),
+        // A/B: ?nr=0 skips the noise filter, ?vad=energy uses the loudness VAD.
+        ...(classic ? {} : {
+          noiseFilter: /[?&]nr=0/.test(location.search) ? 'off' : 'deepfilter',
+          vad: /[?&]vad=energy/.test(location.search) ? 'energy' : 'silero',
+        }),
       });
 
       client.on('user.input', (p) => {

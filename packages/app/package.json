@@ -14,12 +14,15 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@lofcz/deepfilternet-web": "0.1.0",
     "@oasis-echo/coordinator": "*",
     "@oasis-echo/orchestrator": "*",
     "@oasis-echo/reasoning": "*",
     "@oasis-echo/reflex": "*",
     "@oasis-echo/telemetry": "*",
     "@oasis-echo/types": "*",
+    "@ricky0123/vad-web": "0.0.31",
+    "onnxruntime-web": "1.30.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

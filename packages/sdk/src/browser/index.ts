@@ -15,3 +15,5 @@ export * from './barge-in-monitor.js';
 export * from './audio-stream.js';
 export * from './voice-session.js';
 export * from './energy-vad.js';
+export * from './noise-filter.js';
+export * from './silero-vad.js';
