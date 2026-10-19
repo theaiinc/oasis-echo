@@ -411,6 +411,7 @@ export class VoiceSession {
 
   /** Tear down the voice stack. Safe to call when already stopped. */
   stop(): void {
+    this.clearThinking();
     this.voiceOn = false;
     this.shouldListen = false;
     this.turnDebouncer?.cancel();
@@ -796,18 +797,72 @@ export class VoiceSession {
     this.audioStream.onPcm((samples) => vad.push(samples));
   }
 
+  /** How long "thinking…" may last with nothing back (no transcript, no reply) before the page listens again. */
+  private static readonly THINKING_TIMEOUT_MS = 20_000;
+  private thinkingTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The user stopped talking: a transcript or a reply should follow. If neither comes (the
+   * server lost the utterance, a long lookup held the turn, the socket dropped), go back to
+   * listening and say so, instead of showing "thinking…" for the rest of the call.
+   */
+  private armThinking(): void {
+    this.clearThinking();
+    this.thinkingTimer = setTimeout(() => {
+      this.thinkingTimer = null;
+      if (!this.voiceOn || this.agentSpeaking) return;
+      this.audioStream?.abortUtterance();
+      this.speculationId = null;
+      this.emit('hint', { text: "didn't catch that — listening…", warn: true });
+    }, VoiceSession.THINKING_TIMEOUT_MS);
+  }
+
+  private clearThinking(): void {
+    if (this.thinkingTimer) clearTimeout(this.thinkingTimer);
+    this.thinkingTimer = null;
+  }
+
+  /** Reopen a dropped listening socket: right away, then backing off to 8 s between tries. */
+  private reconnectingAudio = false;
+
+  private async reconnectAudio(stream: AudioStreamUpload): Promise<void> {
+    if (this.reconnectingAudio) return;
+    this.reconnectingAudio = true;
+    this.clearThinking();
+    this.emit('hint', { text: 'reconnecting…', warn: true });
+    try {
+      for (let attempt = 0; this.voiceOn && this.audioStream === stream; attempt++) {
+        try {
+          await stream.reopen();
+          this.audioStreamReady = true;
+          this.emit('hint', { text: 'listening…' });
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, Math.min(8_000, 500 * 2 ** attempt)));
+        }
+      }
+    } finally {
+      this.reconnectingAudio = false;
+    }
+  }
+
   private vadCallbacks(): { isListening: () => boolean; onStart: () => void; onEnd: () => void; onCancel: () => void } {
     return {
       isListening: () => !this.micPausedForTts && !this.agentSpeaking,
       onStart: () => {
         if (!this.audioStream) return;
+        this.clearThinking();
+        // The listening socket is down (being reopened): don't pretend to listen.
+        if (!this.audioStreamReady) return void this.emit('hint', { text: 'reconnecting…', warn: true });
         this.speculationId = newSpeculationId();
         this.audioStream.startUtterance(this.speculationId);
         this.emit('hint', { text: 'listening…' });
       },
       onEnd: () => {
+        if (!this.audioStreamReady) return;
         this.audioStream?.endUtterance();
         this.emit('hint', { text: 'thinking…' });
+        this.armThinking();
       },
       // Noise, not speech: drop it rather than make a turn of it.
       onCancel: () => {
@@ -1002,8 +1057,10 @@ export class VoiceSession {
     const stream = new AudioStreamUpload({ audioContext: this.audioCtx, source, url: audioUrl.toString() });
     stream.on('partial', (text) => this.emit('hint', { text: 'listening…' }));
     stream.on('final', (payload) => {
+      this.clearThinking();
       const t = (payload.text ?? '').trim();
-      if (!t) return;
+      // Nothing heard: say so rather than sit on "thinking…".
+      if (!t) return void this.emit('hint', { text: 'listening…' });
       const commitSpecId = payload.speculationId ?? this.speculationId ?? null;
       this.speculationId = null;
       this.speculationFiredForBuffer = '';
@@ -1015,7 +1072,10 @@ export class VoiceSession {
       this.audioStreamReady = false;
       this.emit('error', { kind: 'server-stt', message: String(err) });
     });
-    stream.on('close', () => { this.audioStreamReady = false; });
+    stream.on('close', (unexpected) => {
+      this.audioStreamReady = false;
+      if (unexpected && this.voiceOn) void this.reconnectAudio(stream);
+    });
     this.audioStream = stream;
     try {
       await stream.connect();
@@ -1031,8 +1091,8 @@ export class VoiceSession {
 
   private wireClientEvents(): void {
     this.clientUnsubs.push(
-      this.client.on('tts.chunk', (p) => this.onTtsChunk(p as never)),
-      this.client.on('turn.complete', (p) => this.onTurnComplete(p as never)),
+      this.client.on('tts.chunk', (p) => { this.clearThinking(); this.onTtsChunk(p as never); }),
+      this.client.on('turn.complete', (p) => { this.clearThinking(); this.onTurnComplete(p as never); }),
       this.client.on('bargein', (p) => {
         const interruptedTurnId = (p as { interruptedTurnId?: string }).interruptedTurnId;
         if (interruptedTurnId) {
@@ -1040,6 +1100,8 @@ export class VoiceSession {
           this.completedTurns.add(interruptedTurnId);
         }
         this.stopSpeaking();
+        this.clearThinking();
+        if (this.voiceOn) this.emit('hint', { text: 'listening…' });
       }),
       this.client.on('tool.use', (p) => {
         const name = (p as { name: string }).name;

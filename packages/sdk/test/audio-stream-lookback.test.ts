@@ -200,3 +200,39 @@ describe('AudioStreamUpload lookback ring buffer', () => {
     expect(flushed.length).toBe(100);
   });
 });
+
+describe('AudioStreamUpload after its socket drops', () => {
+  it('reports the drop as unexpected, and reopens the socket keeping the mic pipeline', async () => {
+    const stubs = setupBrowserStubs();
+    const { AudioStreamUpload } = await import('../src/browser/audio-stream.js');
+    const audioContext = { sampleRate: 16000, audioWorklet: { addModule: async () => {} } } as unknown as AudioContext;
+    const s = new AudioStreamUpload({ audioContext, source: { connect: () => {}, disconnect: () => {} } as unknown as AudioNode });
+    const closes: boolean[] = [];
+    s.on('close', (unexpected) => closes.push(unexpected));
+    await s.connect();
+    await new Promise((r) => setTimeout(r, 5));
+    const first = stubs.getWsInstance();
+    expect(s.isOpen).toBe(true);
+
+    // The network drops it (a phone locking, a server restart).
+    first.readyState = 3;
+    (first.onclose as () => void)();
+    expect(closes).toEqual([true]);
+    expect(s.isOpen).toBe(false);
+
+    await s.reopen();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(stubs.getWsInstance()).not.toBe(first);
+    expect(s.isOpen).toBe(true);
+    stubs.fireMicFrame(new Float32Array(160));
+    s.startUtterance('sp-2');
+    expect(stubs.wsSent.some((m) => typeof m === 'string' && m.includes('sp-2'))).toBe(true);
+
+    // A close the page asked for is not a drop.
+    const second = stubs.getWsInstance();
+    s.close();
+    (second.onclose as () => void)?.();
+    expect(closes).toEqual([true]);
+  });
+});
+

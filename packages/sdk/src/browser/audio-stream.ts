@@ -29,7 +29,8 @@ export type AudioStreamEvents = {
   partial: (text: string) => void;
   final: (payload: { text: string; speculationId: string | null }) => void;
   open: () => void;
-  close: () => void;
+  /** `unexpected`: the connection dropped, rather than close() being called. */
+  close: (unexpected: boolean) => void;
   error: (err: unknown) => void;
 };
 
@@ -83,6 +84,8 @@ export class AudioStreamUpload {
   private workletNode: AudioWorkletNode | null = null;
   private sourceRate: number;
   private capturing = false;
+  /** close() was called: the socket closing then isn't a dropped connection. */
+  private closing = false;
   private handlers: Partial<AudioStreamEvents> = {};
   private pcmListener: ((samples: Float32Array) => void) | null = null;
 
@@ -148,7 +151,22 @@ export class AudioStreamUpload {
     // 2. Open the WebSocket. Events surface through the registered
     // handlers — we do NOT buffer messages before open; callers should
     // await `connect()` before `startUtterance()`.
-    await new Promise<void>((resolve, reject) => {
+    await this.openSocket();
+  }
+
+  /**
+   * Open the WebSocket again after it dropped (a phone locking, a network change, a
+   * server restart), keeping the mic and resampler as they are. A dropped socket used to
+   * leave the call deaf: the VAD kept hearing speech, but nothing reached the server.
+   */
+  async reopen(): Promise<void> {
+    if (!this.workletNode || this.isOpen) return;
+    this.closing = false;
+    await this.openSocket();
+  }
+
+  private openSocket(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(this.url);
       this.ws = ws;
       ws.binaryType = 'arraybuffer';
@@ -162,7 +180,7 @@ export class AudioStreamUpload {
       };
       ws.onclose = () => {
         this.capturing = false;
-        this.handlers.close?.();
+        if (this.ws === ws) this.handlers.close?.(!this.closing);
       };
       ws.onmessage = (ev) => {
         if (typeof ev.data !== 'string') return;
@@ -271,6 +289,7 @@ export class AudioStreamUpload {
   }
 
   close(): void {
+    this.closing = true;
     this.capturing = false;
     try { this.workletNode?.disconnect(); } catch { /* ignore */ }
     this.workletNode = null;
